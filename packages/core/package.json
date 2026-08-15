@@ -1,0 +1,27 @@
+{
+  "name": "@awos/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "awos-core": "./dist/main.js",
+    "awos-permission-mcp": "./dist/permission-mcp/main.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "watch": "tsc -b --watch --preserveWatchOutput",
+    "dev": "cross-env AWOS_TOKEN=dev-token AWOS_LOG_LEVEL=debug node --watch dist/main.js",
+    "start": "node dist/main.js",
+    "test": "npm run build && node --test \"dist/**/*.test.js\"",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@awos/protocol": "*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.13"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "agentic-work-os",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A lightweight harness that drives Claude Code CLI and OpenAI Codex in one thread.",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/ui",
+    "apps/desktop"
+  ],
+  "engines": {
+    "node": ">=20.10"
+  },
+  "scripts": {
+    "build": "npm run build --workspace @awos/protocol && npm run build --workspace @awos/core && npm run build --workspace @awos/ui",
+    "typecheck": "tsc -b packages/protocol packages/core && npm run typecheck --workspace @awos/ui",
+    "test": "npm run test --workspace @awos/core && npm run test --workspace @awos/ui",
+    "dev": "npm run build --workspace @awos/protocol && npm run build --workspace @awos/core && concurrently -n tsc,core,ui -c gray,cyan,magenta \"npm run watch --workspace @awos/core\" \"npm run dev --workspace @awos/core\" \"npm run dev --workspace @awos/ui\"",
+    "dev:core": "npm run dev --workspace @awos/core",
+    "dev:ui": "npm run dev --workspace @awos/ui",
+    "desktop": "npm run build --workspace @awos/protocol && npm run build --workspace @awos/core && npm run dev --workspace @awos/desktop",
+    "desktop:build": "npm run build --workspace @awos/desktop",
+    "clean": "rimraf packages/*/dist apps/ui/dist"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.2"
+  }
+}

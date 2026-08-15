@@ -1,0 +1,17 @@
+{
+  "name": "@awos/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./claude": { "types": "./dist/claude-wire.d.ts", "default": "./dist/claude-wire.js" },
+    "./codex": { "types": "./dist/codex-wire.d.ts", "default": "./dist/codex-wire.js" }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rimraf dist"
+  }
+}

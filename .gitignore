@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.local
+.DS_Store
+
+# harness runtime state
+.awos/
+data/
+
+# tauri
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/

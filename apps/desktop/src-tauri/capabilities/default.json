@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal capability set. The UI talks to the core over a WebSocket, so it needs no Tauri command surface of its own.",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open"]
+}

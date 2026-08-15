@@ -1,0 +1,265 @@
+/**
+ * The normalized event model.
+ *
+ * Both adapters translate their native wire format into this union and never leak
+ * native shapes upward. The UI knows about `HarnessEvent` and nothing else.
+ *
+ * Two invariants:
+ *   1. Adapters never synthesize an event for a capability the agent lacks. If Claude
+ *      doesn't stream incremental command output, it emits no `tool.output`. The UI
+ *      degrades; it does not lie.
+ *   2. `seq` is assigned by the ThreadStore, never by an adapter. It is the single
+ *      ordering authority across two concurrently running processes.
+ */
+
+export type AgentId = 'claude' | 'codex';
+
+export const AGENT_IDS: readonly AgentId[] = ['claude', 'codex'] as const;
+
+export function isAgentId(value: unknown): value is AgentId {
+  return value === 'claude' || value === 'codex';
+}
+
+/** Envelope fields present on every event. */
+export interface HarnessEventMeta {
+  /** uuid, unique across all threads */
+  id: string;
+  /** monotonic within a thread, assigned by the store; the canonical ordering */
+  seq: number;
+  threadId: string;
+  /** which agent produced this; `null` for harness-level events (e.g. user input) */
+  agent: AgentId | null;
+  /** harness turn id, `null` for events outside a turn (spawn, exit) */
+  turnId: string | null;
+  /** epoch ms */
+  ts: number;
+}
+
+// ---------------------------------------------------------------------------
+// Bodies
+// ---------------------------------------------------------------------------
+
+/** The user's own message, recorded before dispatch so replay can render it. */
+export interface UserMessageBody {
+  kind: 'user.message';
+  text: string;
+  /** True when this text carried a replay preamble that we stripped for display. */
+  hadReplay: boolean;
+}
+
+export interface TurnStartedBody {
+  kind: 'turn.started';
+  /** Native session id of the agent taking the turn, once known. */
+  nativeSessionId: string | null;
+}
+
+export type TurnStopReason =
+  | 'completed'
+  | 'interrupted'
+  | 'error'
+  | 'max_turns'
+  | 'max_budget';
+
+export interface TurnCompletedBody {
+  kind: 'turn.completed';
+  reason: TurnStopReason;
+  /** Human-readable failure text when `reason` is `error`. */
+  error: string | null;
+  durationMs: number | null;
+}
+
+export interface MessageDeltaBody {
+  kind: 'message.delta';
+  /** Stable id for the message being built, so the UI can append in place. */
+  itemId: string;
+  text: string;
+}
+
+export interface MessageCompletedBody {
+  kind: 'message.completed';
+  itemId: string;
+  text: string;
+}
+
+export interface ReasoningDeltaBody {
+  kind: 'reasoning.delta';
+  itemId: string;
+  text: string;
+}
+
+export interface ReasoningCompletedBody {
+  kind: 'reasoning.completed';
+  itemId: string;
+  text: string;
+}
+
+/**
+ * Coarse classification so the UI can pick an icon and a renderer without
+ * knowing every tool name either agent might invent.
+ */
+export type ToolKind =
+  | 'command'
+  | 'file_read'
+  | 'file_edit'
+  | 'search'
+  | 'web'
+  | 'task'
+  | 'todo'
+  | 'mcp'
+  | 'other';
+
+export interface ToolStartedBody {
+  kind: 'tool.started';
+  itemId: string;
+  /** Native tool name, e.g. `Bash`, `Edit`, `command_execution`. */
+  name: string;
+  toolKind: ToolKind;
+  /** One-line summary for the collapsed view, e.g. the command line. */
+  title: string;
+  /** Raw input, rendered when expanded. */
+  input: unknown;
+}
+
+export interface ToolOutputBody {
+  kind: 'tool.output';
+  itemId: string;
+  stream: 'stdout' | 'stderr';
+  chunk: string;
+}
+
+export interface ToolCompletedBody {
+  kind: 'tool.completed';
+  itemId: string;
+  status: 'ok' | 'error' | 'denied' | 'aborted';
+  /** Final output text; may be empty when the agent streamed it via `tool.output`. */
+  output: string;
+  exitCode: number | null;
+}
+
+export type PlanItemStatus = 'pending' | 'in_progress' | 'completed';
+
+export interface PlanItem {
+  text: string;
+  status: PlanItemStatus;
+}
+
+export interface PlanUpdatedBody {
+  kind: 'plan.updated';
+  items: PlanItem[];
+}
+
+/**
+ * A cumulative unified diff of everything the current turn has changed so far.
+ *
+ * Like the plan, this is a snapshot rather than an increment: each event supersedes the
+ * previous one, and a new turn resets it. Only agents that report a turn-level diff emit
+ * this — for the others the panel simply stays closed rather than showing a guess
+ * assembled from individual edits.
+ */
+export interface DiffUpdatedBody {
+  kind: 'diff.updated';
+  patch: string;
+}
+
+export interface ApprovalOption {
+  /** Value echoed back in `ApprovalDecision.optionId`. */
+  id: string;
+  label: string;
+  /** `allow` variants proceed, `deny` variants block. */
+  behavior: 'allow' | 'deny';
+  /** Remember the decision for the rest of the session. */
+  persistent: boolean;
+}
+
+export interface ApprovalRequestedBody {
+  kind: 'approval.requested';
+  approvalId: string;
+  /** What is being requested, e.g. `Bash`, `apply_patch`. */
+  toolName: string;
+  toolKind: ToolKind;
+  title: string;
+  /** Command line, patch, or serialized input — shown in the dialog body. */
+  detail: string;
+  input: unknown;
+  options: ApprovalOption[];
+}
+
+export interface ApprovalResolvedBody {
+  kind: 'approval.resolved';
+  approvalId: string;
+  optionId: string;
+  behavior: 'allow' | 'deny';
+  /** True when resolved by shutdown/timeout rather than the user. */
+  auto: boolean;
+}
+
+export interface UsageBody {
+  kind: 'usage';
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  costUsd: number | null;
+}
+
+export type AgentStatus = 'spawning' | 'ready' | 'busy' | 'idle' | 'exited' | 'failed';
+
+export interface AgentStatusBody {
+  kind: 'agent.status';
+  status: AgentStatus;
+  /** Model in use, when the agent reports one. */
+  model: string | null;
+  detail: string | null;
+}
+
+export interface ErrorBody {
+  kind: 'error';
+  message: string;
+  /** `fatal` tears down the agent process; `turn` fails only the current turn. */
+  severity: 'turn' | 'fatal';
+}
+
+/** Escape hatch: a native event we chose not to model. Hidden by default in the UI. */
+export interface RawBody {
+  kind: 'raw';
+  label: string;
+  payload: unknown;
+}
+
+export type HarnessEventBody =
+  | UserMessageBody
+  | TurnStartedBody
+  | TurnCompletedBody
+  | MessageDeltaBody
+  | MessageCompletedBody
+  | ReasoningDeltaBody
+  | ReasoningCompletedBody
+  | ToolStartedBody
+  | ToolOutputBody
+  | ToolCompletedBody
+  | PlanUpdatedBody
+  | DiffUpdatedBody
+  | ApprovalRequestedBody
+  | ApprovalResolvedBody
+  | UsageBody
+  | AgentStatusBody
+  | ErrorBody
+  | RawBody;
+
+export type HarnessEventKind = HarnessEventBody['kind'];
+
+export type HarnessEvent = HarnessEventMeta & HarnessEventBody;
+
+/** What an adapter emits, before the store stamps identity and ordering. */
+export type AdapterEvent = HarnessEventBody & {
+  turnId?: string | null;
+  ts?: number;
+};
+
+/** Narrow a `HarnessEvent` to one body kind. */
+export function isKind<K extends HarnessEventKind>(
+  event: HarnessEvent,
+  kind: K,
+): event is HarnessEvent & Extract<HarnessEventBody, { kind: K }> {
+  return event.kind === kind;
+}
