@@ -8,7 +8,7 @@ import type {
   ThreadSummary,
 } from '@awos/protocol';
 import { HarnessClient, resolveClientOptions, type ConnectionStatus } from '@/lib/client';
-import { foldTranscript } from '@/lib/transcript';
+import { TranscriptFolder } from '@/lib/transcript';
 
 /**
  * All harness state in one hook.
@@ -188,7 +188,14 @@ export function useHarness() {
     [client],
   );
 
-  const transcript = useMemo(() => foldTranscript(events), [events]);
+  // The folder keeps the fold's state between renders so a streaming delta costs one
+  // event rather than the whole log. It works out for itself when the array was appended
+  // to and when it was replaced, so switching threads and resyncing need nothing here.
+  const folderRef = useRef<TranscriptFolder | null>(null);
+  if (folderRef.current === null) folderRef.current = new TranscriptFolder();
+  const folder = folderRef.current;
+
+  const transcript = useMemo(() => folder.fold(events), [folder, events]);
   const activeThread = useMemo(
     () => threads.find((t) => t.id === activeThreadId) ?? null,
     [threads, activeThreadId],
