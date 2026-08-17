@@ -3,6 +3,7 @@ import { AlertTriangle, Brain, ChevronRight, Info } from 'lucide-react';
 import type { TranscriptItem } from '@/lib/transcript';
 import { AGENT_STYLE } from './AgentBadge';
 import { ToolBlock } from './ToolBlock';
+import { useHarnessContext } from '@/state/HarnessContext';
 import { cn } from '@/lib/utils';
 
 /**
@@ -12,13 +13,8 @@ import { cn } from '@/lib/utils';
  * someone back down while they're reading earlier output is the single most irritating
  * thing a streaming chat UI can do.
  */
-export function Transcript({
-  items,
-  busy,
-}: {
-  items: TranscriptItem[];
-  busy: boolean;
-}): React.JSX.Element {
+export function Transcript({ items }: { items: TranscriptItem[] }): React.JSX.Element {
+  const busy = useHarnessContext().runtime?.busyWith != null;
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
 

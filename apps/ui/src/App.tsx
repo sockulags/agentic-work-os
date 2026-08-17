@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { X } from 'lucide-react';
-import type { AgentCapabilities, AgentAvailability, AgentId, PermissionMode } from '@awos/protocol';
-import { useHarness } from '@/hooks/useHarness';
+import type { PermissionMode } from '@awos/protocol';
+import { useHarnessContext } from '@/state/HarnessContext';
 import { ThreadSidebar } from '@/components/ThreadSidebar';
 import { Transcript } from '@/components/Transcript';
 import { Composer } from '@/components/Composer';
@@ -18,24 +18,8 @@ const PERMISSION_MODES: Array<{ value: PermissionMode; label: string }> = [
   { value: 'bypassPermissions', label: 'Bypass' },
 ];
 
-export function capabilitiesForTurn(
-  availability: AgentAvailability[],
-  turnAgent: AgentId | null,
-): AgentCapabilities | undefined {
-  if (turnAgent === null) return undefined;
-  return availability.find((entry) => entry.agent === turnAgent)?.capabilities;
-}
-
 export default function App(): React.JSX.Element {
-  const h = useHarness();
-  const busyWith = h.runtime?.busyWith ?? null;
-  const activeAgent = h.activeThread?.activeAgent ?? 'claude';
-  const lastTurnAgent = h.runtime?.lastTurnAgent ?? null;
-  const pendingApproval = h.runtime?.pendingApprovals[0] ?? null;
-
-  // The Changes panel describes the last completed/current turn, not the agent selected
-  // for the next message. The composer is intentionally still driven by activeAgent.
-  const lastTurnCapabilities = capabilitiesForTurn(h.availability, lastTurnAgent);
+  const h = useHarnessContext();
 
   // Notices are transient; they shouldn't linger after the user has moved on.
   useEffect(() => {
@@ -46,13 +30,7 @@ export default function App(): React.JSX.Element {
 
   return (
     <div className="flex h-full">
-      <ThreadSidebar
-        threads={h.threads}
-        activeThreadId={h.activeThreadId}
-        onOpen={(id) => void h.openThread(id)}
-        onCreate={(cwd, agent) => h.createThread(cwd, agent)}
-        onDelete={(id) => void h.deleteThread(id)}
-      />
+      <ThreadSidebar />
 
       <main className="flex min-w-0 flex-1 flex-col">
         <Header
@@ -84,34 +62,15 @@ export default function App(): React.JSX.Element {
           <EmptyState connected={h.status === 'open'} />
         ) : (
           <>
-            <PlanPanel items={h.runtime?.plan ?? []} />
-            <ChangesPanel
-              patch={h.runtime?.diff ?? null}
-              agent={lastTurnAgent}
-              // Assume support until the probe answers: showing "no diff" for a beat
-              // during startup would be a lie that corrects itself, which is worse than
-              // showing nothing.
-              supportsTurnDiff={lastTurnCapabilities?.turnDiff ?? true}
-              hasActivity={h.transcript.items.length > 0}
-            />
-            <Transcript items={h.transcript.items} busy={busyWith !== null} />
-            <Composer
-              agent={activeAgent}
-              onAgentChange={(agent) => void h.setAgent(agent)}
-              onSend={(text) => void h.send(text, activeAgent)}
-              onInterrupt={() => void h.interrupt()}
-              busyWith={busyWith}
-              availability={h.availability}
-              disabled={h.status !== 'open'}
-            />
+            <PlanPanel />
+            <ChangesPanel />
+            <Transcript items={h.transcript.items} />
+            <Composer />
           </>
         )}
       </main>
 
-      <ApprovalDialog
-        approval={pendingApproval}
-        onResolve={(approvalId, optionId) => void h.resolveApproval(approvalId, optionId)}
-      />
+      <ApprovalDialog />
     </div>
   );
 }

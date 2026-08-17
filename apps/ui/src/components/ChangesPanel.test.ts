@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import type { AgentAvailability, AgentCapabilities } from '@awos/protocol';
-import { capabilitiesForTurn } from './App';
+import { capabilitiesForTurn } from './ChangesPanel';
 
 const capabilities = (turnDiff: boolean): AgentCapabilities => ({
   streamingToolOutput: true,

@@ -1,10 +1,19 @@
 import { useMemo, useState } from 'react';
 import { ChevronRight, GitCompare, Info } from 'lucide-react';
-import type { AgentId } from '@awos/protocol';
+import type { AgentAvailability, AgentCapabilities, AgentId } from '@awos/protocol';
 import { parseUnifiedDiff } from '@/lib/diff';
 import { DiffView } from './DiffView';
 import { AGENT_STYLE } from './AgentBadge';
+import { useHarnessContext } from '@/state/HarnessContext';
 import { cn } from '@/lib/utils';
+
+export function capabilitiesForTurn(
+  availability: AgentAvailability[],
+  turnAgent: AgentId | null,
+): AgentCapabilities | undefined {
+  if (turnAgent === null) return undefined;
+  return availability.find((entry) => entry.agent === turnAgent)?.capabilities;
+}
 
 /**
  * Cumulative file changes for the current turn.
@@ -18,17 +27,17 @@ import { cn } from '@/lib/utils';
  * at file changes by parsing an agent's prose would produce a view that is wrong in ways
  * the user cannot detect, which is worse than admitting the gap.
  */
-export function ChangesPanel({
-  patch,
-  agent,
-  supportsTurnDiff,
-  hasActivity,
-}: {
-  patch: string | null;
-  agent: AgentId | null;
-  supportsTurnDiff: boolean;
-  hasActivity: boolean;
-}): React.JSX.Element | null {
+export function ChangesPanel(): React.JSX.Element | null {
+  const h = useHarnessContext();
+  const patch = h.runtime?.diff ?? null;
+  // The panel describes the last completed/current turn, not the agent selected for the
+  // next message. The composer is intentionally still driven by activeAgent.
+  const agent = h.runtime?.lastTurnAgent ?? null;
+  // Assume support until the probe answers: showing "no diff" for a beat during startup
+  // would be a lie that corrects itself, which is worse than showing nothing.
+  const supportsTurnDiff = capabilitiesForTurn(h.availability, agent)?.turnDiff ?? true;
+  const hasActivity = h.transcript.items.length > 0;
+
   const [open, setOpen] = useState(false);
   const trimmed = patch?.trim() ?? '';
 

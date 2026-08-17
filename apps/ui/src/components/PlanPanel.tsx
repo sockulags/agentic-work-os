@@ -1,5 +1,5 @@
 import { Circle, CircleDot, CheckCircle2 } from 'lucide-react';
-import type { PlanItem } from '@awos/protocol';
+import { useHarnessContext } from '@/state/HarnessContext';
 import { cn } from '@/lib/utils';
 
 /**
@@ -8,7 +8,8 @@ import { cn } from '@/lib/utils';
  * Both agents replace the whole plan on every update rather than patching items, so this
  * renders the latest snapshot and keeps no history of its own.
  */
-export function PlanPanel({ items }: { items: PlanItem[] }): React.JSX.Element | null {
+export function PlanPanel(): React.JSX.Element | null {
+  const items = useHarnessContext().runtime?.plan ?? [];
   if (items.length === 0) return null;
 
   const done = items.filter((item) => item.status === 'completed').length;
