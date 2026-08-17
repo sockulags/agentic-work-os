@@ -7,7 +7,7 @@
     "frontendDist": "../../ui/dist",
     "devUrl": "http://localhost:5180",
     "beforeDevCommand": "npm run ui:dev",
-    "beforeBuildCommand": "npm run ui:build"
+    "beforeBuildCommand": "npm run prebuild"
   },
   "app": {
     "windows": [],
@@ -18,8 +18,15 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
     "resources": {
-      "../../../packages/core/dist/": "core/"
+      "../../../packages/core/dist-bundle/": "core/"
     }
   }
 }

@@ -231,13 +231,15 @@ change is a compile error in every consumer rather than a runtime surprise.
 
 ## 9. What v1 deliberately does not do
 
-- **No diff parity between agents.** Codex reports a cumulative turn diff via
-  `turn/diff/updated`, which the Changes panel renders side-by-side. Claude has no
-  equivalent in the stream-json protocol: its `Edit`/`Write` results are prose
-  confirmations, not patches. Rather than reconstruct a diff by parsing that prose — which
-  would be wrong in ways the user cannot detect — the panel states plainly that the agent
-  reports none. Closing the gap properly means capturing the working tree around the turn,
-  not interpreting tool output.
+- **Diff parity via working-tree snapshots.** Codex reports a cumulative turn diff via
+  `turn/diff/updated`. Claude has no equivalent in the stream-json protocol: its
+  `Edit`/`Write` results are prose confirmations, not patches. Rather than reconstruct a
+  diff by parsing that prose — which would be wrong in ways the user cannot detect — the
+  orchestrator captures the working tree with a throwaway-index git snapshot before and
+  after any turn whose agent lacks a native diff (`capabilities.turnDiff === false`), and
+  emits the delta as the same `diff.updated` event Codex produces (`util/git.ts`). Ground
+  truth from the filesystem, never an interpretation of tool output. It is a no-op outside
+  a git repository, and Codex is never shadowed since it reports its own.
 - **No multi-agent parallelism inside one thread.** Two agents on the same working
   directory at the same time is a correctness problem, not a feature.
 - **No summarization.** By your decision — full replay only.

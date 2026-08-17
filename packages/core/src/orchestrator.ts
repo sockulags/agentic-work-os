@@ -16,6 +16,7 @@ import { CodexAdapter } from './adapters/codex.js';
 import { PermissionBridge } from './permission-bridge.js';
 import { ThreadStore } from './store/thread-store.js';
 import { applyReplay, buildReplay, hasReplay, stripReplay } from './store/replay.js';
+import { snapshotWorkingTree, diffTrees } from './util/git.js';
 import { createLogger } from './util/logger.js';
 
 const log = createLogger('orchestrator');
@@ -150,12 +151,28 @@ class Thread {
     const payload = applyReplay(replay.preamble, text);
     const adapter = this.#adapter(agent);
 
+    // Claim the turn synchronously, before any await, so a second concurrent send sees
+    // the thread busy and is rejected rather than racing in.
     this.#busyWith = agent;
     this.#onState();
+
+    // Agents that don't report their own turn diff (Claude) get one synthesized from a
+    // git snapshot taken around the turn. Ground truth from the working tree, never a
+    // guess parsed from tool output. Codex reports its own, so we don't shadow it.
+    const diffBaseline = adapter.capabilities.turnDiff
+      ? null
+      : await snapshotWorkingTree(summary.cwd);
 
     try {
       await adapter.sendTurn(payload);
     } finally {
+      // Emit the synthesized diff before clearing the turn id, so it's attributed to the
+      // turn that produced it. A no-op when nothing changed or the cwd isn't a git repo.
+      if (diffBaseline !== null) {
+        const after = await snapshotWorkingTree(summary.cwd);
+        const patch = after ? await diffTrees(summary.cwd, diffBaseline, after) : null;
+        if (patch) this.#record(agent, { kind: 'diff.updated', turnId: this.#currentTurnId, patch });
+      }
       this.#busyWith = null;
       this.#currentTurnId = null;
       // Advance the watermark whether or not the turn succeeded: the agent received the

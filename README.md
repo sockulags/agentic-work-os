@@ -153,14 +153,22 @@ apps/desktop        Tauri shell (~150 LOC of Rust)
   a correctness problem, not a feature.
 - Claude batches tool output rather than streaming it, so command output appears on
   completion. Codex streams it live. The UI reflects the difference rather than faking it.
-- Only Codex reports a turn-level diff, so the **Changes** panel renders a real
-  side-by-side view for Codex turns and says so explicitly for Claude rather than showing
-  an empty panel. Claude's file edits still appear as tool blocks, and any `git diff`
-  either agent runs is detected and rendered with the same viewer. Reaching parity needs a
-  working-tree snapshot around the turn, not a parse of Claude's tool output.
-- **`tauri build` is not finished.** `npm run desktop` (dev) is the supported desktop
-  path. Producing a distributable installer still needs two things: app icons under
-  `apps/desktop/src-tauri/icons/`, and a decision about shipping Node — the bundle config
-  copies `packages/core/dist` as a resource, but not its `node_modules`, and it assumes
-  Node is on the user's PATH. Bundling the core with `node --experimental-sea-config` or
-  vendoring a Node binary is the obvious next step.
+- Codex reports its own turn-level diff; for agents that don't (Claude), the harness
+  synthesizes one from a git working-tree snapshot taken around the turn — ground truth,
+  not a parse of the agent's tool output — and feeds it through the same `diff.updated`
+  path, so the **Changes** panel renders both identically. The one requirement is that the
+  working directory be a git repository; outside one, the panel falls back to explaining
+  the absence as before. `.gitignore` is respected, so `node_modules` and build output
+  never appear in the diff.
+- Claude batches tool output rather than streaming it: the Claude CLI's stream-json
+  protocol has no incremental tool-output channel, so command output arrives on
+  completion while Codex streams it live. The UI reflects the difference rather than
+  faking it — closing this needs a change on the CLI side, not in the harness.
+- **`tauri build` is wired but unverified on a clean machine.** `npm run desktop` (dev)
+  remains the fastest loop. For a distributable, `beforeBuildCommand` now builds the UI,
+  builds the core, and assembles a self-contained core (`scripts/bundle-core.mjs` copies
+  `packages/core/dist` plus its two runtime deps — `ws` and `@awos/protocol` — into
+  `dist-bundle/`, which the bundle ships as `core/`), and a real icon set lives under
+  `apps/desktop/src-tauri/icons/`. Node itself is still expected on PATH (already a
+  project requirement); vendoring a Node binary or a `--experimental-sea-config` single
+  executable is the remaining option if that assumption ever needs to go.

@@ -14,6 +14,7 @@
   },
   "scripts": {
     "build": "npm run build --workspace @awos/protocol && npm run build --workspace @awos/core && npm run build --workspace @awos/ui",
+    "bundle:core": "node scripts/bundle-core.mjs",
     "typecheck": "tsc -b packages/protocol packages/core && npm run typecheck --workspace @awos/ui",
     "test": "npm run test --workspace @awos/core && npm run test --workspace @awos/ui",
     "dev": "npm run build --workspace @awos/protocol && npm run build --workspace @awos/core && concurrently -n tsc,core,ui -c gray,cyan,magenta \"npm run watch --workspace @awos/core\" \"npm run dev --workspace @awos/core\" \"npm run dev --workspace @awos/ui\"",
