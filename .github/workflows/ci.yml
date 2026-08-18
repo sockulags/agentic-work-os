@@ -22,8 +22,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # Matches the `engines.node` floor in package.json.
-          node-version: '20'
+          # Ahead of the `engines.node` floor on purpose: core's test script globs
+          # `dist/**/*.test.js`, and the test runner only learned to expand globs in
+          # Node 21. On 20 it reads the pattern literally and finds nothing.
+          node-version: '22'
           cache: npm
 
       - run: npm ci
