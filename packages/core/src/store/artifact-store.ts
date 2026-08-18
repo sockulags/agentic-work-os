@@ -85,15 +85,25 @@ export function isArtifactCandidate(name: string): boolean {
   return !TEMP_EXTENSIONS.has(extname(name).toLowerCase());
 }
 
-/** Candidate file names in the artifacts directory. Empty when it does not exist. */
-export function listArtifactFiles(dir: string): string[] {
+/**
+ * Candidate file names in the artifacts directory, or null when it could not be listed.
+ *
+ * A directory that does not exist yet is an answer — there are no artifacts. Any other
+ * failure is not: the caller compares this list against what it has already published, so
+ * reporting a transient EACCES, EMFILE or Windows sharing violation as "empty" would
+ * retire every artifact it knows, permanently, on one bad readdir.
+ */
+export function listArtifactFiles(dir: string): string[] | null {
   try {
     return readdirSync(dir, { withFileTypes: true })
       .filter((entry) => entry.isFile() && isArtifactCandidate(entry.name))
       .map((entry) => entry.name)
       .sort();
-  } catch {
-    return [];
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return [];
+    log.debug('artifacts directory unreadable', { dir, code });
+    return null;
   }
 }
 

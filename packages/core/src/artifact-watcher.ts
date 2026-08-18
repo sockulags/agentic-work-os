@@ -34,6 +34,14 @@ const log = createLogger('artifacts');
  */
 const DEBOUNCE_MS = 120;
 
+/**
+ * How long to wait before trying again when `fs.watch` itself refuses to attach.
+ *
+ * Failures like ENOSPC from the inotify watch limit clear up on their own, but only after
+ * something else lets go of a handle, so retrying at the debounce interval would spin.
+ */
+const ATTACH_RETRY_MS = 2_000;
+
 export interface ArtifactWatcherOptions {
   /** The thread's working directory; the artifacts directory hangs off it. */
   cwd: string;
@@ -86,12 +94,12 @@ export class ArtifactWatcher {
 
   // -------------------------------------------------------------------------
 
-  #schedule(): void {
+  #schedule(delayMs = this.#debounceMs): void {
     if (this.#stopped || this.#timer) return;
     this.#timer = setTimeout(() => {
       this.#timer = null;
       this.#sweep();
-    }, this.#debounceMs);
+    }, delayMs);
   }
 
   /**
@@ -107,13 +115,30 @@ export class ArtifactWatcher {
     this.#attach();
     if (this.#watching !== this.#dir) return;
 
+    const names = listArtifactFiles(this.#dir);
+    // A directory we failed to read is not an empty directory. Treating it as one would
+    // append a deletion for every artifact at once, and the log cannot take that back.
+    if (names === null) return;
+
     const present = new Set<string>();
-    for (const name of listArtifactFiles(this.#dir)) {
-      const body = readArtifact(this.#dir, name);
-      // Unreadable and oversize files stay unknown, so a later shrink or unlock still
-      // publishes them.
-      if (!body) continue;
+    for (const name of names) {
+      // Presence is decided by the listing, not by the read: a file we cannot read is
+      // still on disk, and retiring it would tell consumers a document was deleted while
+      // it sits there. Unreadable and oversize files stay unknown instead, so a later
+      // shrink or unlock still publishes them.
       present.add(name);
+
+      const body = readArtifact(this.#dir, name);
+      if (!body) continue;
+
+      if (body.content === '') {
+        // Empty content is how a deletion is spelled, so an empty file cannot be
+        // published as itself: consumers would fold it as deleted, and because the fold
+        // retires tombstoned ids, every restart would emit the event again. Emptying an
+        // artifact we did publish is a real retirement, and that one is worth an event.
+        if (this.#known.delete(name)) this.#emit(deletedArtifact(this.#dir, name));
+        continue;
+      }
 
       const hash = contentHash(body.content);
       if (this.#known.get(name) === hash) continue;
@@ -146,8 +171,12 @@ export class ArtifactWatcher {
       this.#watching = target;
       log.debug('watching for artifacts', { target, live: target === this.#dir });
     } catch (err) {
+      // Retry rather than just giving up: the failed attach left no handle to wake us,
+      // and the sweep that called this has already cleared its timer, so returning here
+      // would make the thread deaf to artifacts for the rest of the process lifetime.
       log.debug('artifact watch failed', { target, message: (err as Error).message });
       this.#detach();
+      this.#schedule(ATTACH_RETRY_MS);
     }
   }
 

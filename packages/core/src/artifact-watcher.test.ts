@@ -193,6 +193,66 @@ describe('artifact pipeline', () => {
     assert.equal(last?.content, '');
   });
 
+  test('an artifact that grows past the ceiling is not retired', async () => {
+    const orch = await boot(makeConfig());
+    const thread = orch.createThread({ cwd });
+    open(orch, thread.id);
+
+    publish('plan.md', '# Plan\n');
+    await until('published', () => artifacts(thread.id).length >= 1);
+
+    // Unpublishable, but still very much on disk. A tombstone here would tell every
+    // consumer the document was deleted, and the last good version would be gone.
+    publish('plan.md', `# Plan\n${'x'.repeat(MAX_ARTIFACT_BYTES)}`);
+    await quiet();
+
+    assert.equal(artifacts(thread.id).length, 1, 'an unreadable file is not a deleted file');
+  });
+
+  test('an empty file publishes nothing, restart after restart', async () => {
+    const config = makeConfig();
+    const orch = await boot(config);
+    const thread = orch.createThread({ cwd });
+    open(orch, thread.id);
+
+    // Empty content is how a deletion is spelled, so an empty file cannot be published as
+    // itself: consumers would fold it as deleted, and since the fold retires tombstoned
+    // ids, the next boot sweep would emit the same event again — once per restart, forever.
+    publish('draft.md', '');
+    await quiet();
+    assert.equal(artifacts(thread.id).length, 0, 'an empty file is not a document yet');
+
+    await orch.stop();
+    orchestrator = null;
+
+    const revived = await boot(config);
+    open(revived, thread.id);
+    await quiet();
+    assert.equal(artifacts(thread.id).length, 0, 'and it stays silent across restarts');
+  });
+
+  test('emptying a published artifact retires it exactly once', async () => {
+    const config = makeConfig();
+    const orch = await boot(config);
+    const thread = orch.createThread({ cwd });
+    open(orch, thread.id);
+
+    publish('plan.md', '# Plan\n');
+    await until('published', () => artifacts(thread.id).length >= 1);
+
+    publish('plan.md', '');
+    await until('tombstone', () => artifacts(thread.id).length >= 2);
+    assert.equal(artifacts(thread.id).at(-1)?.content, '');
+
+    await orch.stop();
+    orchestrator = null;
+
+    const revived = await boot(config);
+    open(revived, thread.id);
+    await quiet();
+    assert.equal(artifacts(thread.id).length, 2, 'the retired id does not come back');
+  });
+
   test('picks up the directory when it is created after the thread opens', async () => {
     const orch = await boot(makeConfig());
     const thread = orch.createThread({ cwd });
