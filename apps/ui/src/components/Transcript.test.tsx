@@ -91,8 +91,11 @@ describe('Transcript item kinds', () => {
   test('a divider names the agent taking the floor', () => {
     render(<Transcript items={[divider('codex'), divider('claude')]} busy={false} />);
 
-    expect(screen.getByText('Codex')).toBeInTheDocument();
-    expect(screen.getByText('Claude')).toBeInTheDocument();
+    // Tie each label back to its agent's colour. Asserting the two labels merely exist
+    // passes just as happily when the agent styles are swapped, which is the one thing
+    // this row has to get right: it is the only marker of who is speaking.
+    expect(screen.getByText('Codex')).toHaveClass('text-codex');
+    expect(screen.getByText('Claude')).toHaveClass('text-claude');
   });
 
   test('an agent message renders as plain text, with a caret only while streaming', () => {
@@ -129,7 +132,7 @@ describe('Transcript item kinds', () => {
     expect(screen.getByText('done')).toBeInTheDocument();
   });
 
-  test('notices render at both levels', () => {
+  test('an error notice is marked apart from an informational one', () => {
     render(
       <Transcript
         items={[notice('Interrupted.', 'info'), notice('spawn failed', 'error')]}
@@ -137,8 +140,16 @@ describe('Transcript item kinds', () => {
       />,
     );
 
-    expect(screen.getByText('Interrupted.')).toBeInTheDocument();
-    expect(screen.getByText('spawn failed')).toBeInTheDocument();
+    // Both levels render the same text in the same place, so checking the text is present
+    // holds even with the level branch inverted — and an error that reads as a routine
+    // notice is exactly the regression worth catching.
+    const info = screen.getByText('Interrupted.').parentElement as HTMLElement;
+    const error = screen.getByText('spawn failed').parentElement as HTMLElement;
+
+    expect(error).toHaveClass('border-destructive/40');
+    expect(info).not.toHaveClass('border-destructive/40');
+    expect(error.querySelector('.lucide-triangle-alert')).not.toBeNull();
+    expect(info.querySelector('.lucide-info')).not.toBeNull();
   });
 });
 
