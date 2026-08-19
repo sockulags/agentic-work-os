@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, screen } from '@testing-library/react';
 import type { TranscriptItem } from '@/lib/transcript';
 import { ToolBlock } from './ToolBlock';
+import { renderWithDisplaySettings } from '@/test-harness';
 
 type ToolItem = Extract<TranscriptItem, { kind: 'tool' }>;
 
@@ -46,14 +47,14 @@ const header = (): HTMLElement => screen.getAllByRole('button')[0] as HTMLElemen
 
 describe('ToolBlock header', () => {
   test('shows the tool title and stays collapsed', () => {
-    render(<ToolBlock item={tool({ input: { command: 'git status' } })} />);
+    renderWithDisplaySettings(<ToolBlock item={tool({ input: { command: 'git status' } })} />);
 
     expect(screen.getByText('git status')).toBeInTheDocument();
     expect(screen.queryByText('Input')).not.toBeInTheDocument();
   });
 
   test('expanding reveals the serialized input', () => {
-    render(<ToolBlock item={tool({ input: { command: 'git status' } })} />);
+    renderWithDisplaySettings(<ToolBlock item={tool({ input: { command: 'git status' } })} />);
     fireEvent.click(header());
 
     expect(screen.getByText('Input')).toBeInTheDocument();
@@ -61,7 +62,7 @@ describe('ToolBlock header', () => {
   });
 
   test('a null input has no Input section even when expanded', () => {
-    render(<ToolBlock item={tool({ input: null })} />);
+    renderWithDisplaySettings(<ToolBlock item={tool({ input: null })} />);
     fireEvent.click(header());
 
     expect(screen.queryByText('Input')).not.toBeInTheDocument();
@@ -70,7 +71,7 @@ describe('ToolBlock header', () => {
 
 describe('ToolBlock status pill', () => {
   test('a running tool shows a spinner and no text', () => {
-    const { container } = render(
+    const { container } = renderWithDisplaySettings(
       <ToolBlock item={tool({ status: 'running', exitCode: null })} />,
     );
 
@@ -78,45 +79,61 @@ describe('ToolBlock status pill', () => {
   });
 
   test('a clean success shows no exit code', () => {
-    render(<ToolBlock item={tool({ status: 'ok', exitCode: 0 })} />);
+    renderWithDisplaySettings(<ToolBlock item={tool({ status: 'ok', exitCode: 0 })} />);
 
     expect(screen.queryByText('0')).not.toBeInTheDocument();
   });
 
   test('a success carrying a non-zero exit code still surfaces it', () => {
-    render(<ToolBlock item={tool({ status: 'ok', exitCode: 3 })} />);
+    renderWithDisplaySettings(<ToolBlock item={tool({ status: 'ok', exitCode: 3 })} />);
 
     expect(screen.getByText('3')).toBeInTheDocument();
   });
 
   test('a denied tool is labelled', () => {
-    render(<ToolBlock item={tool({ status: 'denied', exitCode: null })} />);
+    renderWithDisplaySettings(<ToolBlock item={tool({ status: 'denied', exitCode: null })} />);
 
     expect(screen.getByText('denied')).toBeInTheDocument();
   });
 
   test('an error with an exit code reads as exit N', () => {
-    render(<ToolBlock item={tool({ status: 'error', exitCode: 1 })} />);
+    renderWithDisplaySettings(<ToolBlock item={tool({ status: 'error', exitCode: 1 })} />);
 
-    expect(screen.getByText('exit 1')).toBeInTheDocument();
+    // The one-line summary reports the exit code as well, so both are expected — what
+    // this pins is that the status pill itself is not silent about a failure.
+    expect(screen.getAllByText('exit 1').length).toBeGreaterThanOrEqual(1);
   });
 
   test('an error without an exit code falls back to the status name', () => {
-    render(<ToolBlock item={tool({ status: 'aborted', exitCode: null })} />);
+    renderWithDisplaySettings(<ToolBlock item={tool({ status: 'aborted', exitCode: null })} />);
 
     expect(screen.getByText('aborted')).toBeInTheDocument();
   });
 });
 
 describe('ToolBlock output', () => {
-  test('output is visible without expanding', () => {
-    render(<ToolBlock item={tool({ output: 'hello world' })} />);
+  test('a successful tool keeps its output behind the header', () => {
+    renderWithDisplaySettings(<ToolBlock item={tool({ output: 'hello world' })} />);
 
+    expect(screen.queryByText('hello world')).not.toBeInTheDocument();
+
+    fireEvent.click(header());
     expect(screen.getByText('hello world')).toBeInTheDocument();
   });
 
+  // The counterpart to collapsing success: a failure the reader has to go looking for is
+  // worse than the noise auto-collapse saves.
+  test('a failing tool shows its output without being asked', () => {
+    renderWithDisplaySettings(
+      <ToolBlock item={tool({ output: 'boom', status: 'error', exitCode: 1 })} />,
+    );
+
+    expect(screen.getByText('boom')).toBeInTheDocument();
+  });
+
   test('truncates past 12 lines and offers the rest', () => {
-    render(<ToolBlock item={tool({ output: numberedLines(20) })} />);
+    renderWithDisplaySettings(<ToolBlock item={tool({ output: numberedLines(20) })} />);
+    fireEvent.click(header());
 
     expect(screen.getByText(/line 12/)).toBeInTheDocument();
     expect(screen.queryByText(/line 13/)).not.toBeInTheDocument();
@@ -128,13 +145,14 @@ describe('ToolBlock output', () => {
   });
 
   test('exactly 12 lines is not truncated', () => {
-    render(<ToolBlock item={tool({ output: numberedLines(12) })} />);
+    renderWithDisplaySettings(<ToolBlock item={tool({ output: numberedLines(12) })} />);
+    fireEvent.click(header());
 
     expect(screen.queryByRole('button', { name: /more lines/ })).not.toBeInTheDocument();
   });
 
   test('an empty output renders nothing until expanded', () => {
-    render(<ToolBlock item={tool({ output: '' })} />);
+    renderWithDisplaySettings(<ToolBlock item={tool({ output: '' })} />);
     expect(screen.queryByText('No output.')).not.toBeInTheDocument();
 
     fireEvent.click(header());
@@ -142,8 +160,9 @@ describe('ToolBlock output', () => {
   });
 
   test('an empty output on a running tool reads as running', () => {
-    render(<ToolBlock item={tool({ output: '', status: 'running', exitCode: null })} />);
-    fireEvent.click(header());
+    renderWithDisplaySettings(
+      <ToolBlock item={tool({ output: '', status: 'running', exitCode: null })} />,
+    );
 
     expect(screen.getByText('Running…')).toBeInTheDocument();
   });
@@ -151,7 +170,7 @@ describe('ToolBlock output', () => {
 
 describe('ToolBlock diff detection', () => {
   test('unified-diff output renders through DiffView instead of a preview', () => {
-    render(<ToolBlock item={tool({ output: PATCH })} />);
+    renderWithDisplaySettings(<ToolBlock item={tool({ output: PATCH })} />);
 
     expect(screen.getByRole('button', { name: 'Split' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Unified' })).toBeInTheDocument();
@@ -160,16 +179,15 @@ describe('ToolBlock diff detection', () => {
     expect(screen.queryByRole('button', { name: /more lines/ })).not.toBeInTheDocument();
   });
 
-  test('the diff stays collapsed until its own file header is clicked', () => {
-    render(<ToolBlock item={tool({ output: PATCH })} />);
+  // The deliberate exception to auto-collapse: a successful tool is folded away, but one
+  // whose output is a diff arrives open, because the diff is the answer rather than the
+  // machinery that produced it.
+  test('a diff arrives open rather than folded away like other successful output', () => {
+    renderWithDisplaySettings(<ToolBlock item={tool({ output: PATCH })} />);
 
-    expect(screen.queryByText('@@ -1,8 +1,8 @@')).not.toBeInTheDocument();
-
-    // Expanding the tool does not open the file: DiffFileBlock seeds its open state once.
-    fireEvent.click(header());
-    expect(screen.queryByText('@@ -1,8 +1,8 @@')).not.toBeInTheDocument();
+    expect(screen.getByText('@@ -1,8 +1,8 @@')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /src\/app\.ts/ }));
-    expect(screen.getByText('@@ -1,8 +1,8 @@')).toBeInTheDocument();
+    expect(screen.queryByText('@@ -1,8 +1,8 @@')).not.toBeInTheDocument();
   });
 });

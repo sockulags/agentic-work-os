@@ -16,8 +16,9 @@ import {
   Ban,
 } from 'lucide-react';
 import type { ToolKind } from '@awos/protocol';
-import type { TranscriptItem } from '@/lib/transcript';
 import { looksLikeUnifiedDiff } from '@/lib/diff';
+import { summarizeTool, shouldExpandTool, type ToolItem } from '@/lib/tool-summary';
+import { useDisplaySettings } from '@/state/DisplaySettingsContext';
 import { DiffView } from './DiffView';
 import { cn } from '@/lib/utils';
 
@@ -36,11 +37,23 @@ const ICONS: Record<ToolKind, typeof Terminal> = {
 /** Collapsed by default: a turn can contain dozens of these. */
 const OUTPUT_PREVIEW_LINES = 12;
 
-type ToolItem = Extract<TranscriptItem, { kind: 'tool' }>;
-
 export function ToolBlock({ item }: { item: ToolItem }): React.JSX.Element {
-  const [expanded, setExpanded] = useState(false);
+  const { density } = useDisplaySettings();
+  const auto = shouldExpandTool(item, density);
+  const [override, setOverride] = useState<boolean | null>(null);
+  const [densityAtOverride, setDensityAtOverride] = useState(density);
+  const [showAll, setShowAll] = useState(false);
+
+  // Changing density is a statement about the whole transcript, so it outranks whatever
+  // the reader opened or shut earlier under the previous setting.
+  if (density !== densityAtOverride) {
+    setDensityAtOverride(density);
+    setOverride(null);
+  }
+
+  const expanded = override ?? auto;
   const Icon = ICONS[item.toolKind];
+  const summary = summarizeTool(item);
 
   // `git diff` run through Bash, or a patch a tool printed, deserves the same rendering
   // as a first-class diff event. This is the path that gives Claude diff output too,
@@ -48,7 +61,9 @@ export function ToolBlock({ item }: { item: ToolItem }): React.JSX.Element {
   const isDiff = looksLikeUnifiedDiff(item.output);
 
   const lines = item.output.split('\n');
-  const truncated = !expanded && !isDiff && lines.length > OUTPUT_PREVIEW_LINES;
+  // Expanding answers "what did this do"; the rest of a 4000-line log is a different
+  // question, and it should not push the next message off screen to answer one nobody asked.
+  const truncated = !isDiff && !showAll && lines.length > OUTPUT_PREVIEW_LINES;
   const shown = truncated ? lines.slice(0, OUTPUT_PREVIEW_LINES).join('\n') : item.output;
 
   return (
@@ -60,7 +75,10 @@ export function ToolBlock({ item }: { item: ToolItem }): React.JSX.Element {
     >
       <button
         type="button"
-        onClick={() => setExpanded((v) => !v)}
+        onClick={() => setOverride(!expanded)}
+        aria-expanded={expanded}
+        // The raw title is the exact call; the summary is the readable one. Keep both.
+        title={item.title}
         className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent/40"
       >
         <ChevronRight
@@ -70,15 +88,20 @@ export function ToolBlock({ item }: { item: ToolItem }): React.JSX.Element {
           )}
         />
         <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        <code className="min-w-0 flex-1 truncate font-mono text-xs text-foreground/90">
-          {item.title}
-        </code>
+        <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground/90">
+          {summary.label}
+        </span>
+        {summary.facts.length > 0 && (
+          <span className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground">
+            {summary.facts.join(' · ')}
+          </span>
+        )}
         <StatusPill status={item.status} exitCode={item.exitCode} />
       </button>
 
-      {(item.output || expanded) && (
+      {expanded && (
         <div className="border-t border-border px-3 py-2">
-          {expanded && item.input !== null && item.input !== undefined && (
+          {item.input !== null && item.input !== undefined && (
             <details className="mb-2">
               <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
                 Input
@@ -91,7 +114,7 @@ export function ToolBlock({ item }: { item: ToolItem }): React.JSX.Element {
 
           {item.output ? (
             isDiff ? (
-              <DiffView patch={item.output} defaultOpen={expanded} />
+              <DiffView patch={item.output} defaultOpen />
             ) : (
               <>
                 <pre className="awos-scroll max-h-[32rem] overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-foreground/80">
@@ -100,7 +123,7 @@ export function ToolBlock({ item }: { item: ToolItem }): React.JSX.Element {
                 {truncated && (
                   <button
                     type="button"
-                    onClick={() => setExpanded(true)}
+                    onClick={() => setShowAll(true)}
                     className="mt-1 text-xs text-muted-foreground hover:text-foreground"
                   >
                     Show {lines.length - OUTPUT_PREVIEW_LINES} more lines

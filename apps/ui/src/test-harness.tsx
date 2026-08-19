@@ -27,6 +27,17 @@ export function renderWithHarness(
   );
 }
 
+/**
+ * Renders a component that reads display settings but not the harness.
+ *
+ * Kept separate from `renderWithHarness` so a test does not imply a dependency the
+ * component does not have — `ToolBlock` takes its item as a prop and only reaches out
+ * for density.
+ */
+export function renderWithDisplaySettings(ui: React.ReactElement): RenderResult {
+  return render(<DisplaySettingsProvider>{ui}</DisplaySettingsProvider>);
+}
+
 /** A runtime state with nothing going on, for tests that need to override one field of it. */
 export function idleRuntime(overrides: Partial<ThreadRuntimeState> = {}): ThreadRuntimeState {
   return {

@@ -7,7 +7,7 @@
  * event — so the adapter under test exercises its actual parsing path rather than a
  * mock. Behaviour is scripted through argv so one binary covers several scenarios.
  *
- * Usage: fake-claude.js [--tool] [--permission] [--slow] [--markdown] [--think]
+ * Usage: fake-claude.js [--tool] [--tools] [--permission] [--slow] [--markdown] [--think]
  */
 
 import { LineDecoder } from '../util/jsonl.js';
@@ -16,6 +16,56 @@ const args = new Set(process.argv.slice(2));
 const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 
 let turn = 0;
+
+/**
+ * A realistic burst of parallel tool calls for `--tools`.
+ *
+ * One call per turn is enough to prove the adapter parses a `tool_use`, but it says
+ * nothing about what a turn actually looks like on screen. The UI questions — does a run
+ * of calls collapse, does a failure stay visible, does a patch still render as a diff —
+ * only have answers once a single turn carries several kinds at once, one of them broken.
+ */
+const TOOL_RUN: Array<{
+  name: string;
+  input: Record<string, unknown>;
+  result: string;
+  isError?: boolean;
+}> = [
+  {
+    name: 'Read',
+    input: { file_path: 'apps/ui/src/lib/transcript.ts' },
+    result: Array.from({ length: 40 }, (_, i) => `${i + 1}→const line = ${i};`).join('\n'),
+  },
+  {
+    name: 'Grep',
+    input: { pattern: 'useHarness', output_mode: 'files_with_matches' },
+    result: ['apps/ui/src/App.tsx', 'apps/ui/src/hooks/useHarness.ts'].join('\n'),
+  },
+  {
+    name: 'Bash',
+    input: { command: 'npm test --workspace @awos/ui' },
+    result: 'Test Files  4 passed (4)\n     Tests  61 passed (61)',
+  },
+  {
+    name: 'Bash',
+    input: { command: 'npm run lint' },
+    result: "sh: line 1: eslint: command not found\nnpm ERR! Lifecycle script `lint` failed",
+    isError: true,
+  },
+  {
+    name: 'Edit',
+    input: { file_path: 'apps/ui/src/components/ToolBlock.tsx' },
+    result: [
+      '--- a/apps/ui/src/components/ToolBlock.tsx',
+      '+++ b/apps/ui/src/components/ToolBlock.tsx',
+      '@@ -1,4 +1,4 @@',
+      " import { useState } from 'react';",
+      '-const OUTPUT_PREVIEW_LINES = 12;',
+      '+const OUTPUT_PREVIEW_LINES = 20;',
+      ' ',
+    ].join('\n'),
+  },
+];
 
 function emit(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -212,6 +262,8 @@ async function runTurn(text: string): Promise<void> {
     });
   }
 
+  if (args.has('--tools')) await runToolBurst(messageId);
+
   emit({
     type: 'result',
     subtype: 'success',
@@ -221,6 +273,55 @@ async function runTurn(text: string): Promise<void> {
     num_turns: turn,
     total_cost_usd: 0.001,
     usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 5 },
+    session_id: SESSION_ID,
+  });
+}
+
+/** Several calls in one turn, then a closing sentence they were supposed to inform. */
+async function runToolBurst(messageId: string): Promise<void> {
+  const ids = TOOL_RUN.map((_, i) => `toolu_${turn}_${i}`);
+
+  emit({
+    type: 'assistant',
+    message: {
+      id: `${messageId}_tools`,
+      role: 'assistant',
+      content: TOOL_RUN.map((call, i) => ({
+        type: 'tool_use',
+        id: ids[i],
+        name: call.name,
+        input: call.input,
+      })),
+    },
+    parent_tool_use_id: null,
+    session_id: SESSION_ID,
+  });
+
+  if (args.has('--slow')) await sleep(20);
+
+  emit({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: TOOL_RUN.map((call, i) => ({
+        type: 'tool_result',
+        tool_use_id: ids[i],
+        content: call.result,
+        is_error: call.isError === true,
+      })),
+    },
+    parent_tool_use_id: null,
+    session_id: SESSION_ID,
+  });
+
+  emit({
+    type: 'assistant',
+    message: {
+      id: `${messageId}_after`,
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Tests pass; lint is not installed in this checkout.' }],
+    },
+    parent_tool_use_id: null,
     session_id: SESSION_ID,
   });
 }

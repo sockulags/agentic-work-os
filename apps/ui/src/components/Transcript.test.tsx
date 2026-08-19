@@ -137,8 +137,10 @@ describe('Transcript item kinds', () => {
   test('a tool call is delegated to ToolBlock', () => {
     renderWithHarness(<Transcript items={[toolCall('npm test')]} />, { runtime: idleRuntime() });
 
+    // The delegation is what this pins, not the output: a successful tool is folded away
+    // by ToolBlock, so its output is behind the header rather than on the page.
     expect(screen.getByText('npm test')).toBeInTheDocument();
-    expect(screen.getByText('done')).toBeInTheDocument();
+    expect(screen.queryByText('done')).not.toBeInTheDocument();
   });
 
   test('an error notice is marked apart from an informational one', () => {

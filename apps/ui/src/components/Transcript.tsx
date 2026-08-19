@@ -1,10 +1,12 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { AlertTriangle, Info } from 'lucide-react';
 import type { TranscriptItem } from '@/lib/transcript';
+import { groupTranscriptItems } from '@/lib/group-items';
 import { AGENT_STYLE } from './AgentBadge';
 import { Markdown } from './Markdown';
 import { ReasoningBlock } from './ReasoningBlock';
 import { ToolBlock } from './ToolBlock';
+import { ToolGroup } from './ToolGroup';
 import { useHarnessContext } from '@/state/HarnessContext';
 import { cn } from '@/lib/utils';
 
@@ -17,6 +19,7 @@ import { cn } from '@/lib/utils';
  */
 export function Transcript({ items }: { items: TranscriptItem[] }): React.JSX.Element {
   const busy = useHarnessContext().runtime?.busyWith != null;
+  const rows = useMemo(() => groupTranscriptItems(items), [items]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
 
@@ -53,13 +56,13 @@ export function Transcript({ items }: { items: TranscriptItem[] }): React.JSX.El
       className="awos-scroll flex-1 overflow-y-auto px-6 py-4"
     >
       <div className="mx-auto flex max-w-3xl flex-col gap-4">
-        {items.map((item, index) => (
-          <TranscriptRow
-            key={`${item.kind}:${item.id}`}
-            item={item}
-            isLast={index === items.length - 1}
-          />
-        ))}
+        {rows.map((row, index) =>
+          row.type === 'tool-group' ? (
+            <ToolGroup key={row.key} items={row.items} />
+          ) : (
+            <TranscriptRow key={row.key} item={row.item} isLast={index === rows.length - 1} />
+          ),
+        )}
         {busy && <ThinkingIndicator />}
       </div>
     </div>
