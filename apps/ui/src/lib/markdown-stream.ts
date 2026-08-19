@@ -28,12 +28,15 @@ export function prepareMarkdown(markdown: string, streaming: boolean): string {
   let text = markdown;
 
   if (streaming) {
-    // The opener arrives one delta at a time, so for a beat the tail is a stray backtick
-    // or two. Rendering those literally makes punctuation flash in and out of the text.
+    // A marker arrives one delta at a time, so for a beat the tail is a stray backtick or
+    // two. Rendering those literally flashes punctuation in and out — as prose when an
+    // opener is being typed, as a line of code when a closer is.
     const lastBreak = text.lastIndexOf('\n');
     const lastLine = text.slice(lastBreak + 1);
-    if (lastLine.length > 0 && PARTIAL_FENCE.test(lastLine) && !insideFence(text.slice(0, lastBreak + 1))) {
-      text = text.slice(0, lastBreak + 1);
+    if (lastLine.length > 0 && PARTIAL_FENCE.test(lastLine)) {
+      const enclosing = insideFence(text.slice(0, lastBreak + 1));
+      const closesEnclosing = enclosing !== null && lastLine.trim()[0] === enclosing.marker[0];
+      if (enclosing === null || closesEnclosing) text = text.slice(0, lastBreak + 1);
     }
   }
 

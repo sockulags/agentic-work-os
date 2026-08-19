@@ -1,5 +1,6 @@
 import { memo, useMemo } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
+import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import type { Element, ElementContent } from 'hast';
 import { parseFenceInfo, prepareMarkdown } from '@/lib/markdown-stream';
@@ -21,7 +22,14 @@ import './markdown.css';
  * transform, which keeps `javascript:` out.
  */
 
-const REMARK_PLUGINS = [remarkGfm];
+/**
+ * `remark-breaks` is here to keep a promise the old renderer made. Agents write plain
+ * text with meaningful single newlines constantly — a list of changed paths, a couple of
+ * shell commands, a short stack trace — and `whitespace-pre-wrap` used to honour them.
+ * Strict markdown would join those into one paragraph, which reads as a regression no
+ * matter how correct it is.
+ */
+const REMARK_PLUGINS = [remarkGfm, remarkBreaks];
 
 export const Markdown = memo(function Markdown({
   text,
@@ -31,6 +39,9 @@ export const Markdown = memo(function Markdown({
   streaming?: boolean;
 }): React.JSX.Element {
   const source = useMemo(() => prepareMarkdown(text, streaming), [text, streaming]);
+  // Every fenced block needs to know, and threading it as a prop through react-markdown's
+  // component map is not possible — the map is a module constant on purpose.
+  const components = useMemo(() => componentsFor(streaming), [streaming]);
 
   return (
     <div
@@ -39,22 +50,37 @@ export const Markdown = memo(function Markdown({
         streaming && 'awos-markdown-streaming',
       )}
     >
-      <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={COMPONENTS}>
+      <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={components}>
         {source}
       </ReactMarkdown>
     </div>
   );
 });
 
+function componentsFor(streaming: boolean): Components {
+  return {
+    ...COMPONENTS,
+    pre({ node, children }) {
+      const code = node?.children[0];
+      if (code?.type === 'element' && code.tagName === 'code') {
+        const info = parseFenceInfo(languageOf(code), code.data?.meta ?? null);
+        return (
+          <CodeBlock
+            code={textOf(code.children)}
+            lang={info.lang}
+            filename={info.filename}
+            streaming={streaming}
+          />
+        );
+      }
+      return (
+        <pre className="awos-scroll my-3 overflow-auto rounded-md bg-muted/40 p-3">{children}</pre>
+      );
+    },
+  };
+}
+
 const COMPONENTS: Components = {
-  pre({ node, children }) {
-    const code = node?.children[0];
-    if (code?.type === 'element' && code.tagName === 'code') {
-      const info = parseFenceInfo(languageOf(code), code.data?.meta ?? null);
-      return <CodeBlock code={textOf(code.children)} lang={info.lang} filename={info.filename} />;
-    }
-    return <pre className="awos-scroll my-3 overflow-auto rounded-md bg-muted/40 p-3">{children}</pre>;
-  },
 
   // Only inline code reaches this: fenced code is intercepted at `pre` above.
   code({ children }) {
@@ -86,9 +112,25 @@ const COMPONENTS: Components = {
   h5: ({ children }) => <h6 className="mb-1.5 mt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground first:mt-0">{children}</h6>,
   h6: ({ children }) => <h6 className="mb-1.5 mt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground first:mt-0">{children}</h6>,
 
-  ul: ({ children }) => <ul className="mb-3 ml-5 list-disc space-y-1 last:mb-0 marker:text-muted-foreground">{children}</ul>,
-  ol: ({ children }) => <ol className="mb-3 ml-5 list-decimal space-y-1 last:mb-0 marker:text-muted-foreground">{children}</ol>,
-  li: ({ children }) => <li className="[&>ol]:mb-0 [&>ol]:mt-1 [&>p]:mb-0 [&>ul]:mb-0 [&>ul]:mt-1">{children}</li>,
+  // A GFM task list carries its own marker — the checkbox — so the bullet comes off.
+  ul: ({ children, node }) => (
+    <ul
+      className={cn(
+        'mb-3 space-y-1 last:mb-0 marker:text-muted-foreground',
+        hasClass(node, 'contains-task-list') ? 'list-none' : 'ml-5 list-disc',
+      )}
+    >
+      {children}
+    </ul>
+  ),
+  ol: ({ children }) => (
+    <ol className="mb-3 ml-5 list-decimal space-y-1 last:mb-0 marker:text-muted-foreground">
+      {children}
+    </ol>
+  ),
+  li: ({ children }) => (
+    <li className="[&>ol]:mb-0 [&>ol]:mt-1 [&>p]:mb-0 [&>ul]:mb-0 [&>ul]:mt-1">{children}</li>
+  ),
 
   blockquote: ({ children }) => (
     <blockquote className="mb-3 border-l-2 border-border pl-3 text-muted-foreground last:mb-0">
@@ -118,9 +160,18 @@ const COMPONENTS: Components = {
     </td>
   ),
 
+  // Task-list state belongs to the agent's message, not to the reader: `disabled` is what
+  // stops a click, `readOnly` only stops React complaining about a checkbox with no
+  // change handler.
   input: ({ checked, type }) =>
     type === 'checkbox' ? (
-      <input type="checkbox" checked={checked} readOnly className="mr-1.5 align-middle accent-foreground" />
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled
+        readOnly
+        className="mr-1.5 align-middle accent-foreground"
+      />
     ) : null,
 
   img: ({ src, alt }) => (
@@ -139,12 +190,22 @@ function languageOf(code: Element): string | null {
   return null;
 }
 
-/** The literal text of a fence, taken from the tree rather than from React children. */
+function hasClass(node: Element | undefined, name: string): boolean {
+  const className = node?.properties?.['className'];
+  return Array.isArray(className) && className.includes(name);
+}
+
+/**
+ * The literal text of a fence, taken from the tree rather than from React children.
+ *
+ * The trailing newline goes: every code node carries one by construction, and inside a
+ * `<pre>` it shows up as a blank line under the last line of code.
+ */
 function textOf(nodes: readonly ElementContent[]): string {
   let out = '';
   for (const node of nodes) {
     if (node.type === 'text') out += node.value;
     else if (node.type === 'element') out += textOf(node.children);
   }
-  return out;
+  return out.endsWith('\n') ? out.slice(0, -1) : out;
 }

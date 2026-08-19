@@ -48,21 +48,36 @@ const lowlight = createLowlight({
 /** Past this a block is pasted data, and colouring it costs more than it returns. */
 const MAX_HIGHLIGHT_CHARS = 50_000;
 
+/**
+ * The budget while the block is still arriving.
+ *
+ * Highlighting runs from the top of the block on every delta, so the work over a whole
+ * stream grows with the square of the block's length. Well under the settled cap that is
+ * cheap; a 40 kB file streamed token by token is not. Big blocks therefore stay plain
+ * until they finish — the one place where colour appearing late beats a stuttering paint.
+ */
+const MAX_STREAMING_CHARS = 8_000;
+
 /** Guessing is a scan against every grammar, so it is only worth it on short blocks. */
 const MAX_AUTODETECT_CHARS = 4_000;
+
+/** Below this, highlight.js's own confidence in a guess is too low to put in the header. */
+const MIN_AUTODETECT_RELEVANCE = 5;
 
 interface CodeBlockProps {
   code: string;
   lang: string | null;
   filename: string | null;
+  streaming: boolean;
 }
 
 export const CodeBlock = memo(function CodeBlock({
   code,
   lang,
   filename,
+  streaming,
 }: CodeBlockProps): React.JSX.Element {
-  const highlighted = useMemo(() => highlight(code, lang), [code, lang]);
+  const highlighted = useMemo(() => highlight(code, lang, streaming), [code, lang, streaming]);
   const label = filename ?? highlighted.language ?? 'text';
 
   return (
@@ -121,8 +136,9 @@ interface Highlighted {
   language: string | null;
 }
 
-function highlight(code: string, lang: string | null): Highlighted {
-  if (code.length > MAX_HIGHLIGHT_CHARS) return { nodes: null, language: lang };
+function highlight(code: string, lang: string | null, streaming: boolean): Highlighted {
+  const budget = streaming ? MAX_STREAMING_CHARS : MAX_HIGHLIGHT_CHARS;
+  if (code.length > budget) return { nodes: null, language: lang };
 
   try {
     if (lang !== null && lowlight.registered(lang)) {
@@ -130,7 +146,10 @@ function highlight(code: string, lang: string | null): Highlighted {
     }
     if (lang === null && code.length <= MAX_AUTODETECT_CHARS) {
       const guess = lowlight.highlightAuto(code);
-      return { nodes: toReact(guess.children), language: guess.data?.language ?? null };
+      // A guess made on prose or a log excerpt scores near zero and would otherwise put a
+      // confident, wrong language in the header.
+      const confident = (guess.data?.relevance ?? 0) >= MIN_AUTODETECT_RELEVANCE;
+      return { nodes: toReact(guess.children), language: confident ? guess.data?.language ?? null : null };
     }
   } catch {
     // A grammar can throw on input it was never meant to see. Plain text still reads.

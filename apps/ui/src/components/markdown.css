@@ -111,11 +111,16 @@
 }
 
 /*
- * The caret sits on the last block rather than on the wrapper: on the wrapper it would
- * be pushed onto a line of its own below the text, which is not where a cursor belongs.
- * Reuses the `awos-caret` keyframes from `index.css`.
+ * The caret sits on the last block rather than on the wrapper: on the wrapper it would be
+ * pushed onto a line of its own below the text, which is not where a cursor belongs. The
+ * three selectors are the three places "the end of the text" can be — nothing rendered
+ * yet, the end of a paragraph or list, and the end of a code block, where the last block
+ * is the figure but the text ends inside its `<code>`. Reuses the `awos-caret` keyframes
+ * from `index.css`.
  */
-.awos-markdown-streaming > :last-child::after {
+.awos-markdown-streaming:empty::after,
+.awos-markdown-streaming > :last-child:not(figure)::after,
+.awos-markdown-streaming > figure:last-child code::after {
   content: '▍';
   margin-left: 1px;
   animation: awos-caret 1.1s steps(1, end) infinite;

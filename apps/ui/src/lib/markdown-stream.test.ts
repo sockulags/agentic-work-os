@@ -66,9 +66,14 @@ describe('prepareMarkdown — markers still being typed', () => {
     expect(settled('Look:\n``')).toBe('Look:\n``');
   });
 
-  test('keeps a lone marker that is content inside a fence', () => {
-    const output = prepareMarkdown('```md\n``', true);
-    expect(output).toBe('```md\n``\n```\n');
+  test('hides a half-typed closing marker', () => {
+    const output = prepareMarkdown('```ts\nconst a = 1;\n``', true);
+    expect(output).toBe('```ts\nconst a = 1;\n```\n');
+  });
+
+  test('keeps a marker of the other character inside a fence', () => {
+    // Nothing about `~~` can close a backtick fence, so it is content, not a marker.
+    expect(prepareMarkdown('```md\n~~', true)).toBe('```md\n~~\n```\n');
   });
 
   test('leaves inline code alone', () => {
