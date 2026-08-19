@@ -414,3 +414,70 @@ describe('cross-agent handoff', () => {
     assert.ok(revived.store.events(thread.id).length > 0);
   });
 });
+
+describe('pinned context', () => {
+  /** The fake echoes the head of what it received, so this reads the actual wire payload. */
+  function receivedByClaude(orch: Orchestrator, threadId: string): string[] {
+    return orch.store
+      .events(threadId)
+      .filter((e) => e.kind === 'message.completed' && e.agent === 'claude')
+      .map((e) => (e.kind === 'message.completed' ? e.text : ''));
+  }
+
+  test('rides on every turn, not just the first', async () => {
+    const { orch } = await boot(makeConfig());
+    const thread = orch.createThread({ cwd: process.cwd() });
+    orch.setPinnedContext(thread.id, 'House rules: never push to main.');
+
+    await orch.send(thread.id, 'claude', 'first');
+    await orch.send(thread.id, 'claude', 'second');
+
+    const received = receivedByClaude(orch, thread.id);
+    assert.equal(received.length, 2);
+    for (const text of received) assert.match(text, /pinned-context/);
+  });
+
+  test('an empty context adds nothing to the prompt', async () => {
+    const { orch } = await boot(makeConfig());
+    const thread = orch.createThread({ cwd: process.cwd() });
+
+    await orch.send(thread.id, 'claude', 'no notes here');
+
+    assert.doesNotMatch(receivedByClaude(orch, thread.id)[0] ?? '', /pinned-context/);
+  });
+
+  test('the recorded user message stays what the user typed', async () => {
+    const { orch } = await boot(makeConfig());
+    const thread = orch.createThread({ cwd: process.cwd() });
+    orch.setPinnedContext(thread.id, 'House rules: never push to main.');
+
+    await orch.send(thread.id, 'claude', 'just this');
+
+    // The block is transport, like the replay preamble. Recording it would put it in the
+    // user's own chat bubble.
+    const message = orch.store.events(thread.id).find((e) => e.kind === 'user.message');
+    assert.equal(message?.kind === 'user.message' ? message.text : null, 'just this');
+  });
+
+  test('is picked up from disk after a restart', async () => {
+    const config = makeConfig();
+    const { orch } = await boot(config);
+    const thread = orch.createThread({ cwd: process.cwd() });
+    orch.setPinnedContext(thread.id, 'House rules: never push to main.');
+    await orch.stop();
+    orchestrator = null;
+
+    const revived = new Orchestrator(config);
+    await revived.start();
+    orchestrator = revived;
+
+    await revived.send(thread.id, 'claude', 'still there?');
+    assert.match(receivedByClaude(revived, thread.id)[0] ?? '', /pinned-context/);
+  });
+
+  test('rejects pinning to a thread that does not exist', async () => {
+    const { orch } = await boot(makeConfig());
+    assert.throws(() => orch.setPinnedContext('nope', 'hi'), /Unknown thread/);
+    assert.throws(() => orch.getPinnedContext('nope'), /Unknown thread/);
+  });
+});
