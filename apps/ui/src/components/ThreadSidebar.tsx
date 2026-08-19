@@ -1,24 +1,13 @@
 import { useState } from 'react';
 import { Plus, Trash2, FolderOpen } from 'lucide-react';
-import type { AgentId, ThreadSummary } from '@awos/protocol';
 import { Button } from './ui/button';
 import { AGENT_STYLE } from './AgentBadge';
+import { useHarnessContext } from '@/state/HarnessContext';
 import { cn, formatRelative } from '@/lib/utils';
 import { chooseProjectFolder, supportsNativeFolderPicker } from '@/lib/project-folder';
 
-export function ThreadSidebar({
-  threads,
-  activeThreadId,
-  onOpen,
-  onCreate,
-  onDelete,
-}: {
-  threads: ThreadSummary[];
-  activeThreadId: string | null;
-  onOpen: (id: string) => void;
-  onCreate: (cwd: string, agent: AgentId) => Promise<void>;
-  onDelete: (id: string) => void;
-}): React.JSX.Element {
+export function ThreadSidebar(): React.JSX.Element {
+  const { threads, activeThreadId, openThread, createThread, deleteThread } = useHarnessContext();
   const [creating, setCreating] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -50,7 +39,7 @@ export function ThreadSidebar({
             setCreateError(null);
             setSubmitting(true);
             try {
-              await onCreate(trimmed, 'claude');
+              await createThread(trimmed, 'claude');
               setCreating(false);
             } catch (error) {
               setCreateError(errorMessage(error));
@@ -132,7 +121,7 @@ export function ThreadSidebar({
                   'group relative mb-0.5 cursor-pointer rounded-md px-2 py-2 text-left transition-colors',
                   active ? 'bg-accent' : 'hover:bg-accent/50',
                 )}
-                onClick={() => onOpen(thread.id)}
+                onClick={() => void openThread(thread.id)}
               >
                 <div className="flex items-center gap-1.5">
                   <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', style.dot)} />
@@ -151,7 +140,7 @@ export function ThreadSidebar({
                   title="Delete thread"
                   onClick={(e) => {
                     e.stopPropagation();
-                    onDelete(thread.id);
+                    void deleteThread(thread.id);
                   }}
                   className="absolute right-1 top-1.5 hidden rounded p-1 text-muted-foreground hover:bg-destructive/20 hover:text-destructive group-hover:block"
                 >
