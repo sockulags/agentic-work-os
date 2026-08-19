@@ -11,6 +11,18 @@ import { HarnessClient, resolveClientOptions, type ConnectionStatus } from '@/li
 import { foldTranscript } from '@/lib/transcript';
 
 /**
+ * The thread's pinned notes, tagged with the thread they belong to.
+ *
+ * The tag is what lets the editor tell "the same thread's text came back" from "we are
+ * looking at a different thread now" — the first must not disturb what is being typed,
+ * the second must replace it.
+ */
+export interface PinnedContext {
+  threadId: string;
+  text: string;
+}
+
+/**
  * All harness state in one hook.
  *
  * The client is created once and kept in a ref; React state holds only what renders.
@@ -31,6 +43,7 @@ export function useHarness() {
   const [runtime, setRuntime] = useState<ThreadRuntimeState | null>(null);
   const [availability, setAvailability] = useState<AgentAvailability[]>([]);
   const [notice, setNotice] = useState<{ level: string; message: string } | null>(null);
+  const [pinnedContext, setPinnedContext] = useState<PinnedContext | null>(null);
 
   // Read inside the push handler without making it a dependency, which would tear down
   // and rebuild the subscription on every thread switch.
@@ -63,6 +76,7 @@ export function useHarness() {
             setActiveThreadId(null);
             setEvents([]);
             setRuntime(null);
+            setPinnedContext(null);
           }
           return;
         case 'notice':
@@ -93,9 +107,25 @@ export function useHarness() {
       const res = await client.request({ type: 'thread.open', threadId });
       if (res.type !== 'thread.opened') return;
       setActiveThreadId(threadId);
+      // Claimed here rather than waiting for the next render, so the pinned-context reply
+      // below can tell whether it is still wanted.
+      activeThreadRef.current = threadId;
       setEvents(res.events);
       setRuntime(res.state);
+      // Reopening the thread already on screen — a reconnect resync, a second click in
+      // the sidebar — keeps the notes in place. Blanking them would read to the editor as
+      // a thread change and throw away whatever is being typed.
+      setPinnedContext((prev) => (prev?.threadId === threadId ? prev : null));
       setThreads((prev) => prev.map((t) => (t.id === threadId ? res.thread : t)));
+
+      // Caught here so a failed notes fetch can't fail the open and take the transcript
+      // down with it; the next reconnect refetches.
+      const context = await client
+        .request({ type: 'context.get', threadId })
+        .catch(() => null);
+      if (context?.type !== 'context') return;
+      if (activeThreadRef.current !== context.threadId) return;
+      setPinnedContext({ threadId: context.threadId, text: context.text });
     },
     [client],
   );
@@ -122,6 +152,7 @@ export function useHarness() {
       setActiveThreadId(null);
       setEvents([]);
       setRuntime(null);
+      setPinnedContext(null);
       setNotice({
         level: 'warn',
         message: 'That thread no longer exists on the harness.',
@@ -179,6 +210,18 @@ export function useHarness() {
     [client],
   );
 
+  /**
+   * Takes the thread explicitly rather than using the active one, so a save that was
+   * triggered by leaving a thread still lands on the thread it was typed in.
+   */
+  const savePinnedContext = useCallback(
+    async (threadId: string, text: string) => {
+      await client.request({ type: 'context.set', threadId, text });
+      setPinnedContext((prev) => (prev?.threadId === threadId ? { threadId, text } : prev));
+    },
+    [client],
+  );
+
   const setPermissionMode = useCallback(
     async (mode: PermissionMode) => {
       const threadId = activeThreadRef.current;
@@ -203,6 +246,8 @@ export function useHarness() {
     runtime,
     availability,
     notice,
+    pinnedContext,
+    savePinnedContext,
     dismissNotice: () => setNotice(null),
     openThread,
     createThread,

@@ -45,6 +45,15 @@ export interface ThreadRuntimeState {
   agents: Record<AgentId, { status: string; model: string | null }>;
 }
 
+/**
+ * Ceiling on the pinned context a thread may carry, in characters.
+ *
+ * It lives in the protocol because both ends have to agree on it: the core refuses a
+ * larger write, and the editor has to warn before the user reaches the point where it
+ * would. A prompt budget the UI can't see is one the user only discovers by losing text.
+ */
+export const PINNED_CONTEXT_MAX_CHARS = 8_000;
+
 export interface AgentAvailability {
   agent: AgentId;
   available: boolean;
@@ -72,6 +81,8 @@ export type ClientRequest =
   | { type: 'turn.send'; threadId: string; agent: AgentId; text: string }
   | { type: 'turn.interrupt'; threadId: string }
   | { type: 'approval.resolve'; threadId: string; approvalId: string; optionId: string }
+  | { type: 'context.get'; threadId: string }
+  | { type: 'context.set'; threadId: string; text: string }
   | { type: 'agents.probe' };
 
 export type ClientMessage = ClientRequest & { requestId: string };
@@ -86,6 +97,8 @@ export type ServerResponseBody =
   | { type: 'thread.list'; threads: ThreadSummary[] }
   | { type: 'thread.opened'; thread: ThreadSummary; events: HarnessEvent[]; state: ThreadRuntimeState }
   | { type: 'thread.created'; thread: ThreadSummary }
+  /** Carries its `threadId` so a reply that arrives after a thread switch can be dropped. */
+  | { type: 'context'; threadId: string; text: string }
   | { type: 'agents.probe'; agents: AgentAvailability[] };
 
 export type ServerResponse = ServerResponseBody & { requestId: string };
