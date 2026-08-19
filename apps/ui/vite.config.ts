@@ -20,9 +20,12 @@ export default defineConfig({
     emptyOutDir: true,
   },
   test: {
-    // The logic worth testing here is pure — event folding and diff parsing — so there
-    // is no need to pay for a DOM. Component tests would need jsdom added back.
-    environment: 'node',
-    include: ['src/**/*.test.ts'],
+    // Most of the suite is still pure — event folding and diff parsing — but the render
+    // tests need a DOM, so jsdom is back. It is charged to the pure tests too; measured,
+    // that is ~0.2s across the whole suite, which is not worth splitting the config into
+    // per-file environments to avoid.
+    environment: 'jsdom',
+    include: ['src/**/*.test.{ts,tsx}'],
+    setupFiles: ['./src/test-setup.ts'],
   },
 });

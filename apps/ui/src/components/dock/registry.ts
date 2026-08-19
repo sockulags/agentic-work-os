@@ -1,9 +1,10 @@
-import { GitCompare, ListChecks, Shapes, type LucideIcon } from 'lucide-react';
+import { GitCompare, ListChecks, Pin, Shapes, type LucideIcon } from 'lucide-react';
 import type { Harness } from '@/hooks/useHarness';
 import { parseUnifiedDiff } from '@/lib/diff';
 import { PlanPanel } from './tabs/PlanPanel';
 import { ChangesPanel } from './tabs/ChangesPanel';
 import { ArtifactsTab } from './tabs/ArtifactsTab';
+import { ContextTab } from './tabs/ContextTab';
 
 export interface DockTab {
   id: string;
@@ -50,6 +51,16 @@ export const DOCK_TABS: readonly [DockTab, ...DockTab[]] = [
     badge: (h) => h.artifacts.length,
     Component: ArtifactsTab,
   },
+  {
+    id: 'context',
+    label: 'Context',
+    icon: Pin,
+    // Lines rather than characters: the badge reads as "how many notes are pinned", which
+    // is the same unit as the other two. The character budget is the panel's business,
+    // where there is room to say what it means.
+    badge: (h) => countPinnedLines(h.pinnedContext?.text),
+    Component: ContextTab,
+  },
 ];
 
 /**
@@ -64,6 +75,10 @@ export function resolveActiveTab(
   activeTabId: string | null,
 ): DockTab {
   return tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+}
+
+function countPinnedLines(text: string | undefined): number {
+  return text === undefined ? 0 : text.split('\n').filter((line) => line.trim() !== '').length;
 }
 
 /** Counted through the real parser so the badge can never disagree with the panel. */

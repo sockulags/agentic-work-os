@@ -1,8 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Brain, ChevronRight, Info } from 'lucide-react';
+import { useEffect, useMemo, useRef } from 'react';
+import { AlertTriangle, Info } from 'lucide-react';
 import type { TranscriptItem } from '@/lib/transcript';
+import { groupTranscriptItems } from '@/lib/group-items';
 import { AGENT_STYLE } from './AgentBadge';
+import { Markdown } from './Markdown';
+import { ReasoningBlock } from './ReasoningBlock';
 import { ToolBlock } from './ToolBlock';
+import { ToolGroup } from './ToolGroup';
 import { useHarnessContext } from '@/state/HarnessContext';
 import { cn } from '@/lib/utils';
 
@@ -15,6 +19,7 @@ import { cn } from '@/lib/utils';
  */
 export function Transcript({ items }: { items: TranscriptItem[] }): React.JSX.Element {
   const busy = useHarnessContext().runtime?.busyWith != null;
+  const rows = useMemo(() => groupTranscriptItems(items), [items]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinnedRef = useRef(true);
 
@@ -51,16 +56,26 @@ export function Transcript({ items }: { items: TranscriptItem[] }): React.JSX.El
       className="awos-scroll flex-1 overflow-y-auto px-6 py-4"
     >
       <div className="mx-auto flex max-w-3xl flex-col gap-4">
-        {items.map((item) => (
-          <TranscriptRow key={`${item.kind}:${item.id}`} item={item} />
-        ))}
+        {rows.map((row, index) =>
+          row.type === 'tool-group' ? (
+            <ToolGroup key={row.key} items={row.items} />
+          ) : (
+            <TranscriptRow key={row.key} item={row.item} isLast={index === rows.length - 1} />
+          ),
+        )}
         {busy && <ThinkingIndicator />}
       </div>
     </div>
   );
 }
 
-function TranscriptRow({ item }: { item: TranscriptItem }): React.JSX.Element | null {
+function TranscriptRow({
+  item,
+  isLast,
+}: {
+  item: TranscriptItem;
+  isLast: boolean;
+}): React.JSX.Element | null {
   switch (item.kind) {
     case 'user':
       return (
@@ -83,19 +98,17 @@ function TranscriptRow({ item }: { item: TranscriptItem }): React.JSX.Element | 
     }
 
     case 'message':
-      return (
-        <div
-          className={cn(
-            'whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground/90',
-            item.streaming && 'awos-caret',
-          )}
-        >
-          {item.text}
-        </div>
-      );
+      return <Markdown text={item.text} streaming={item.streaming} />;
 
     case 'reasoning':
-      return <ReasoningBlock text={item.text} streaming={item.streaming} />;
+      return (
+        <ReasoningBlock
+          text={item.text}
+          streaming={item.streaming}
+          startedAt={item.ts}
+          settled={!isLast}
+        />
+      );
 
     case 'tool':
       return <ToolBlock item={item} />;
@@ -122,36 +135,6 @@ function TranscriptRow({ item }: { item: TranscriptItem }): React.JSX.Element | 
     default:
       return null;
   }
-}
-
-/** Reasoning is collapsed by default — useful when debugging, noise the rest of the time. */
-function ReasoningBlock({
-  text,
-  streaming,
-}: {
-  text: string;
-  streaming: boolean;
-}): React.JSX.Element {
-  const [open, setOpen] = useState(false);
-
-  return (
-    <div className="rounded-md border border-dashed border-border/70 bg-muted/20">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-muted-foreground hover:text-foreground"
-      >
-        <ChevronRight className={cn('h-3 w-3 transition-transform', open && 'rotate-90')} />
-        <Brain className="h-3 w-3" />
-        <span>Thinking{streaming ? '…' : ''}</span>
-      </button>
-      {open && (
-        <pre className="awos-scroll max-h-80 overflow-auto whitespace-pre-wrap break-words px-3 pb-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-          {text}
-        </pre>
-      )}
-    </div>
-  );
 }
 
 function ThinkingIndicator(): React.JSX.Element {

@@ -9,12 +9,14 @@ import type {
   ThreadRuntimeState,
   ThreadSummary,
 } from '@awos/protocol';
+import { PINNED_CONTEXT_MAX_CHARS } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
 import type { AgentAdapter, AdapterContext } from './adapters/agent.js';
 import { ClaudeAdapter } from './adapters/claude.js';
 import { CodexAdapter } from './adapters/codex.js';
 import { PermissionBridge } from './permission-bridge.js';
 import { ThreadStore } from './store/thread-store.js';
+import { ContextStore, applyPinnedContext, buildPinnedContext } from './store/context-store.js';
 import { applyReplay, buildReplay, hasReplay, stripReplay } from './store/replay.js';
 import { ArtifactWatcher } from './artifact-watcher.js';
 import { contentHash } from './store/artifact-store.js';
@@ -39,6 +41,7 @@ class Thread {
   readonly id: string;
   readonly #config: HarnessConfig;
   readonly #store: ThreadStore;
+  readonly #context: ContextStore;
   readonly #bridge: PermissionBridge;
   readonly #emit: (event: HarnessEvent) => void;
   readonly #onState: () => void;
@@ -59,6 +62,7 @@ class Thread {
     deps: {
       config: HarnessConfig;
       store: ThreadStore;
+      context: ContextStore;
       bridge: PermissionBridge;
       emit: (event: HarnessEvent) => void;
       onState: () => void;
@@ -67,6 +71,7 @@ class Thread {
     this.id = id;
     this.#config = deps.config;
     this.#store = deps.store;
+    this.#context = deps.context;
     this.#bridge = deps.bridge;
     this.#emit = deps.emit;
     this.#onState = deps.onState;
@@ -172,7 +177,17 @@ class Thread {
       });
     }
 
-    const payload = applyReplay(replay.preamble, text);
+    // Read at send time, not cached on the thread: the notes are a file the user — or an
+    // editor outside this app — can change between turns, and the next turn should carry
+    // what is on disk now.
+    const pinned = buildPinnedContext(this.#context.get(this.id), {
+      maxChars: PINNED_CONTEXT_MAX_CHARS,
+    });
+    if (pinned) {
+      log.info('pinning context', { threadId: this.id, agent, chars: pinned.length });
+    }
+
+    const payload = applyPinnedContext(pinned, applyReplay(replay.preamble, text));
     const adapter = this.#adapter(agent);
 
     // Claim the turn synchronously, before any await, so a second concurrent send sees
@@ -305,6 +320,7 @@ class Thread {
  */
 export class Orchestrator extends EventEmitter {
   readonly store: ThreadStore;
+  readonly context: ContextStore;
   readonly #config: HarnessConfig;
   readonly #bridge = new PermissionBridge();
   readonly #threads = new Map<string, Thread>();
@@ -313,6 +329,7 @@ export class Orchestrator extends EventEmitter {
     super();
     this.#config = config;
     this.store = new ThreadStore(config.dataDir);
+    this.context = new ContextStore(config.dataDir);
   }
 
   async start(): Promise<void> {
@@ -374,20 +391,37 @@ export class Orchestrator extends EventEmitter {
     this.#thread(threadId).setPermissionMode(mode);
   }
 
+  getPinnedContext(threadId: string): string {
+    this.#requireThread(threadId);
+    return this.context.get(threadId);
+  }
+
+  setPinnedContext(threadId: string, text: string): void {
+    // Checked against the store rather than the live thread map, so pinning notes on a
+    // thread that has never taken a turn doesn't spin up its adapters.
+    this.#requireThread(threadId);
+    this.context.set(threadId, text);
+  }
+
   /** Display form of a recorded user message, with any replay block removed. */
   static displayText(text: string): string {
     return hasReplay(text) ? stripReplay(text) : text;
+  }
+
+  #requireThread(threadId: string): void {
+    if (!this.store.get(threadId)) throw new Error(`Unknown thread ${threadId}`);
   }
 
   #thread(threadId: string): Thread {
     const existing = this.#threads.get(threadId);
     if (existing) return existing;
 
-    if (!this.store.get(threadId)) throw new Error(`Unknown thread ${threadId}`);
+    this.#requireThread(threadId);
 
     const thread = new Thread(threadId, {
       config: this.#config,
       store: this.store,
+      context: this.context,
       bridge: this.#bridge,
       emit: (event) => this.emit('event', event),
       onState: () => this.emit('state', thread.state()),

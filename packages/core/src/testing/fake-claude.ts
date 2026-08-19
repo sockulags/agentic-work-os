@@ -7,7 +7,7 @@
  * event — so the adapter under test exercises its actual parsing path rather than a
  * mock. Behaviour is scripted through argv so one binary covers several scenarios.
  *
- * Usage: fake-claude.js [--tool] [--permission] [--slow]
+ * Usage: fake-claude.js [--tool] [--tools] [--permission] [--slow] [--markdown] [--think]
  */
 
 import { LineDecoder } from '../util/jsonl.js';
@@ -17,12 +17,97 @@ const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 
 let turn = 0;
 
+/**
+ * A realistic burst of parallel tool calls for `--tools`.
+ *
+ * One call per turn is enough to prove the adapter parses a `tool_use`, but it says
+ * nothing about what a turn actually looks like on screen. The UI questions — does a run
+ * of calls collapse, does a failure stay visible, does a patch still render as a diff —
+ * only have answers once a single turn carries several kinds at once, one of them broken.
+ */
+const TOOL_RUN: Array<{
+  name: string;
+  input: Record<string, unknown>;
+  result: string;
+  isError?: boolean;
+}> = [
+  {
+    name: 'Read',
+    input: { file_path: 'apps/ui/src/lib/transcript.ts' },
+    result: Array.from({ length: 40 }, (_, i) => `${i + 1}→const line = ${i};`).join('\n'),
+  },
+  {
+    name: 'Grep',
+    input: { pattern: 'useHarness', output_mode: 'files_with_matches' },
+    result: ['apps/ui/src/App.tsx', 'apps/ui/src/hooks/useHarness.ts'].join('\n'),
+  },
+  {
+    name: 'Bash',
+    input: { command: 'npm test --workspace @awos/ui' },
+    result: 'Test Files  4 passed (4)\n     Tests  61 passed (61)',
+  },
+  {
+    name: 'Bash',
+    input: { command: 'npm run lint' },
+    result: "sh: line 1: eslint: command not found\nnpm ERR! Lifecycle script `lint` failed",
+    isError: true,
+  },
+  {
+    name: 'Edit',
+    input: { file_path: 'apps/ui/src/components/ToolBlock.tsx' },
+    result: [
+      '--- a/apps/ui/src/components/ToolBlock.tsx',
+      '+++ b/apps/ui/src/components/ToolBlock.tsx',
+      '@@ -1,4 +1,4 @@',
+      " import { useState } from 'react';",
+      '-const OUTPUT_PREVIEW_LINES = 12;',
+      '+const OUTPUT_PREVIEW_LINES = 20;',
+      ' ',
+    ].join('\n'),
+  },
+];
+
 function emit(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * A reply carrying every markdown construct the transcript renders, cut into deltas.
+ *
+ * The chunk boundaries are chosen, not computed: two of them fall in the middle of a
+ * fence marker, so a renderer that waits for a fence to close is visibly wrong here
+ * rather than only under a real agent. The list is the source of truth for the final
+ * text too, which keeps deltas and the completed message identical by construction.
+ */
+function markdownChunks(prompt: string): string[] {
+  return [
+    '## Plan for ',
+    prompt.slice(0, 20),
+    '\n\nThree steps, in order:\n\n',
+    '1. **Read** the current renderer\n',
+    '   - `Transcript.tsx` owns the message branch\n',
+    '   - a nested item, to prove indentation survives\n',
+    '2. Swap in the markdown renderer\n',
+    '3. Verify against the [docs](https://example.com)\n\n',
+    '| Step | Owner | Lines |\n',
+    '| --- | --- | ---: |\n',
+    '| Parse | remark | 12 |\n',
+    '| Highlight | hljs | ',
+    '34 |\n\n',
+    '``',
+    '`ts src/example.ts\n',
+    'export function greet(name: string): string {\n',
+    '  // 42 is not a name\n',
+    '  return "hello " + name;\n',
+    '}\n',
+    '``',
+    '`\n\n',
+    '> Done — with ~~strikethrough~~ and `inline code` to finish.\n',
+  ];
 }
 
 async function runTurn(text: string): Promise<void> {
@@ -47,17 +132,73 @@ async function runTurn(text: string): Promise<void> {
     parent_tool_use_id: null,
     session_id: SESSION_ID,
   });
+
+  const thinking = args.has('--think');
+  // Content-block indices are what the adapter derives item ids from, so a thinking
+  // block ahead of the text pushes the text to index 1 — and the final assistant
+  // message has to list the blocks in the same order or the ids stop matching.
+  const textIndex = thinking ? 1 : 0;
+  let thinkingText = '';
+
+  if (thinking) {
+    emit({
+      type: 'stream_event',
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } },
+      parent_tool_use_id: null,
+      session_id: SESSION_ID,
+    });
+
+    const chunks = [
+      'Let me look at what was asked. ',
+      'The request is: ',
+      text.slice(0, 20),
+      '. I should check the obvious places first, ',
+      'then decide whether a tool call is warranted.',
+    ];
+    for (const chunk of chunks) {
+      thinkingText += chunk;
+      emit({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'thinking_delta', thinking: chunk },
+        },
+        parent_tool_use_id: null,
+        session_id: SESSION_ID,
+      });
+      // Longer than the text pause on purpose: the UI times the block from its first
+      // delta, and a duration that rounds to zero proves nothing.
+      if (args.has('--slow')) await sleep(400);
+    }
+
+    emit({
+      type: 'stream_event',
+      event: { type: 'content_block_stop', index: 0 },
+      parent_tool_use_id: null,
+      session_id: SESSION_ID,
+    });
+  }
+
   emit({
     type: 'stream_event',
-    event: { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+    event: { type: 'content_block_start', index: textIndex, content_block: { type: 'text' } },
     parent_tool_use_id: null,
     session_id: SESSION_ID,
   });
 
-  for (const chunk of ['Working', ' on: ', text.slice(0, 20)]) {
+  const chunks = args.has('--markdown')
+    ? markdownChunks(text)
+    : ['Working', ' on: ', text.slice(0, 20)];
+
+  for (const chunk of chunks) {
     emit({
       type: 'stream_event',
-      event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: chunk } },
+      event: {
+        type: 'content_block_delta',
+        index: textIndex,
+        delta: { type: 'text_delta', text: chunk },
+      },
       parent_tool_use_id: null,
       session_id: SESSION_ID,
     });
@@ -66,19 +207,24 @@ async function runTurn(text: string): Promise<void> {
 
   emit({
     type: 'stream_event',
-    event: { type: 'content_block_stop', index: 0 },
+    event: { type: 'content_block_stop', index: textIndex },
     parent_tool_use_id: null,
     session_id: SESSION_ID,
   });
 
-  const finalText = `Working on: ${text.slice(0, 20)}`;
+  const finalText = chunks.join('');
   emit({
     type: 'assistant',
     message: {
       id: messageId,
       role: 'assistant',
       model: 'claude-fake-1',
-      content: [{ type: 'text', text: finalText }],
+      content: thinking
+        ? [
+            { type: 'thinking', thinking: thinkingText },
+            { type: 'text', text: finalText },
+          ]
+        : [{ type: 'text', text: finalText }],
     },
     parent_tool_use_id: null,
     session_id: SESSION_ID,
@@ -116,6 +262,8 @@ async function runTurn(text: string): Promise<void> {
     });
   }
 
+  if (args.has('--tools')) await runToolBurst(messageId);
+
   emit({
     type: 'result',
     subtype: 'success',
@@ -125,6 +273,55 @@ async function runTurn(text: string): Promise<void> {
     num_turns: turn,
     total_cost_usd: 0.001,
     usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 5 },
+    session_id: SESSION_ID,
+  });
+}
+
+/** Several calls in one turn, then a closing sentence they were supposed to inform. */
+async function runToolBurst(messageId: string): Promise<void> {
+  const ids = TOOL_RUN.map((_, i) => `toolu_${turn}_${i}`);
+
+  emit({
+    type: 'assistant',
+    message: {
+      id: `${messageId}_tools`,
+      role: 'assistant',
+      content: TOOL_RUN.map((call, i) => ({
+        type: 'tool_use',
+        id: ids[i],
+        name: call.name,
+        input: call.input,
+      })),
+    },
+    parent_tool_use_id: null,
+    session_id: SESSION_ID,
+  });
+
+  if (args.has('--slow')) await sleep(20);
+
+  emit({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: TOOL_RUN.map((call, i) => ({
+        type: 'tool_result',
+        tool_use_id: ids[i],
+        content: call.result,
+        is_error: call.isError === true,
+      })),
+    },
+    parent_tool_use_id: null,
+    session_id: SESSION_ID,
+  });
+
+  emit({
+    type: 'assistant',
+    message: {
+      id: `${messageId}_after`,
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Tests pass; lint is not installed in this checkout.' }],
+    },
+    parent_tool_use_id: null,
     session_id: SESSION_ID,
   });
 }
