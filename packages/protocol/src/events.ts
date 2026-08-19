@@ -161,6 +161,44 @@ export interface DiffUpdatedBody {
   patch: string;
 }
 
+/**
+ * How the dock should render an artifact. Derived from the file extension, because the
+ * publishing agent has no channel to declare it — it just writes a file.
+ */
+export type ArtifactKind =
+  | 'markdown'
+  | 'mermaid'
+  | 'html'
+  | 'json'
+  | 'csv'
+  | 'image'
+  | 'text';
+
+/**
+ * A file appeared or changed in `<cwd>/.awos/artifacts/`.
+ *
+ * Agents publish rich content by writing files there with the file-write tool they
+ * already have; the harness watches the directory and turns each write into this event.
+ * See ARCHITECTURE.md §9 for why publishing is a file convention rather than a tool.
+ *
+ * Like `plan.updated`, each event supersedes the previous one for the same `artifactId`
+ * rather than adding to it — the file has one current content, and the event carries it.
+ */
+export interface ArtifactUpdatedBody {
+  kind: 'artifact.updated';
+  /** The file name inside the artifacts directory; stable across rewrites. */
+  artifactId: string;
+  title: string;
+  /** Named around `kind`, which the union has already claimed as its discriminant. */
+  artifactKind: ArtifactKind;
+  /** File text, or a `data:` URI when `artifactKind` is `image`. Empty means deleted. */
+  content: string;
+  /** Absolute path, so the UI can offer to open the real file. */
+  path: string;
+  /** File mtime, which is when the agent wrote it rather than when we noticed. */
+  updatedAt: number;
+}
+
 export interface ApprovalOption {
   /** Value echoed back in `ApprovalDecision.optionId`. */
   id: string;
@@ -239,6 +277,7 @@ export type HarnessEventBody =
   | ToolCompletedBody
   | PlanUpdatedBody
   | DiffUpdatedBody
+  | ArtifactUpdatedBody
   | ApprovalRequestedBody
   | ApprovalResolvedBody
   | UsageBody

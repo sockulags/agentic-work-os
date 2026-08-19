@@ -7,7 +7,7 @@
  * event — so the adapter under test exercises its actual parsing path rather than a
  * mock. Behaviour is scripted through argv so one binary covers several scenarios.
  *
- * Usage: fake-claude.js [--tool] [--permission] [--slow] [--markdown]
+ * Usage: fake-claude.js [--tool] [--permission] [--slow] [--markdown] [--think]
  */
 
 import { LineDecoder } from '../util/jsonl.js';
@@ -82,9 +82,57 @@ async function runTurn(text: string): Promise<void> {
     parent_tool_use_id: null,
     session_id: SESSION_ID,
   });
+
+  const thinking = args.has('--think');
+  // Content-block indices are what the adapter derives item ids from, so a thinking
+  // block ahead of the text pushes the text to index 1 — and the final assistant
+  // message has to list the blocks in the same order or the ids stop matching.
+  const textIndex = thinking ? 1 : 0;
+  let thinkingText = '';
+
+  if (thinking) {
+    emit({
+      type: 'stream_event',
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } },
+      parent_tool_use_id: null,
+      session_id: SESSION_ID,
+    });
+
+    const chunks = [
+      'Let me look at what was asked. ',
+      'The request is: ',
+      text.slice(0, 20),
+      '. I should check the obvious places first, ',
+      'then decide whether a tool call is warranted.',
+    ];
+    for (const chunk of chunks) {
+      thinkingText += chunk;
+      emit({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'thinking_delta', thinking: chunk },
+        },
+        parent_tool_use_id: null,
+        session_id: SESSION_ID,
+      });
+      // Longer than the text pause on purpose: the UI times the block from its first
+      // delta, and a duration that rounds to zero proves nothing.
+      if (args.has('--slow')) await sleep(400);
+    }
+
+    emit({
+      type: 'stream_event',
+      event: { type: 'content_block_stop', index: 0 },
+      parent_tool_use_id: null,
+      session_id: SESSION_ID,
+    });
+  }
+
   emit({
     type: 'stream_event',
-    event: { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+    event: { type: 'content_block_start', index: textIndex, content_block: { type: 'text' } },
     parent_tool_use_id: null,
     session_id: SESSION_ID,
   });
@@ -96,7 +144,11 @@ async function runTurn(text: string): Promise<void> {
   for (const chunk of chunks) {
     emit({
       type: 'stream_event',
-      event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: chunk } },
+      event: {
+        type: 'content_block_delta',
+        index: textIndex,
+        delta: { type: 'text_delta', text: chunk },
+      },
       parent_tool_use_id: null,
       session_id: SESSION_ID,
     });
@@ -105,7 +157,7 @@ async function runTurn(text: string): Promise<void> {
 
   emit({
     type: 'stream_event',
-    event: { type: 'content_block_stop', index: 0 },
+    event: { type: 'content_block_stop', index: textIndex },
     parent_tool_use_id: null,
     session_id: SESSION_ID,
   });
@@ -117,7 +169,12 @@ async function runTurn(text: string): Promise<void> {
       id: messageId,
       role: 'assistant',
       model: 'claude-fake-1',
-      content: [{ type: 'text', text: finalText }],
+      content: thinking
+        ? [
+            { type: 'thinking', thinking: thinkingText },
+            { type: 'text', text: finalText },
+          ]
+        : [{ type: 'text', text: finalText }],
     },
     parent_tool_use_id: null,
     session_id: SESSION_ID,

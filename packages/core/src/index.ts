@@ -11,6 +11,12 @@ export {
   type ReplayOptions,
   type ReplayResult,
 } from './store/replay.js';
+export {
+  ContextStore,
+  buildPinnedContext,
+  applyPinnedContext,
+  type PinnedContextOptions,
+} from './store/context-store.js';
 export { PermissionBridge } from './permission-bridge.js';
 export { ClaudeAdapter } from './adapters/claude.js';
 export { CodexAdapter } from './adapters/codex.js';

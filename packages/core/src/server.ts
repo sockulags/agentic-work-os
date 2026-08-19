@@ -193,6 +193,17 @@ export class HarnessServer {
         orchestrator.resolveApproval(msg.threadId, msg.approvalId, msg.optionId);
         return { type: 'ok' };
 
+      case 'context.get':
+        return {
+          type: 'context',
+          threadId: msg.threadId,
+          text: orchestrator.getPinnedContext(msg.threadId),
+        };
+
+      case 'context.set':
+        orchestrator.setPinnedContext(msg.threadId, msg.text);
+        return { type: 'ok' };
+
       case 'agents.probe':
         return { type: 'agents.probe', agents: await this.#probeAgents() };
 

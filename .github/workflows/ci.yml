@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Only the newest push to a branch is worth a runner; earlier ones are already stale.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Ahead of the `engines.node` floor on purpose: core's test script globs
+          # `dist/**/*.test.js`, and the test runner only learned to expand globs in
+          # Node 21. On 20 it reads the pattern literally and finds nothing.
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      # Builds protocol and core on the way through, so no separate build step.
+      - run: npm test

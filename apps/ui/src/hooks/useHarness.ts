@@ -8,7 +8,34 @@ import type {
   ThreadSummary,
 } from '@awos/protocol';
 import { HarnessClient, resolveClientOptions, type ConnectionStatus } from '@/lib/client';
-import { foldTranscript } from '@/lib/transcript';
+import { TranscriptFolder } from '@/lib/transcript';
+
+/**
+ * Long enough that a burst of typing is one write, short enough that you never wonder
+ * whether it took.
+ *
+ * Saving per keystroke would put a socket round trip and a synchronous file write behind
+ * every character; a save button is a thing you forget and then lose. Debounce plus a
+ * visible state is the pair that has neither failure mode.
+ */
+const SAVE_DEBOUNCE_MS = 600;
+
+export type PinnedContextSave = 'saved' | 'unsaved' | 'saving' | 'failed';
+
+/**
+ * The thread's pinned notes as the editor has them, tagged with the thread they belong to.
+ *
+ * The text on screen lives here rather than in the panel because the panel unmounts every
+ * time another dock tab is selected, and words the user typed must not depend on which
+ * tab happens to be showing. The tag is what lets a reply be told apart: text arriving for
+ * the thread already open must not disturb what is being typed, text for a different
+ * thread must replace it.
+ */
+export interface PinnedContext {
+  threadId: string;
+  text: string;
+  save: PinnedContextSave;
+}
 
 /**
  * All harness state in one hook.
@@ -31,11 +58,62 @@ export function useHarness() {
   const [runtime, setRuntime] = useState<ThreadRuntimeState | null>(null);
   const [availability, setAvailability] = useState<AgentAvailability[]>([]);
   const [notice, setNotice] = useState<{ level: string; message: string } | null>(null);
+  const [pinnedContext, setPinnedContext] = useState<PinnedContext | null>(null);
 
   // Read inside the push handler without making it a dependency, which would tear down
   // and rebuild the subscription on every thread switch.
   const activeThreadRef = useRef<string | null>(null);
   activeThreadRef.current = activeThreadId;
+
+  const pinnedRef = useRef<PinnedContext | null>(null);
+  pinnedRef.current = pinnedContext;
+
+  /**
+   * Write out whatever the notes editor is holding that the core does not have yet.
+   *
+   * A failed write leaves the text exactly where it was and says so, rather than clearing
+   * the pending flag — the next keystroke and the next reconnect both take another run at
+   * it, so a dropped socket costs a warning rather than the user's words.
+   */
+  const flushPinnedContext = useCallback(async () => {
+    const pending = pinnedRef.current;
+    if (pending === null || pending.save === 'saved' || pending.save === 'saving') return;
+
+    const { threadId, text } = pending;
+    const update = (save: PinnedContextSave, guard: (prev: PinnedContext) => boolean) =>
+      setPinnedContext((prev) =>
+        prev !== null && prev.threadId === threadId && guard(prev) ? { ...prev, save } : prev,
+      );
+
+    update('saving', () => true);
+    try {
+      await client.request({ type: 'context.set', threadId, text });
+    } catch {
+      update('failed', () => true);
+      setNotice({
+        level: 'warn',
+        message: 'Could not save the pinned notes. They are still here — the next edit retries.',
+      });
+      return;
+    }
+    // Keystrokes that landed while the write was in flight are still unsaved, so the
+    // indicator must not claim otherwise.
+    update('saved', (prev) => prev.text === text);
+  }, [client]);
+
+  /**
+   * The write-behind timer lives here rather than in the panel so that closing the panel
+   * neither cancels a pending write nor loses what it was going to carry.
+   */
+  useEffect(() => {
+    if (pinnedContext === null || pinnedContext.save !== 'unsaved') return;
+    const timer = window.setTimeout(() => void flushPinnedContext(), SAVE_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [pinnedContext, flushPinnedContext]);
+
+  const editPinnedContext = useCallback((text: string) => {
+    setPinnedContext((prev) => (prev === null ? prev : { ...prev, text, save: 'unsaved' }));
+  }, []);
 
   useEffect(() => {
     const offStatus = client.onStatus(setStatus);
@@ -63,6 +141,7 @@ export function useHarness() {
             setActiveThreadId(null);
             setEvents([]);
             setRuntime(null);
+            setPinnedContext(null);
           }
           return;
         case 'notice':
@@ -90,14 +169,49 @@ export function useHarness() {
 
   const openThread = useCallback(
     async (threadId: string) => {
+      // Pending notes go out before the editor moves on: the debounce timer does not
+      // survive the switch, and on a reconnect this is what retries a write that failed
+      // while the socket was down.
+      await flushPinnedContext();
+
       const res = await client.request({ type: 'thread.open', threadId });
       if (res.type !== 'thread.opened') return;
       setActiveThreadId(threadId);
+      // Claimed here rather than waiting for the next render, so the pinned-context reply
+      // below can tell whether it is still wanted.
+      activeThreadRef.current = threadId;
       setEvents(res.events);
       setRuntime(res.state);
+      // Reopening the thread already on screen — a reconnect resync, a second click in
+      // the sidebar — keeps the notes in place. Blanking them would read to the editor as
+      // a thread change and throw away whatever is being typed.
+      setPinnedContext((prev) => (prev?.threadId === threadId ? prev : null));
       setThreads((prev) => prev.map((t) => (t.id === threadId ? res.thread : t)));
+
+      // Caught here so a failed notes fetch can't fail the open and take the transcript
+      // down with it. Said out loud, because the panel would otherwise sit on a loading
+      // state with no explanation and no prompt to try again.
+      const context = await client
+        .request({ type: 'context.get', threadId })
+        .catch(() => null);
+      if (activeThreadRef.current !== threadId) return;
+      if (context?.type !== 'context') {
+        setNotice({
+          level: 'warn',
+          message: 'Could not load the pinned notes for this thread. Reopen it to try again.',
+        });
+        return;
+      }
+      // Text from disk is adopted only when the editor has nothing of its own waiting —
+      // that is what makes an edit made outside the app show up here, without a refetch
+      // ever overwriting something half-typed.
+      setPinnedContext((prev) =>
+        prev !== null && prev.threadId === threadId && prev.save !== 'saved'
+          ? prev
+          : { threadId, text: context.text, save: 'saved' },
+      );
     },
-    [client],
+    [client, flushPinnedContext],
   );
 
   /**
@@ -122,6 +236,7 @@ export function useHarness() {
       setActiveThreadId(null);
       setEvents([]);
       setRuntime(null);
+      setPinnedContext(null);
       setNotice({
         level: 'warn',
         message: 'That thread no longer exists on the harness.',
@@ -188,7 +303,14 @@ export function useHarness() {
     [client],
   );
 
-  const transcript = useMemo(() => foldTranscript(events), [events]);
+  // The folder keeps the fold's state between renders so a streaming delta costs one
+  // event rather than the whole log. It works out for itself when the array was appended
+  // to and when it was replaced, so switching threads and resyncing need nothing here.
+  const folderRef = useRef<TranscriptFolder | null>(null);
+  if (folderRef.current === null) folderRef.current = new TranscriptFolder();
+  const folder = folderRef.current;
+
+  const transcript = useMemo(() => folder.fold(events), [folder, events]);
   const activeThread = useMemo(
     () => threads.find((t) => t.id === activeThreadId) ?? null,
     [threads, activeThreadId],
@@ -203,6 +325,8 @@ export function useHarness() {
     runtime,
     availability,
     notice,
+    pinnedContext,
+    editPinnedContext,
     dismissNotice: () => setNotice(null),
     openThread,
     createThread,
