@@ -7,7 +7,7 @@
  * the adapter's JSON-RPC correlation and inbound-request handling are genuinely
  * exercised.
  *
- * Usage: fake-codex.js app-server [--tool] [--approval]
+ * Usage: fake-codex.js app-server [--tool] [--approval] [--diff]
  */
 
 import { LineDecoder } from '../util/jsonl.js';
@@ -28,6 +28,71 @@ function sleep(ms: number): Promise<void> {
 
 /** Resolves when the harness answers our approval request. */
 const pendingApprovals = new Map<number, (decision: string) => void>();
+
+/**
+ * The patch `--diff` reports, covering every file status a unified diff can express and
+ * spanning more than one directory.
+ *
+ * A single modified file was enough to prove the event reaches the UI, but not enough to
+ * exercise anything the UI does with it: file grouping, per-file counts, and the
+ * added/deleted/renamed/binary branches of the viewer all collapse to one case when the
+ * fixture has one file. Rendering bugs in those branches would go unseen end to end.
+ */
+const TURN_DIFF = [
+  'diff --git a/src/lib.rs b/src/lib.rs',
+  'index 1a2b3c4..5d6e7f8 100644',
+  '--- a/src/lib.rs',
+  '+++ b/src/lib.rs',
+  '@@ -1,2 +1,2 @@',
+  '-let old = 1;',
+  '+let updated = 2;',
+  'diff --git a/src/net/client.rs b/src/net/client.rs',
+  'index 2b3c4d5..6e7f8a9 100644',
+  '--- a/src/net/client.rs',
+  '+++ b/src/net/client.rs',
+  '@@ -10,6 +10,7 @@ impl Client {',
+  '     pub fn connect(&self) -> Result<()> {',
+  '         self.handshake()?;',
+  '-        self.poll()',
+  '+        self.poll()?;',
+  '+        Ok(())',
+  '     }',
+  ' }',
+  'diff --git a/src/net/retry.rs b/src/net/retry.rs',
+  'new file mode 100644',
+  'index 0000000..3c4d5e6',
+  '--- /dev/null',
+  '+++ b/src/net/retry.rs',
+  '@@ -0,0 +1,4 @@',
+  '+pub fn backoff(attempt: u32) -> u64 {',
+  '+    let base = 100;',
+  '+    base << attempt.min(6)',
+  '+}',
+  'diff --git a/src/legacy.rs b/src/legacy.rs',
+  'deleted file mode 100644',
+  'index 4d5e6f7..0000000',
+  '--- a/src/legacy.rs',
+  '+++ /dev/null',
+  '@@ -1,3 +0,0 @@',
+  '-pub fn unused() {',
+  '-    todo!()',
+  '-}',
+  'diff --git a/docs/readme.md b/docs/guide.md',
+  'similarity index 82%',
+  'rename from docs/readme.md',
+  'rename to docs/guide.md',
+  'index 5e6f7a8..9b0c1d2 100644',
+  '--- a/docs/readme.md',
+  '+++ b/docs/guide.md',
+  '@@ -1,2 +1,2 @@',
+  '-# Readme',
+  '+# Guide',
+  ' Run the thing.',
+  'diff --git a/assets/logo.png b/assets/logo.png',
+  'index 6f7a8b9..0c1d2e3 100644',
+  'Binary files a/assets/logo.png and b/assets/logo.png differ',
+  '',
+].join('\n');
 
 async function runTurn(threadId: string, text: string): Promise<void> {
   turnCounter += 1;
@@ -81,19 +146,7 @@ async function runTurn(threadId: string, text: string): Promise<void> {
   });
 
   if (args.has('--diff')) {
-    emit({
-      method: 'turn/diff/updated',
-      params: {
-        turnId,
-        diff:
-          'diff --git a/src/lib.rs b/src/lib.rs\n' +
-          '--- a/src/lib.rs\n' +
-          '+++ b/src/lib.rs\n' +
-          '@@ -1,2 +1,2 @@\n' +
-          '-let old = 1;\n' +
-          '+let updated = 2;\n',
-      },
-    });
+    emit({ method: 'turn/diff/updated', params: { turnId, diff: TURN_DIFF } });
   }
 
   const itemId = `item_msg_${turnCounter}`;
