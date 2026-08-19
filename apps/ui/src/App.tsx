@@ -7,6 +7,7 @@ import { Transcript } from '@/components/Transcript';
 import { Composer } from '@/components/Composer';
 import { Dock } from '@/components/dock/Dock';
 import { ApprovalDialog } from '@/components/ApprovalDialog';
+import { DensityToggle } from '@/components/DensityToggle';
 import { AGENT_STYLE } from '@/components/AgentBadge';
 import { cn, formatTokens } from '@/lib/utils';
 
@@ -98,6 +99,8 @@ function Header({
         <h2 className="truncate text-sm font-medium">{title}</h2>
         {cwd && <p className="truncate font-mono text-[11px] text-muted-foreground">{cwd}</p>}
       </div>
+
+      {hasThread && <DensityToggle />}
 
       {hasThread && (
         <select
