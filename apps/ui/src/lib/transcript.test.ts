@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'vitest';
 import type { AgentId, HarnessEvent, HarnessEventBody } from '@awos/protocol';
-import { foldTranscript, type TranscriptItem } from './transcript';
+import { foldTranscript, TranscriptFolder, type TranscriptItem } from './transcript';
 
 /**
  * The event log is fine-grained and append-only; the UI wants a handful of stable
@@ -285,5 +285,241 @@ describe('foldTranscript — panels and totals', () => {
     const { items, totals } = foldTranscript([]);
     expect(items).toEqual([]);
     expect(totals).toEqual({ inputTokens: 0, outputTokens: 0, costUsd: 0 });
+  });
+});
+
+/**
+ * The incremental folder exists only to be faster; it earns that by being
+ * indistinguishable from the one-pass fold at every prefix of the log, including the
+ * awkward ones — a completion that replaces accumulated text, duplicated deltas, a
+ * handover between agents. So the equivalence checks compare whole snapshots step by
+ * step rather than probing individual fields.
+ */
+
+/** A log that exercises every branch the fold has, in the order a real turn produces. */
+function busyLog(): HarnessEvent[] {
+  return [
+    ev(null, null, { kind: 'user.message', text: 'run the build', hadReplay: false }),
+    ev('claude', 't1', { kind: 'turn.started', nativeSessionId: null }),
+    ev('claude', 't1', { kind: 'agent.status', status: 'busy', model: 'sonnet', detail: null }),
+    ev('claude', 't1', { kind: 'reasoning.delta', itemId: 'r1', text: 'think' }),
+    ev('claude', 't1', { kind: 'reasoning.delta', itemId: 'r1', text: 'ing' }),
+    ev('claude', 't1', { kind: 'reasoning.completed', itemId: 'r1', text: 'thought it over' }),
+    ev('claude', 't1', { kind: 'message.delta', itemId: 'm1', text: 'On ' }),
+    // The same delta arriving twice must not survive the completion below.
+    ev('claude', 't1', { kind: 'message.delta', itemId: 'm1', text: 'it' }),
+    ev('claude', 't1', { kind: 'message.delta', itemId: 'm1', text: 'it' }),
+    ev('claude', 't1', {
+      kind: 'tool.started',
+      itemId: 'tool1',
+      name: 'Bash',
+      toolKind: 'command',
+      title: 'npm run build',
+      input: { command: 'npm run build' },
+    }),
+    ev('claude', 't1', { kind: 'tool.output', itemId: 'tool1', stream: 'stdout', chunk: 'step 1\n' }),
+    ev('claude', 't1', { kind: 'tool.output', itemId: 'tool1', stream: 'stderr', chunk: 'warn\n' }),
+    ev('claude', 't1', {
+      kind: 'tool.completed',
+      itemId: 'tool1',
+      status: 'ok',
+      output: 'step 1\nwarn\n',
+      exitCode: 0,
+    }),
+    // A chunk after the completion still belongs to the same row.
+    ev('claude', 't1', { kind: 'tool.output', itemId: 'tool1', stream: 'stdout', chunk: 'late\n' }),
+    ev('claude', 't1', { kind: 'message.completed', itemId: 'm1', text: 'On it — built.' }),
+    ev('claude', 't1', {
+      kind: 'usage',
+      inputTokens: 120,
+      outputTokens: 40,
+      cacheReadTokens: null,
+      cacheWriteTokens: null,
+      costUsd: 0.002,
+    }),
+    ev('claude', 't1', { kind: 'turn.completed', reason: 'completed', error: null, durationMs: 9 }),
+    ev(null, null, { kind: 'user.message', text: 'now codex', hadReplay: false }),
+    ev('codex', 't2', { kind: 'turn.started', nativeSessionId: null }),
+    ev('codex', 't2', { kind: 'turn.started', nativeSessionId: null }),
+    ev('codex', 't2', {
+      kind: 'tool.completed',
+      itemId: 'orphan',
+      status: 'error',
+      output: 'boom',
+      exitCode: 1,
+    }),
+    ev('codex', 't2', { kind: 'message.completed', itemId: 'm2', text: 'Handed over.' }),
+    ev('codex', 't2', { kind: 'error', message: 'stream closed', severity: 'turn' }),
+    ev('codex', 't2', {
+      kind: 'turn.completed',
+      reason: 'interrupted',
+      error: null,
+      durationMs: 3,
+    }),
+  ];
+}
+
+describe('TranscriptFolder — equivalence with the one-pass fold', () => {
+  test('every prefix of a busy log folds identically event by event', () => {
+    const events = busyLog();
+    const folder = new TranscriptFolder();
+
+    for (let i = 1; i <= events.length; i += 1) {
+      const prefix = events.slice(0, i);
+      expect(folder.fold(prefix)).toEqual(foldTranscript(prefix));
+    }
+  });
+
+  test('a log arriving all at once folds the same as one arriving event by event', () => {
+    const events = busyLog();
+    const incremental = new TranscriptFolder();
+    for (let i = 1; i <= events.length; i += 1) incremental.fold(events.slice(0, i));
+
+    expect(incremental.fold(events.slice())).toEqual(new TranscriptFolder().fold(events));
+  });
+
+  test('the same array folded twice returns the same summary without re-folding', () => {
+    const events = busyLog();
+    const folder = new TranscriptFolder();
+    const first = folder.fold(events);
+    expect(folder.fold(events)).toBe(first);
+  });
+
+  test('an untouched item keeps its identity across a delta', () => {
+    const opening = [
+      ev('claude', 't', { kind: 'message.completed', itemId: 'm1', text: 'first' }),
+      ev('claude', 't', { kind: 'message.delta', itemId: 'm2', text: 'sec' }),
+    ];
+    const folder = new TranscriptFolder();
+    const before = folder.fold(opening);
+    const after = folder.fold([
+      ...opening,
+      ev('claude', 't', { kind: 'message.delta', itemId: 'm2', text: 'ond' }),
+    ]);
+
+    // Rendering markdown for a block that did not change is the cost worth avoiding.
+    expect(after.items[0]).toBe(before.items[0]);
+    expect(after.items[1]).not.toBe(before.items[1]);
+    expect(after.items[1]).toMatchObject({ text: 'second' });
+  });
+
+  test('an earlier snapshot is not rewritten by later events', () => {
+    const opening = [ev('claude', 't', { kind: 'message.delta', itemId: 'm1', text: 'Hel' })];
+    const folder = new TranscriptFolder();
+    const before = folder.fold(opening);
+    folder.fold([
+      ...opening,
+      ev('claude', 't', { kind: 'message.completed', itemId: 'm1', text: 'Hello' }),
+    ]);
+
+    expect(before.items[0]).toMatchObject({ text: 'Hel', streaming: true });
+    expect(before.items).toHaveLength(1);
+  });
+});
+
+describe('TranscriptFolder — replaced logs', () => {
+  test('switching to another thread folds the new log rather than extending the old', () => {
+    const first = busyLog();
+    const second = [
+      ev(null, null, { kind: 'user.message', text: 'other thread', hadReplay: false }),
+      ev('codex', 'x1', { kind: 'turn.started', nativeSessionId: null }),
+      ev('codex', 'x1', { kind: 'message.completed', itemId: 'm9', text: 'elsewhere' }),
+    ];
+
+    const folder = new TranscriptFolder();
+    folder.fold(first);
+    expect(folder.fold(second)).toEqual(foldTranscript(second));
+  });
+
+  test('a longer log from a different thread is not mistaken for an append', () => {
+    const first = busyLog().slice(0, 3);
+    const second = busyLog();
+
+    const folder = new TranscriptFolder();
+    folder.fold(first);
+    expect(folder.fold(second)).toEqual(foldTranscript(second));
+  });
+
+  test('clearing the log empties the transcript', () => {
+    const folder = new TranscriptFolder();
+    folder.fold(busyLog());
+    expect(folder.fold([])).toEqual({
+      items: [],
+      totals: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
+    });
+  });
+
+  test('a resync that re-delivers the same log plus more applies only the new events', () => {
+    const events = busyLog();
+    const folder = new TranscriptFolder();
+    folder.fold(events.slice(0, 6));
+
+    // `thread.open` hands back the whole log in a fresh array; the overlap is identical.
+    const resynced = [
+      ...events,
+      ev('codex', 't2', { kind: 'message.completed', itemId: 'm3', text: 'after reconnect' }),
+    ];
+    expect(folder.fold(resynced)).toEqual(foldTranscript(resynced));
+  });
+
+  test('a log that lost its tail is folded from scratch', () => {
+    const events = busyLog();
+    const folder = new TranscriptFolder();
+    folder.fold(events);
+    const rewound = events.slice(0, 8);
+    expect(folder.fold(rewound)).toEqual(foldTranscript(rewound));
+  });
+});
+
+/**
+ * Counts how many events the fold visits, by making `kind` — the property the switch
+ * reads for every event — report itself. It measures the work that actually scales,
+ * without the noise of a wall-clock timing in a test suite.
+ */
+function countingLog(events: HarnessEvent[], count: { visits: number }): HarnessEvent[] {
+  return events.map((event) => {
+    const kind = event.kind;
+    const clone = { ...event };
+    Object.defineProperty(clone, 'kind', {
+      get: () => {
+        count.visits += 1;
+        return kind;
+      },
+      enumerable: true,
+      configurable: true,
+    });
+    return clone as HarnessEvent;
+  });
+}
+
+describe('TranscriptFolder — cost', () => {
+  test('a streaming turn costs one visit per event instead of one per event per delta', () => {
+    const raw: HarnessEvent[] = [
+      ev(null, null, { kind: 'user.message', text: 'go', hadReplay: false }),
+      ev('claude', 't1', { kind: 'turn.started', nativeSessionId: null }),
+    ];
+    for (let i = 0; i < 1998; i += 1) {
+      raw.push(ev('claude', 't1', { kind: 'message.delta', itemId: 'm1', text: 'word ' }));
+    }
+
+    const incrementalCount = { visits: 0 };
+    const incremental = countingLog(raw, incrementalCount);
+    const folder = new TranscriptFolder();
+    let last = folder.fold([]);
+    for (let i = 1; i <= incremental.length; i += 1) last = folder.fold(incremental.slice(0, i));
+
+    const fullCount = { visits: 0 };
+    const full = countingLog(raw, fullCount);
+    const grown: HarnessEvent[] = [];
+    let reference = foldTranscript(grown);
+    for (const event of full) {
+      grown.push(event);
+      reference = foldTranscript(grown);
+    }
+
+    expect(last).toEqual(reference);
+    expect(incrementalCount.visits).toBe(raw.length);
+    expect(fullCount.visits).toBe((raw.length * (raw.length + 1)) / 2);
+    expect(fullCount.visits / incrementalCount.visits).toBeGreaterThan(100);
   });
 });
