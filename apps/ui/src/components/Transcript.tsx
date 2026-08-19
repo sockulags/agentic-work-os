@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Brain, ChevronRight, Info } from 'lucide-react';
 import type { TranscriptItem } from '@/lib/transcript';
 import { AGENT_STYLE } from './AgentBadge';
+import { Markdown } from './Markdown';
 import { ToolBlock } from './ToolBlock';
 import { useHarnessContext } from '@/state/HarnessContext';
 import { cn } from '@/lib/utils';
@@ -83,16 +84,7 @@ function TranscriptRow({ item }: { item: TranscriptItem }): React.JSX.Element | 
     }
 
     case 'message':
-      return (
-        <div
-          className={cn(
-            'whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground/90',
-            item.streaming && 'awos-caret',
-          )}
-        >
-          {item.text}
-        </div>
-      );
+      return <Markdown text={item.text} streaming={item.streaming} />;
 
     case 'reasoning':
       return <ReasoningBlock text={item.text} streaming={item.streaming} />;

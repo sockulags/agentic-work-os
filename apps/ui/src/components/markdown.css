@@ -1,0 +1,123 @@
+/*
+ * Syntax colours and the streaming caret for rendered agent messages.
+ *
+ * These live next to the components instead of in `index.css` for two reasons: the
+ * variables mean nothing outside a code block, and `index.css` is the one stylesheet
+ * every other panel also wants to edit. They follow the same shape as the app tokens —
+ * bare HSL triplets, a `.dark` override — so a theme change reaches them the same way.
+ */
+
+.awos-code {
+  --code-comment: 240 4% 46%;
+  --code-keyword: 280 55% 45%;
+  --code-string: 152 45% 32%;
+  --code-number: 24 75% 40%;
+  --code-function: 214 70% 45%;
+  --code-type: 190 60% 33%;
+  --code-attr: 340 55% 45%;
+  --code-meta: 240 4% 50%;
+  --code-added: 152 55% 32%;
+  --code-removed: 0 65% 48%;
+}
+
+.dark .awos-code {
+  --code-comment: 240 5% 52%;
+  --code-keyword: 280 65% 74%;
+  --code-string: 152 50% 62%;
+  --code-number: 24 85% 68%;
+  --code-function: 214 90% 74%;
+  --code-type: 190 70% 65%;
+  --code-attr: 340 70% 72%;
+  --code-meta: 240 5% 58%;
+  --code-added: 152 55% 60%;
+  --code-removed: 0 70% 66%;
+}
+
+.awos-code .hljs-comment,
+.awos-code .hljs-quote {
+  color: hsl(var(--code-comment));
+  font-style: italic;
+}
+
+.awos-code .hljs-keyword,
+.awos-code .hljs-selector-tag,
+.awos-code .hljs-literal,
+.awos-code .hljs-doctag,
+.awos-code .hljs-formula {
+  color: hsl(var(--code-keyword));
+}
+
+.awos-code .hljs-string,
+.awos-code .hljs-regexp,
+.awos-code .hljs-symbol,
+.awos-code .hljs-bullet,
+.awos-code .hljs-addition {
+  color: hsl(var(--code-string));
+}
+
+.awos-code .hljs-number,
+.awos-code .hljs-variable,
+.awos-code .hljs-template-variable,
+.awos-code .hljs-link {
+  color: hsl(var(--code-number));
+}
+
+.awos-code .hljs-title,
+.awos-code .hljs-title_function_,
+.awos-code .hljs-section,
+.awos-code .hljs-name {
+  color: hsl(var(--code-function));
+}
+
+.awos-code .hljs-title_class_,
+.awos-code .hljs-type,
+.awos-code .hljs-built_in,
+.awos-code .hljs-class .hljs-title,
+.awos-code .hljs-selector-class {
+  color: hsl(var(--code-type));
+}
+
+.awos-code .hljs-attr,
+.awos-code .hljs-attribute,
+.awos-code .hljs-property,
+.awos-code .hljs-selector-attr,
+.awos-code .hljs-selector-pseudo,
+.awos-code .hljs-params {
+  color: hsl(var(--code-attr));
+}
+
+.awos-code .hljs-meta,
+.awos-code .hljs-meta .hljs-keyword,
+.awos-code .hljs-tag,
+.awos-code .hljs-punctuation,
+.awos-code .hljs-operator {
+  color: hsl(var(--code-meta));
+}
+
+.awos-code .hljs-addition {
+  color: hsl(var(--code-added));
+}
+
+.awos-code .hljs-deletion {
+  color: hsl(var(--code-removed));
+}
+
+.awos-code .hljs-emphasis {
+  font-style: italic;
+}
+
+.awos-code .hljs-strong {
+  font-weight: 600;
+}
+
+/*
+ * The caret sits on the last block rather than on the wrapper: on the wrapper it would
+ * be pushed onto a line of its own below the text, which is not where a cursor belongs.
+ * Reuses the `awos-caret` keyframes from `index.css`.
+ */
+.awos-markdown-streaming > :last-child::after {
+  content: '▍';
+  margin-left: 1px;
+  animation: awos-caret 1.1s steps(1, end) infinite;
+  color: hsl(var(--muted-foreground));
+}
