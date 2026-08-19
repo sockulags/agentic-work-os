@@ -11,8 +11,24 @@ import { useHarness, type Harness } from '@/hooks/useHarness';
 const HarnessContext = createContext<Harness | null>(null);
 
 export function HarnessProvider({ children }: { children: React.ReactNode }): React.JSX.Element {
-  const harness = useHarness();
-  return <HarnessContext.Provider value={harness}>{children}</HarnessContext.Provider>;
+  return <HarnessValueProvider value={useHarness()}>{children}</HarnessValueProvider>;
+}
+
+/**
+ * Supplies a harness the caller already has, rather than opening one.
+ *
+ * Exists for tests: `HarnessProvider` calls `useHarness`, which opens a socket, so a test
+ * that only wants to render a panel cannot use it. Splitting the injection out keeps the
+ * components free of test-only branches — they still just read the context.
+ */
+export function HarnessValueProvider({
+  value,
+  children,
+}: {
+  value: Harness;
+  children: React.ReactNode;
+}): React.JSX.Element {
+  return <HarnessContext.Provider value={value}>{children}</HarnessContext.Provider>;
 }
 
 export function useHarnessContext(): Harness {
