@@ -52,8 +52,12 @@ export function Transcript({ items }: { items: TranscriptItem[] }): React.JSX.El
       className="awos-scroll flex-1 overflow-y-auto px-6 py-4"
     >
       <div className="mx-auto flex max-w-3xl flex-col gap-4">
-        {items.map((item) => (
-          <TranscriptRow key={`${item.kind}:${item.id}`} item={item} />
+        {items.map((item, index) => (
+          <TranscriptRow
+            key={`${item.kind}:${item.id}`}
+            item={item}
+            isLast={index === items.length - 1}
+          />
         ))}
         {busy && <ThinkingIndicator />}
       </div>
@@ -61,7 +65,13 @@ export function Transcript({ items }: { items: TranscriptItem[] }): React.JSX.El
   );
 }
 
-function TranscriptRow({ item }: { item: TranscriptItem }): React.JSX.Element | null {
+function TranscriptRow({
+  item,
+  isLast,
+}: {
+  item: TranscriptItem;
+  isLast: boolean;
+}): React.JSX.Element | null {
   switch (item.kind) {
     case 'user':
       return (
@@ -96,7 +106,14 @@ function TranscriptRow({ item }: { item: TranscriptItem }): React.JSX.Element | 
       );
 
     case 'reasoning':
-      return <ReasoningBlock text={item.text} streaming={item.streaming} startedAt={item.ts} />;
+      return (
+        <ReasoningBlock
+          text={item.text}
+          streaming={item.streaming}
+          startedAt={item.ts}
+          settled={!isLast}
+        />
+      );
 
     case 'tool':
       return <ToolBlock item={item} />;

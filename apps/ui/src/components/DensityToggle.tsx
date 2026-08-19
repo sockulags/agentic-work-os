@@ -1,10 +1,15 @@
 import { useDisplaySettings, type Density } from '@/state/DisplaySettingsContext';
 import { cn } from '@/lib/utils';
 
+/**
+ * The hints describe what the setting does today, not what it is meant to reach: tool
+ * blocks read the same density in their own change, and the wording widens when they do.
+ * A tooltip promising something the reader can watch not happen is worse than a narrow one.
+ */
 export const DENSITY_OPTIONS: Array<{ value: Density; label: string; hint: string }> = [
-  { value: 'compact', label: 'Compact', hint: 'Hide reasoning, collapse tool calls' },
-  { value: 'normal', label: 'Normal', hint: 'Reasoning and tool calls collapsed' },
-  { value: 'verbose', label: 'Verbose', hint: 'Expand reasoning and tool output' },
+  { value: 'compact', label: 'Compact', hint: 'Hide reasoning entirely' },
+  { value: 'normal', label: 'Normal', hint: 'Keep reasoning folded away' },
+  { value: 'verbose', label: 'Verbose', hint: 'Show reasoning in full' },
 ];
 
 /**

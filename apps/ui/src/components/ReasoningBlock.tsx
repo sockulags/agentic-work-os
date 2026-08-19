@@ -24,20 +24,29 @@ export function formatThinkingLabel(durationMs: number | null): string {
  * Reasoning, reduced to one discreet line.
  *
  * Deliberately quieter than an answer: it is context for how the agent got somewhere,
- * not the thing the reader came for. The duration is measured here rather than carried
- * on the event stream — the fold gives us the first delta's timestamp and a streaming
- * flag, and the moment the flag clears is the completion. A block that was already
- * complete when it first rendered (a thread replayed after a reload) has no measurable
- * end, so it drops the duration instead of inventing one.
+ * not the thing the reader came for.
+ *
+ * The duration is measured here rather than read off the event stream, because the fold
+ * carries the first delta's timestamp but no completion time. Waiting for `streaming` to
+ * clear would overstate it badly: Claude only emits `reasoning.completed` once the whole
+ * assistant message is done, so a three-second thought followed by a forty-second answer
+ * would report itself as forty-three seconds of thinking. Anything appearing after this
+ * block in the transcript is proof the agent has moved on, so that is what stops the
+ * clock. A block that was already complete when it first rendered — a thread replayed
+ * after a reload — was never timed here at all, and says so by dropping the duration
+ * rather than inventing one.
  */
 export function ReasoningBlock({
   text,
   streaming,
   startedAt,
+  settled,
 }: {
   text: string;
   streaming: boolean;
   startedAt: number;
+  /** Whether the transcript has moved past this block — something follows it. */
+  settled: boolean;
 }): React.JSX.Element | null {
   const { density } = useDisplaySettings();
   const visibility = reasoningVisibility(density);
@@ -45,19 +54,21 @@ export function ReasoningBlock({
   // Clamped against the client clock: the timestamp is stamped by the core process, and
   // a skewed clock would otherwise report a thought that started in the future.
   const startRef = useRef(Math.min(startedAt, Date.now()));
-  const observedStreamingRef = useRef(false);
+  const timingRef = useRef(false);
   const [durationMs, setDurationMs] = useState<number | null>(null);
   const [open, setOpen] = useState(visibility === 'expanded');
 
+  const thinking = streaming && !settled;
+
   useEffect(() => {
-    if (streaming) {
-      observedStreamingRef.current = true;
+    if (thinking) {
+      timingRef.current = true;
       return;
     }
-    if (!observedStreamingRef.current) return;
-    observedStreamingRef.current = false;
+    if (!timingRef.current) return;
+    timingRef.current = false;
     setDurationMs(Date.now() - startRef.current);
-  }, [streaming]);
+  }, [thinking]);
 
   // Changing density is an explicit instruction about the whole transcript, so it wins
   // over an earlier toggle on this one block.
@@ -76,7 +87,7 @@ export function ReasoningBlock({
         className="group flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
       >
         <Brain className="h-3 w-3 shrink-0" />
-        <span>{streaming ? 'Thinking…' : formatThinkingLabel(durationMs)}</span>
+        <span>{thinking ? 'Thinking…' : formatThinkingLabel(durationMs)}</span>
         <ChevronRight
           className={cn(
             'h-3 w-3 shrink-0 opacity-0 transition-all group-hover:opacity-70',
