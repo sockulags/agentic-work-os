@@ -16,6 +16,8 @@ import { CodexAdapter } from './adapters/codex.js';
 import { PermissionBridge } from './permission-bridge.js';
 import { ThreadStore } from './store/thread-store.js';
 import { applyReplay, buildReplay, hasReplay, stripReplay } from './store/replay.js';
+import { ArtifactWatcher } from './artifact-watcher.js';
+import { contentHash } from './store/artifact-store.js';
 import { snapshotWorkingTree, diffTrees } from './util/git.js';
 import { createLogger } from './util/logger.js';
 
@@ -50,6 +52,7 @@ class Thread {
   #diff: string | null = null;
   readonly #pendingApprovals = new Map<string, ApprovalRequestedBody>();
   readonly #agentStatus = new Map<AgentId, { status: string; model: string | null }>();
+  readonly #artifacts: ArtifactWatcher | null = null;
 
   constructor(
     id: string,
@@ -70,6 +73,7 @@ class Thread {
 
     // Rebuild derived state from history so a reopened thread shows its checklist and
     // the diff from the last turn that produced one.
+    const publishedArtifacts = new Map<string, string>();
     for (const event of this.#store.events(id)) {
       if (event.kind === 'plan.updated') this.#plan = event.items;
       else if (event.kind === 'turn.started') {
@@ -77,6 +81,26 @@ class Thread {
         this.#diff = null;
       }
       else if (event.kind === 'diff.updated') this.#diff = event.patch;
+      else if (event.kind === 'artifact.updated') {
+        // A tombstone retires the id: leaving its hash behind would make the watcher
+        // announce the same deletion again on every restart.
+        if (event.content === '') publishedArtifacts.delete(event.artifactId);
+        else publishedArtifacts.set(event.artifactId, contentHash(event.content));
+      }
+    }
+
+    const cwd = this.#store.get(id)?.cwd;
+    if (cwd) {
+      this.#artifacts = new ArtifactWatcher({
+        cwd,
+        known: publishedArtifacts,
+        // Attributed to the turn in flight, which is a guess the watcher cannot verify —
+        // it sees a file change, not an author — but during a turn the agent is the only
+        // thing writing, and knowing which turn produced a document is worth more than
+        // the rare misattribution of a file the user saved at the same moment.
+        emit: (body) => this.#record(null, { ...body, turnId: this.#currentTurnId }),
+      });
+      this.#artifacts.start();
     }
   }
 
@@ -198,6 +222,7 @@ class Thread {
   }
 
   async stop(): Promise<void> {
+    this.#artifacts?.stop();
     await Promise.all([...this.#adapters.values()].map((adapter) => adapter.stop()));
     this.#adapters.clear();
     this.#bridge.unregisterThread(this.id);

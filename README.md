@@ -124,11 +124,40 @@ To skip approvals entirely, set the thread's permission mode to **Bypass** or
 **Accept edits** in the header. Mode changes apply the next time an agent process starts,
 since the mode is baked into its argv.
 
+## Artifacts
+
+When an agent makes something worth looking at rather than reading — a plan, a diagram, a
+table, a screenshot — it writes a file into `.awos/artifacts/` inside the working
+directory. The harness watches that directory and publishes each write as an event, so it
+shows up in the side dock.
+
+```
+.awos/artifacts/
+  release-plan.md      # markdown
+  data-flow.mmd        # mermaid
+  bench.csv            # csv
+  screenshot.png       # image
+```
+
+There is no tool to call and nothing to configure: the agent uses the file-write tool it
+already has, which is what makes this work identically for Claude and Codex. Tell it the
+convention and it publishes — a line like *"put anything worth rendering into
+`.awos/artifacts/` as markdown or mermaid"* in your prompt or `CLAUDE.md` is the whole
+setup. The kind comes from the extension; markdown takes its title from the first heading,
+everything else from the file name.
+
+Because artifacts are ordinary files, they are also inspectable, diffable and committable,
+and the agent can read back what it published on a later turn. Rewriting a file updates the
+artifact in place, deleting it retires the artifact, and files over 1 MB are skipped rather
+than truncated. Hidden files and editor scratch files (`.tmp`, `~`) are ignored, so an
+in-flight save never appears as an artifact of its own. See
+[ARCHITECTURE.md §9](./ARCHITECTURE.md) for the reasoning.
+
 ## Development
 
 ```bash
 npm run typecheck     # tsc across all packages
-npm test              # 145 tests: core (node:test) + ui (vitest)
+npm test              # 183 tests: core (node:test) + ui (vitest)
 npm run build         # protocol → core → ui
 ```
 
