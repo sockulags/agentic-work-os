@@ -1,7 +1,8 @@
 import { describe, expect, test, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, screen } from '@testing-library/react';
 import type { ApprovalRequestedBody } from '@awos/protocol';
 import { ApprovalDialog } from './ApprovalDialog';
+import { idleRuntime, renderWithHarness } from '@/test-harness';
 
 const approval = (overrides: Partial<ApprovalRequestedBody> = {}): ApprovalRequestedBody => ({
   kind: 'approval.requested',
@@ -21,14 +22,16 @@ const approval = (overrides: Partial<ApprovalRequestedBody> = {}): ApprovalReque
 
 describe('ApprovalDialog', () => {
   test('renders nothing without a pending approval', () => {
-    const { container } = render(<ApprovalDialog approval={null} onResolve={vi.fn()} />);
+    const { container } = renderWithHarness(<ApprovalDialog />, { runtime: idleRuntime() });
 
     expect(container).toBeEmptyDOMElement();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   test('shows what is being approved, in full', () => {
-    render(<ApprovalDialog approval={approval()} onResolve={vi.fn()} />);
+    renderWithHarness(<ApprovalDialog />, {
+      runtime: idleRuntime({ pendingApprovals: [approval()] }),
+    });
 
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     expect(screen.getByText('Run a shell command')).toBeInTheDocument();
@@ -37,14 +40,18 @@ describe('ApprovalDialog', () => {
   });
 
   test('renders one button per option, in the order given', () => {
-    render(<ApprovalDialog approval={approval()} onResolve={vi.fn()} />);
+    renderWithHarness(<ApprovalDialog />, {
+      runtime: idleRuntime({ pendingApprovals: [approval()] }),
+    });
 
     const labels = screen.getAllByRole('button').map((b) => b.textContent);
     expect(labels).toEqual(['Allow', 'Always allow', 'Deny']);
   });
 
   test('deny options are visually secondary to allow options', () => {
-    render(<ApprovalDialog approval={approval()} onResolve={vi.fn()} />);
+    renderWithHarness(<ApprovalDialog />, {
+      runtime: idleRuntime({ pendingApprovals: [approval()] }),
+    });
 
     expect(screen.getByRole('button', { name: 'Allow' })).toHaveClass('bg-primary');
     expect(screen.getByRole('button', { name: 'Deny' })).toHaveClass('border-input');
@@ -52,7 +59,10 @@ describe('ApprovalDialog', () => {
 
   test('choosing an option reports the approval and option ids', () => {
     const onResolve = vi.fn();
-    render(<ApprovalDialog approval={approval()} onResolve={onResolve} />);
+    renderWithHarness(<ApprovalDialog />, {
+      runtime: idleRuntime({ pendingApprovals: [approval()] }),
+      resolveApproval: onResolve,
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'Always allow' }));
 
@@ -64,7 +74,10 @@ describe('ApprovalDialog', () => {
   // removed. Anything that makes the dialog dismissible has to break both to get past here.
   test('escape does not dismiss the dialog: an unanswered approval blocks the turn', () => {
     const onResolve = vi.fn();
-    render(<ApprovalDialog approval={approval()} onResolve={onResolve} />);
+    renderWithHarness(<ApprovalDialog />, {
+      runtime: idleRuntime({ pendingApprovals: [approval()] }),
+      resolveApproval: onResolve,
+    });
 
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape', code: 'Escape' });
 

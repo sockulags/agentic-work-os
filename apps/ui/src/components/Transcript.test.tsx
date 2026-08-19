@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, screen } from '@testing-library/react';
 import type { TranscriptItem } from '@/lib/transcript';
 import { Transcript } from './Transcript';
+import { idleRuntime, renderWithHarness } from '@/test-harness';
 
 let seq = 0;
 const next = (): number => (seq += 1);
@@ -68,13 +69,13 @@ const toolCall = (title: string): TranscriptItem => ({
 
 describe('Transcript empty state', () => {
   test('explains agent switching instead of rendering an empty scroller', () => {
-    render(<Transcript items={[]} busy={false} />);
+    renderWithHarness(<Transcript items={[]} />, { runtime: idleRuntime() });
 
     expect(screen.getByText(/Send a message to start/)).toBeInTheDocument();
   });
 
   test('the busy indicator is not shown before there is anything to say', () => {
-    const { container } = render(<Transcript items={[]} busy />);
+    const { container } = renderWithHarness(<Transcript items={[]} />, { runtime: idleRuntime({ busyWith: 'claude' }) });
 
     expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
   });
@@ -82,14 +83,14 @@ describe('Transcript empty state', () => {
 
 describe('Transcript item kinds', () => {
   test('a user message renders right-aligned in its own bubble', () => {
-    const { container } = render(<Transcript items={[user('deploy it')]} busy={false} />);
+    const { container } = renderWithHarness(<Transcript items={[user('deploy it')]} />, { runtime: idleRuntime() });
 
     expect(screen.getByText('deploy it')).toBeInTheDocument();
     expect(container.querySelector('.justify-end')).not.toBeNull();
   });
 
   test('a divider names the agent taking the floor', () => {
-    render(<Transcript items={[divider('codex'), divider('claude')]} busy={false} />);
+    renderWithHarness(<Transcript items={[divider('codex'), divider('claude')]} />, { runtime: idleRuntime() });
 
     // Tie each label back to its agent's colour. Asserting the two labels merely exist
     // passes just as happily when the agent styles are swapped, which is the one thing
@@ -99,8 +100,9 @@ describe('Transcript item kinds', () => {
   });
 
   test('an agent message renders as plain text, with a caret only while streaming', () => {
-    const { container } = render(
-      <Transcript items={[message('settled'), message('still going', true)]} busy={false} />,
+    const { container } = renderWithHarness(
+      <Transcript items={[message('settled'), message('still going', true)]} />,
+      { runtime: idleRuntime() },
     );
 
     expect(screen.getByText('settled')).toBeInTheDocument();
@@ -110,7 +112,7 @@ describe('Transcript item kinds', () => {
   });
 
   test('reasoning is collapsed behind a Thinking toggle', () => {
-    render(<Transcript items={[reasoning('secret chain of thought')]} busy={false} />);
+    renderWithHarness(<Transcript items={[reasoning('secret chain of thought')]} />, { runtime: idleRuntime() });
 
     expect(screen.queryByText('secret chain of thought')).not.toBeInTheDocument();
 
@@ -120,24 +122,22 @@ describe('Transcript item kinds', () => {
   });
 
   test('streaming reasoning gets an ellipsis on its label', () => {
-    render(<Transcript items={[reasoning('partial', true)]} busy={false} />);
+    renderWithHarness(<Transcript items={[reasoning('partial', true)]} />, { runtime: idleRuntime() });
 
     expect(screen.getByRole('button', { name: 'Thinking…' })).toBeInTheDocument();
   });
 
   test('a tool call is delegated to ToolBlock', () => {
-    render(<Transcript items={[toolCall('npm test')]} busy={false} />);
+    renderWithHarness(<Transcript items={[toolCall('npm test')]} />, { runtime: idleRuntime() });
 
     expect(screen.getByText('npm test')).toBeInTheDocument();
     expect(screen.getByText('done')).toBeInTheDocument();
   });
 
   test('an error notice is marked apart from an informational one', () => {
-    render(
-      <Transcript
-        items={[notice('Interrupted.', 'info'), notice('spawn failed', 'error')]}
-        busy={false}
-      />,
+    renderWithHarness(
+      <Transcript items={[notice('Interrupted.', 'info'), notice('spawn failed', 'error')]} />,
+      { runtime: idleRuntime() },
     );
 
     // Both levels render the same text in the same place, so checking the text is present
@@ -155,8 +155,9 @@ describe('Transcript item kinds', () => {
 
 describe('Transcript composition', () => {
   test('items render in the order given', () => {
-    const { container } = render(
-      <Transcript items={[user('first'), message('second'), user('third')]} busy={false} />,
+    const { container } = renderWithHarness(
+      <Transcript items={[user('first'), message('second'), user('third')]} />,
+      { runtime: idleRuntime() },
     );
 
     expect(container.textContent?.indexOf('first')).toBeLessThan(
@@ -168,7 +169,7 @@ describe('Transcript composition', () => {
   });
 
   test('busy appends the three-dot indicator after the last item', () => {
-    const { container } = render(<Transcript items={[message('working on it')]} busy />);
+    const { container } = renderWithHarness(<Transcript items={[message('working on it')]} />, { runtime: idleRuntime({ busyWith: 'claude' }) });
 
     expect(container.querySelectorAll('.animate-bounce')).toHaveLength(3);
   });
