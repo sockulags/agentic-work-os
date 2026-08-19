@@ -111,6 +111,35 @@ describe('Claude adapter end to end', () => {
     assert.match(completed.kind === 'tool.completed' ? completed.output : '', /hello/);
   });
 
+  test('streams a thinking block as reasoning deltas and one completion', async () => {
+    const { orch, events } = await boot(makeConfig({ claudeBinArgs: [FAKE_CLAUDE, '--think'] }));
+    const thread = orch.createThread({ cwd: process.cwd() });
+
+    await orch.send(thread.id, 'claude', 'think about it');
+
+    const deltas = events.filter((e) => e.kind === 'reasoning.delta');
+    assert.ok(deltas.length > 1, 'reasoning arrives in several deltas, not one lump');
+
+    const completed = events.find((e) => e.kind === 'reasoning.completed');
+    assert.ok(completed, 'reasoning.completed emitted');
+
+    // The UI folds deltas and the completion into one block by item id, and times the
+    // block from the first delta — both break if the ids drift apart.
+    const itemIds = new Set(deltas.map((e) => (e.kind === 'reasoning.delta' ? e.itemId : '')));
+    assert.equal(itemIds.size, 1);
+    assert.ok(itemIds.has(completed.kind === 'reasoning.completed' ? completed.itemId : ''));
+
+    const assembled = deltas.map((e) => (e.kind === 'reasoning.delta' ? e.text : '')).join('');
+    assert.equal(completed.kind === 'reasoning.completed' ? completed.text : null, assembled);
+
+    // Adding the thinking block moved the text to content-block index 1; the message
+    // path has to survive that shift.
+    assert.ok(
+      events.some((e) => e.kind === 'message.completed'),
+      'the answer still lands alongside the reasoning',
+    );
+  });
+
   test('records usage from the result event', async () => {
     const { orch, events } = await boot(makeConfig());
     const thread = orch.createThread({ cwd: process.cwd() });
