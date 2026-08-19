@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "tauri": "tauri",
+    "predev": "npm --prefix ../.. run bundle:core",
     "dev": "cross-env CARGO_UNSTABLE_BUILD_DIR_NEW_LAYOUT=false tauri dev",
     "build": "tauri build",
     "ui:dev": "npm --prefix ../.. run dev:ui",
