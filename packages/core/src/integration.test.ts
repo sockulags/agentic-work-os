@@ -111,6 +111,30 @@ describe('Claude adapter end to end', () => {
     assert.match(completed.kind === 'tool.completed' ? completed.output : '', /hello/);
   });
 
+  test('reports a burst of parallel tool calls, failures included', async () => {
+    const { orch, events } = await boot(
+      makeConfig({ claudeBinArgs: [FAKE_CLAUDE, '--tools'] }),
+    );
+    const thread = orch.createThread({ cwd: process.cwd() });
+    await orch.send(thread.id, 'claude', 'do several things');
+
+    const started = events.filter((e) => e.kind === 'tool.started');
+    assert.equal(started.length, 5);
+    assert.deepEqual(
+      started.map((e) => (e.kind === 'tool.started' ? e.toolKind : null)),
+      ['file_read', 'search', 'command', 'command', 'file_edit'],
+    );
+
+    const completed = events.filter((e) => e.kind === 'tool.completed');
+    assert.equal(completed.length, 5);
+    assert.deepEqual(
+      completed
+        .map((e) => (e.kind === 'tool.completed' ? e.status : null))
+        .filter((status) => status !== 'ok'),
+      ['error'],
+    );
+  });
+
   test('records usage from the result event', async () => {
     const { orch, events } = await boot(makeConfig());
     const thread = orch.createThread({ cwd: process.cwd() });
