@@ -5,8 +5,7 @@ import { useHarnessContext } from '@/state/HarnessContext';
 import { ThreadSidebar } from '@/components/ThreadSidebar';
 import { Transcript } from '@/components/Transcript';
 import { Composer } from '@/components/Composer';
-import { PlanPanel } from '@/components/PlanPanel';
-import { ChangesPanel } from '@/components/ChangesPanel';
+import { Dock } from '@/components/dock/Dock';
 import { ApprovalDialog } from '@/components/ApprovalDialog';
 import { AGENT_STYLE } from '@/components/AgentBadge';
 import { cn, formatTokens } from '@/lib/utils';
@@ -62,13 +61,16 @@ export default function App(): React.JSX.Element {
           <EmptyState connected={h.status === 'open'} />
         ) : (
           <>
-            <PlanPanel />
-            <ChangesPanel />
             <Transcript items={h.transcript.items} />
             <Composer />
           </>
         )}
       </main>
+
+      {/* Outside <main> so the dock spans the full window height rather than sitting
+          under the thread header, and so it never competes with the transcript for
+          vertical space the way the old strips did. */}
+      {h.activeThread !== null && <Dock />}
 
       <ApprovalDialog />
     </div>
