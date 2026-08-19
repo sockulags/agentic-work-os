@@ -45,18 +45,18 @@ describe('ContextStore', () => {
     assert.equal(new ContextStore(dir).get(thread.id), 'remember this');
   });
 
-  test('refuses a write over the budget rather than truncating it', () => {
+  test('keeps text over the prompt budget instead of refusing it', () => {
     const dir = tempDir();
     const threads = new ThreadStore(dir);
     const thread = threads.create({ cwd: process.cwd() });
     const context = new ContextStore(dir);
 
-    context.set(thread.id, 'keep me');
-    assert.throws(
-      () => context.set(thread.id, 'x'.repeat(PINNED_CONTEXT_MAX_CHARS + 1)),
-      /over the/,
-    );
-    assert.equal(context.get(thread.id), 'keep me', 'the rejected write left the file alone');
+    const oversized = 'x'.repeat(PINNED_CONTEXT_MAX_CHARS + 1);
+    context.set(thread.id, oversized);
+
+    // The budget belongs to the prompt, not to the document. Refusing here would leave
+    // the user's text with nowhere to live.
+    assert.equal(context.get(thread.id), oversized);
   });
 
   test('clearing the text clears the context', () => {
@@ -109,13 +109,11 @@ describe('applyPinnedContext', () => {
 });
 
 describe('reading a file edited outside the app', () => {
-  test('an oversized file is cut at injection instead of being refused', () => {
+  test('an oversized file is cut at injection, and the turn still goes out', () => {
     const dir = tempDir();
     const threads = new ThreadStore(dir);
     const thread = threads.create({ cwd: process.cwd() });
 
-    // `set` would reject this, but nothing stops an editor from writing it directly, and
-    // a turn must still go out.
     writeFileSync(join(dir, 'threads', thread.id, 'context.md'), 'z'.repeat(50_000), 'utf8');
 
     const block = buildPinnedContext(new ContextStore(dir).get(thread.id), {

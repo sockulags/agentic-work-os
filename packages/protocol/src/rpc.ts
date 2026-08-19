@@ -46,11 +46,13 @@ export interface ThreadRuntimeState {
 }
 
 /**
- * Ceiling on the pinned context a thread may carry, in characters.
+ * How much pinned context a turn's prompt will carry, in characters.
  *
- * It lives in the protocol because both ends have to agree on it: the core refuses a
- * larger write, and the editor has to warn before the user reaches the point where it
- * would. A prompt budget the UI can't see is one the user only discovers by losing text.
+ * A budget, not a storage limit: the core keeps whatever is written and cuts only what it
+ * sends. It lives in the protocol because both ends have to agree on where that cut falls
+ * — the core makes it, and the editor has to warn the user before they cross it. A prompt
+ * budget the UI can't see is one the user only discovers by wondering why the agent
+ * ignored the end of their notes.
  */
 export const PINNED_CONTEXT_MAX_CHARS = 8_000;
 

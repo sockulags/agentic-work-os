@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PINNED_CONTEXT_MAX_CHARS } from '@awos/protocol';
 import { createLogger } from '../util/logger.js';
 
 const log = createLogger('context');
@@ -12,7 +11,10 @@ const log = createLogger('context');
  * because it is a mutable document rather than something that happened: the log is
  * append-only and would accumulate a full copy per keystroke-batch, and replaying it to
  * find the current text would be the wrong shape for a value that is only ever "latest".
- * A markdown file also means you can edit it from outside the app.
+ * A markdown file also means you can edit it from outside the app: every turn re-reads
+ * the file, and reopening the thread pulls the new text into the editor. Writes are
+ * last-one-wins, so an outside edit made while the editor holds unsaved text is the one
+ * case that loses — a single-writer document with a single-user app behind it.
  *
  * Writes are synchronous, for the same reason `ThreadStore`'s are.
  */
@@ -39,14 +41,16 @@ export class ContextStore {
     }
   }
 
+  /**
+   * Store the text verbatim, however long it is.
+   *
+   * Deliberately not budget-checked: the prompt is protected where it is actually at
+   * risk, in `buildPinnedContext`, which cuts an oversized document and says so. Refusing
+   * the write instead would leave the user holding text the app won't keep — and every
+   * way out of the editor (another tab, another thread, a reload) would then lose it.
+   * Saving everything and sending what fits loses nothing and hides nothing.
+   */
   set(threadId: string, text: string): void {
-    if (text.length > PINNED_CONTEXT_MAX_CHARS) {
-      throw new Error(
-        `Pinned context is ${text.length} characters, over the ${PINNED_CONTEXT_MAX_CHARS} limit.`,
-      );
-    }
-    // Refusing rather than truncating: silently dropping the tail would lose the user's
-    // words without telling them. The editor caps input, so this is a backstop.
     mkdirSync(join(this.#root, threadId), { recursive: true });
     writeFileSync(this.#path(threadId), text, 'utf8');
   }
@@ -79,8 +83,10 @@ export interface PinnedContextOptions {
  * Budgeted by characters like the replay block, and for the same reason: this rides on
  * *every* turn, so an unbounded blob would quietly eat the context window that the
  * conversation itself needs. Unlike replay there is nothing to drop selectively — one
- * document, no turn boundaries — so an oversized one is cut at the limit and says so,
- * which only happens when the file was edited outside the app past what `set` allows.
+ * document, no turn boundaries — so an oversized one is cut at the limit and says so, in
+ * the block itself so the agent knows it is reading a fragment. This is the only place
+ * the budget is enforced: the store keeps whatever the user wrote, and the editor warns
+ * long before the tail starts going missing.
  */
 export function buildPinnedContext(
   text: string,
