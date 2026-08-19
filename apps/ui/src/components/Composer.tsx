@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowUp, Square } from 'lucide-react';
-import type { AgentAvailability, AgentId } from '@awos/protocol';
 import { AGENT_STYLE } from './AgentBadge';
 import { Button } from './ui/button';
 import { Textarea } from './ui/textarea';
+import { useHarnessContext } from '@/state/HarnessContext';
 import { cn } from '@/lib/utils';
 
 /**
@@ -13,23 +13,13 @@ import { cn } from '@/lib/utils';
  * answers is part of composing the message, and it's the one control this whole app
  * exists for.
  */
-export function Composer({
-  agent,
-  onAgentChange,
-  onSend,
-  onInterrupt,
-  busyWith,
-  availability,
-  disabled,
-}: {
-  agent: AgentId;
-  onAgentChange: (agent: AgentId) => void;
-  onSend: (text: string) => void;
-  onInterrupt: () => void;
-  busyWith: AgentId | null;
-  availability: AgentAvailability[];
-  disabled: boolean;
-}): React.JSX.Element {
+export function Composer(): React.JSX.Element {
+  const h = useHarnessContext();
+  const agent = h.activeThread?.activeAgent ?? 'claude';
+  const busyWith = h.runtime?.busyWith ?? null;
+  const availability = h.availability;
+  const disabled = h.status !== 'open';
+
   const [text, setText] = useState('');
   const ref = useRef<HTMLTextAreaElement>(null);
 
@@ -44,7 +34,7 @@ export function Composer({
   const submit = (): void => {
     const trimmed = text.trim();
     if (trimmed === '' || busyWith !== null || disabled) return;
-    onSend(trimmed);
+    void h.send(trimmed, agent);
     setText('');
   };
 
@@ -70,7 +60,7 @@ export function Composer({
               <button
                 key={id}
                 type="button"
-                onClick={() => onAgentChange(id)}
+                onClick={() => void h.setAgent(id)}
                 title={probe?.detail ?? ''}
                 className={cn(
                   'flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors',
@@ -92,7 +82,7 @@ export function Composer({
             <Button
               variant="ghost"
               size="sm"
-              onClick={onInterrupt}
+              onClick={() => void h.interrupt()}
               className="ml-auto h-7 gap-1.5 text-xs text-muted-foreground"
             >
               <Square className="h-3 w-3 fill-current" />

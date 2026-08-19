@@ -1,7 +1,7 @@
 import { ShieldAlert } from 'lucide-react';
-import type { ApprovalRequestedBody } from '@awos/protocol';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
+import { useHarnessContext } from '@/state/HarnessContext';
 
 /**
  * Blocking approval prompt.
@@ -11,13 +11,9 @@ import { Button } from './ui/button';
  * patch is always shown — an approval dialog that hides what it's approving is worse
  * than no dialog at all.
  */
-export function ApprovalDialog({
-  approval,
-  onResolve,
-}: {
-  approval: ApprovalRequestedBody | null;
-  onResolve: (approvalId: string, optionId: string) => void;
-}): React.JSX.Element | null {
+export function ApprovalDialog(): React.JSX.Element | null {
+  const { runtime, resolveApproval } = useHarnessContext();
+  const approval = runtime?.pendingApprovals[0] ?? null;
   if (!approval) return null;
 
   return (
@@ -48,7 +44,7 @@ export function ApprovalDialog({
             <Button
               key={option.id}
               variant={option.behavior === 'allow' ? 'default' : 'outline'}
-              onClick={() => onResolve(approval.approvalId, option.id)}
+              onClick={() => void resolveApproval(approval.approvalId, option.id)}
             >
               {option.label}
             </Button>
