@@ -7,7 +7,7 @@
  * event — so the adapter under test exercises its actual parsing path rather than a
  * mock. Behaviour is scripted through argv so one binary covers several scenarios.
  *
- * Usage: fake-claude.js [--tool] [--tools] [--permission] [--slow]
+ * Usage: fake-claude.js [--tool] [--tools] [--permission] [--slow] [--markdown] [--think]
  */
 
 import { LineDecoder } from '../util/jsonl.js';
@@ -75,6 +75,41 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * A reply carrying every markdown construct the transcript renders, cut into deltas.
+ *
+ * The chunk boundaries are chosen, not computed: two of them fall in the middle of a
+ * fence marker, so a renderer that waits for a fence to close is visibly wrong here
+ * rather than only under a real agent. The list is the source of truth for the final
+ * text too, which keeps deltas and the completed message identical by construction.
+ */
+function markdownChunks(prompt: string): string[] {
+  return [
+    '## Plan for ',
+    prompt.slice(0, 20),
+    '\n\nThree steps, in order:\n\n',
+    '1. **Read** the current renderer\n',
+    '   - `Transcript.tsx` owns the message branch\n',
+    '   - a nested item, to prove indentation survives\n',
+    '2. Swap in the markdown renderer\n',
+    '3. Verify against the [docs](https://example.com)\n\n',
+    '| Step | Owner | Lines |\n',
+    '| --- | --- | ---: |\n',
+    '| Parse | remark | 12 |\n',
+    '| Highlight | hljs | ',
+    '34 |\n\n',
+    '``',
+    '`ts src/example.ts\n',
+    'export function greet(name: string): string {\n',
+    '  // 42 is not a name\n',
+    '  return "hello " + name;\n',
+    '}\n',
+    '``',
+    '`\n\n',
+    '> Done — with ~~strikethrough~~ and `inline code` to finish.\n',
+  ];
+}
+
 async function runTurn(text: string): Promise<void> {
   turn += 1;
   const messageId = `msg_${turn}`;
@@ -97,17 +132,73 @@ async function runTurn(text: string): Promise<void> {
     parent_tool_use_id: null,
     session_id: SESSION_ID,
   });
+
+  const thinking = args.has('--think');
+  // Content-block indices are what the adapter derives item ids from, so a thinking
+  // block ahead of the text pushes the text to index 1 — and the final assistant
+  // message has to list the blocks in the same order or the ids stop matching.
+  const textIndex = thinking ? 1 : 0;
+  let thinkingText = '';
+
+  if (thinking) {
+    emit({
+      type: 'stream_event',
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } },
+      parent_tool_use_id: null,
+      session_id: SESSION_ID,
+    });
+
+    const chunks = [
+      'Let me look at what was asked. ',
+      'The request is: ',
+      text.slice(0, 20),
+      '. I should check the obvious places first, ',
+      'then decide whether a tool call is warranted.',
+    ];
+    for (const chunk of chunks) {
+      thinkingText += chunk;
+      emit({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'thinking_delta', thinking: chunk },
+        },
+        parent_tool_use_id: null,
+        session_id: SESSION_ID,
+      });
+      // Longer than the text pause on purpose: the UI times the block from its first
+      // delta, and a duration that rounds to zero proves nothing.
+      if (args.has('--slow')) await sleep(400);
+    }
+
+    emit({
+      type: 'stream_event',
+      event: { type: 'content_block_stop', index: 0 },
+      parent_tool_use_id: null,
+      session_id: SESSION_ID,
+    });
+  }
+
   emit({
     type: 'stream_event',
-    event: { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+    event: { type: 'content_block_start', index: textIndex, content_block: { type: 'text' } },
     parent_tool_use_id: null,
     session_id: SESSION_ID,
   });
 
-  for (const chunk of ['Working', ' on: ', text.slice(0, 20)]) {
+  const chunks = args.has('--markdown')
+    ? markdownChunks(text)
+    : ['Working', ' on: ', text.slice(0, 20)];
+
+  for (const chunk of chunks) {
     emit({
       type: 'stream_event',
-      event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: chunk } },
+      event: {
+        type: 'content_block_delta',
+        index: textIndex,
+        delta: { type: 'text_delta', text: chunk },
+      },
       parent_tool_use_id: null,
       session_id: SESSION_ID,
     });
@@ -116,19 +207,24 @@ async function runTurn(text: string): Promise<void> {
 
   emit({
     type: 'stream_event',
-    event: { type: 'content_block_stop', index: 0 },
+    event: { type: 'content_block_stop', index: textIndex },
     parent_tool_use_id: null,
     session_id: SESSION_ID,
   });
 
-  const finalText = `Working on: ${text.slice(0, 20)}`;
+  const finalText = chunks.join('');
   emit({
     type: 'assistant',
     message: {
       id: messageId,
       role: 'assistant',
       model: 'claude-fake-1',
-      content: [{ type: 'text', text: finalText }],
+      content: thinking
+        ? [
+            { type: 'thinking', thinking: thinkingText },
+            { type: 'text', text: finalText },
+          ]
+        : [{ type: 'text', text: finalText }],
     },
     parent_tool_use_id: null,
     session_id: SESSION_ID,

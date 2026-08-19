@@ -85,6 +85,7 @@ type HarnessEvent = {
 | `tool.completed` | tool returned | `user` msg `tool_result` block | `item/completed` |
 | `plan.updated` | todo/plan changed | `TodoWrite` tool input | `turn/plan/updated` |
 | `diff.updated` | turn's cumulative patch | — (no equivalent) | `turn/diff/updated` |
+| `artifact.updated` | file written under `.awos/artifacts/` | harness file watcher | harness file watcher |
 | `approval.requested` | permission gate | MCP relay | `item/permissions/requestApproval` |
 | `approval.resolved` | user decided | — | — |
 | `usage` | token accounting | `result.usage` | `turn/completed.usage` |
@@ -229,7 +230,65 @@ change is a compile error in every consumer rather than a runtime surprise.
 
 ---
 
-## 9. What v1 deliberately does not do
+## 9. Artifacts — publishing by writing a file
+
+An agent that produces something worth *looking at* rather than reading in the transcript —
+a table, a diagram, a rendered report — publishes it by writing a file into
+`<thread.cwd>/.awos/artifacts/`. The core watches that directory and emits
+`artifact.updated`; the side dock renders it.
+
+**Why a file convention and not a tool.** A tool would have to be registered with each
+agent separately, and the two are not symmetric there: only Claude gets an
+`--mcp-config`, and only for the permission bridge. Codex would need its own mechanism,
+and the harness would then own two publishing paths that can drift. A file needs neither:
+both agents already have a write tool, no adapter learns anything, nothing new can fail at
+spawn time, and the result is a real file on disk — inspectable, diffable, committable,
+and readable by the agent that wrote it on its next turn. The trade is that the agent has
+to be *told* the convention, which is a line in a prompt rather than a protocol change.
+
+```
+<thread.cwd>/.awos/artifacts/
+  release-plan.md      → markdown
+  data-flow.mmd        → mermaid
+  bench.csv            → csv
+  screenshot.png       → image (inlined as a data: URI)
+```
+
+The kind comes from the extension, since the writer has no channel to declare one;
+unknown extensions render as text rather than being refused. Markdown titles itself from
+its first heading, everything else from the file name.
+
+**It goes through the ordinary event path.** The watcher hands the body to the same
+`Thread#record` every adapter event passes through, so an artifact is persisted in
+`events.jsonl`, gets its `seq` from the store, reaches connected UIs over the existing
+socket, and survives a restart — none of which is code anyone had to write for it. The
+events carry `agent: null`, because the watcher sees a file change and not an author;
+`turnId` is best-effort attribution to whatever turn was in flight.
+
+Four rules keep the directory from becoming a noise source:
+
+- **Emission is keyed on content, not on file-system activity.** `fs.watch` fires several
+  times per save, editors touch files they did not change, and every restart re-reads a
+  directory the transcript already describes. The watcher hashes what it last published —
+  seeded from the event log at thread open — so all three are silent.
+- **Save debris is ignored**: dotfiles, `~` backups, and `.tmp`/`.swp`-class names, all of
+  which appear in a watch the moment they are created and would otherwise each become an
+  artifact of their own.
+- **Files over 1 MB are skipped, not truncated.** The content is inlined into the event, so
+  it is appended verbatim to the transcript on every write; and a truncated document looks
+  like a broken renderer rather than a skipped file.
+- **A deletion emits a tombstone** — the same event with empty content — rather than
+  nothing. Consumers derive their state by folding an append-only log, so silence would
+  leave the last `artifact.updated` standing as the newest word on that id and the
+  artifact would return on the next restart.
+
+The directory is watched from the thread's working directory down, so it does not need to
+exist yet: until it appears the watcher sits on the nearest existing ancestor and moves
+down when it is created.
+
+---
+
+## 10. What v1 deliberately does not do
 
 - **Diff parity via working-tree snapshots.** Codex reports a cumulative turn diff via
   `turn/diff/updated`. Claude has no equivalent in the stream-json protocol: its
