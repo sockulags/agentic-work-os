@@ -9,6 +9,7 @@ import type {
 } from '@awos/protocol';
 import { HarnessClient, resolveClientOptions, type ConnectionStatus } from '@/lib/client';
 import { TranscriptFolder } from '@/lib/transcript';
+import { foldArtifacts } from '@/lib/artifacts';
 
 /**
  * Long enough that a burst of typing is one write, short enough that you never wonder
@@ -311,6 +312,7 @@ export function useHarness() {
   const folder = folderRef.current;
 
   const transcript = useMemo(() => folder.fold(events), [folder, events]);
+  const artifacts = useMemo(() => foldArtifacts(events), [events]);
   const activeThread = useMemo(
     () => threads.find((t) => t.id === activeThreadId) ?? null,
     [threads, activeThreadId],
@@ -322,6 +324,7 @@ export function useHarness() {
     activeThread,
     activeThreadId,
     transcript,
+    artifacts,
     runtime,
     availability,
     notice,
