@@ -9,6 +9,7 @@ import type {
 } from '@awos/protocol';
 import { HarnessClient, resolveClientOptions, type ConnectionStatus } from '@/lib/client';
 import { foldTranscript } from '@/lib/transcript';
+import { foldArtifacts } from '@/lib/artifacts';
 
 /**
  * All harness state in one hook.
@@ -189,6 +190,7 @@ export function useHarness() {
   );
 
   const transcript = useMemo(() => foldTranscript(events), [events]);
+  const artifacts = useMemo(() => foldArtifacts(events), [events]);
   const activeThread = useMemo(
     () => threads.find((t) => t.id === activeThreadId) ?? null,
     [threads, activeThreadId],
@@ -200,6 +202,7 @@ export function useHarness() {
     activeThread,
     activeThreadId,
     transcript,
+    artifacts,
     runtime,
     availability,
     notice,

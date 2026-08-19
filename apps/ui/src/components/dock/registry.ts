@@ -1,8 +1,9 @@
-import { GitCompare, ListChecks, type LucideIcon } from 'lucide-react';
+import { GitCompare, ListChecks, Shapes, type LucideIcon } from 'lucide-react';
 import type { Harness } from '@/hooks/useHarness';
 import { parseUnifiedDiff } from '@/lib/diff';
 import { PlanPanel } from './tabs/PlanPanel';
 import { ChangesPanel } from './tabs/ChangesPanel';
+import { ArtifactsTab } from './tabs/ArtifactsTab';
 
 export interface DockTab {
   id: string;
@@ -41,6 +42,13 @@ export const DOCK_TABS: readonly [DockTab, ...DockTab[]] = [
     icon: GitCompare,
     badge: (h) => countChangedFiles(h.runtime?.diff),
     Component: ChangesPanel,
+  },
+  {
+    id: 'artifacts',
+    label: 'Artifacts',
+    icon: Shapes,
+    badge: (h) => h.artifacts.length,
+    Component: ArtifactsTab,
   },
 ];
 
