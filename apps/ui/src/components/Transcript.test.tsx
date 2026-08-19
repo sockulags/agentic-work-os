@@ -99,24 +99,31 @@ describe('Transcript item kinds', () => {
     expect(screen.getByText('Claude')).toHaveClass('text-claude');
   });
 
-  test('an agent message renders as plain text, with a caret only while streaming', () => {
+  test('an agent message renders as markdown, with a caret only while streaming', () => {
     const { container } = renderWithHarness(
       <Transcript items={[message('settled'), message('still going', true)]} />,
       { runtime: idleRuntime() },
     );
 
     expect(screen.getByText('settled')).toBeInTheDocument();
-    expect(screen.getByText('still going')).toHaveClass('awos-caret');
-    expect(screen.getByText('settled')).not.toHaveClass('awos-caret');
-    expect(container.querySelectorAll('.awos-caret')).toHaveLength(1);
+    expect(screen.getByText('still going')).toBeInTheDocument();
+
+    // The caret is a CSS `::after` on the last block inside the streaming wrapper. jsdom
+    // does not compute generated content, so the class that switches it on is the only
+    // honest thing to assert here — that it lands on one message and not the other.
+    expect(container.querySelectorAll('.awos-markdown-streaming')).toHaveLength(1);
+    expect(screen.getByText('still going').closest('.awos-markdown-streaming')).not.toBeNull();
+    expect(screen.getByText('settled').closest('.awos-markdown-streaming')).toBeNull();
   });
 
-  test('reasoning is collapsed behind a Thinking toggle', () => {
-    renderWithHarness(<Transcript items={[reasoning('secret chain of thought')]} />, { runtime: idleRuntime() });
+  test('settled reasoning is collapsed behind its duration label', () => {
+    renderWithHarness(<Transcript items={[reasoning('secret chain of thought')]} />, {
+      runtime: idleRuntime(),
+    });
 
     expect(screen.queryByText('secret chain of thought')).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /Thinking/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Thought/ }));
 
     expect(screen.getByText('secret chain of thought')).toBeInTheDocument();
   });
