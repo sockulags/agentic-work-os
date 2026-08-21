@@ -202,7 +202,7 @@ in-flight save never appears as an artifact of its own. See
 
 ```bash
 npm run typecheck     # tsc across all packages
-npm test              # 183 tests: core (node:test) + ui (vitest)
+npm test              # 395 tests: core (node:test) + ui (vitest)
 npm run build         # protocol → core → ui
 ```
 
