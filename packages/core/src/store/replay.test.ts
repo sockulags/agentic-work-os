@@ -84,7 +84,84 @@ describe('buildReplay', () => {
     assert.ok(text.length < 2_000, `expected a truncated block, got ${text.length} chars`);
   });
 
-  test('drops the oldest turns when over budget and says so', () => {
+  test('shortens the oldest turns instead of dropping them when over budget', () => {
+    const events: HarnessEvent[] = [];
+    for (let i = 0; i < 20; i++) {
+      events.push(
+        ev('codex', `c${i}`, {
+          kind: 'message.completed',
+          itemId: `m${i}`,
+          text: `turn ${i} decided something ${'y'.repeat(2_000)}`,
+        }),
+      );
+    }
+
+    const result = buildReplay(events, 'claude', { maxChars: 6_000, maxToolOutput: 100 });
+    const text = result.preamble as string;
+
+    // The budget cannot hold 20 full turns, but it holds every brief — so nothing is lost.
+    assert.equal(result.turnCount, 20);
+    assert.equal(result.elidedTurns, 0);
+    assert.ok(result.digestTurns > 0, 'expected the budget to force some turns into brief');
+    assert.match(text, /in brief/);
+    // Newest-first: the most recent turn is what makes the new message intelligible, and
+    // the oldest still says what it decided.
+    assert.match(text, /turn 19/);
+    assert.match(text, /turn 0 decided something/);
+  });
+
+  test('a brief turn keeps the decision and drops the prose', () => {
+    const events = [
+      ev('codex', 'c1', {
+        kind: 'message.completed',
+        itemId: 'm',
+        text: `Chose Postgres over SQLite. ${'filler '.repeat(400)}`,
+      }),
+      ev('codex', 'c2', { kind: 'message.completed', itemId: 'm2', text: 'newest' }),
+    ];
+
+    const result = buildReplay(events, 'claude', { maxChars: 400, maxToolOutput: 100 });
+    const text = result.preamble as string;
+
+    assert.equal(result.digestTurns, 1);
+    assert.match(text, /Chose Postgres over SQLite\./);
+    assert.match(text, /· brief/);
+    assert.ok(text.length < 1_200, `expected the brief tier to be small, got ${text.length}`);
+  });
+
+  test('a brief turn keeps every failed tool but caps the successful ones', () => {
+    const events: HarnessEvent[] = [
+      ev('codex', 'c1', {
+        kind: 'message.completed',
+        itemId: 'm',
+        text: 'a'.repeat(3_000),
+      }),
+    ];
+    for (let i = 0; i < 6; i++) {
+      events.push(
+        ev('codex', 'c1', { kind: 'tool.started', itemId: `t${i}`, name: 'exec', toolKind: 'command', title: `step-${i}`, input: {} }),
+        ev('codex', 'c1', {
+          kind: 'tool.completed',
+          itemId: `t${i}`,
+          status: i === 5 ? 'error' : 'ok',
+          output: 'z'.repeat(500),
+          exitCode: i === 5 ? 1 : 0,
+        }),
+      );
+    }
+    events.push(ev('codex', 'c2', { kind: 'message.completed', itemId: 'm2', text: 'newest' }));
+
+    const text = buildReplay(events, 'claude', { maxChars: 500, maxToolOutput: 100 })
+      .preamble as string;
+
+    // The failure survives the cut; the surplus successes are counted, not listed.
+    assert.match(text, /step-5.*error/);
+    assert.match(text, /\+2 more tool calls, all ok/);
+    // Tool output is what the brief tier buys the space with.
+    assert.doesNotMatch(text, /zzz/);
+  });
+
+  test('drops turns only when even the brief forms overflow, and says so', () => {
     const events: HarnessEvent[] = [];
     for (let i = 0; i < 20; i++) {
       events.push(
@@ -101,18 +178,20 @@ describe('buildReplay', () => {
 
     assert.ok(result.elidedTurns > 0, 'expected some turns to be elided');
     assert.match(text, /earlier turns? elided/);
-    // Newest-first: the most recent turn is what makes the new message intelligible.
     assert.match(text, /turn 19/);
     assert.doesNotMatch(text, /turn 0 /);
   });
 
-  test('always keeps at least one turn even if it blows the budget', () => {
+  test('always keeps at least one turn, in full, even if it blows the budget', () => {
     const events = [
       ev('codex', 'c1', { kind: 'message.completed', itemId: 'm', text: 'z'.repeat(5_000) }),
     ];
     const result = buildReplay(events, 'claude', { maxChars: 100, maxToolOutput: 100 });
     assert.ok(result.preamble, 'a single oversized turn must still be replayed');
     assert.equal(result.turnCount, 1);
+    // The turn the new message continues from is never shortened.
+    assert.equal(result.digestTurns, 0);
+    assert.match(result.preamble as string, /z{5000}/);
   });
 
   test('notes an interrupted turn so the agent does not assume it finished', () => {

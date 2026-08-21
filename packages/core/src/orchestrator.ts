@@ -172,6 +172,7 @@ class Thread {
         threadId: this.id,
         agent,
         turns: replay.turnCount,
+        brief: replay.digestTurns,
         elided: replay.elidedTurns,
         chars: replay.preamble.length,
       });

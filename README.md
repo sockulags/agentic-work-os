@@ -113,6 +113,21 @@ Your transcript shows what you actually typed; the block is transport, not conte
 Replay costs tokens on every switch — `AWOS_REPLAY_MAX_CHARS` and
 `AWOS_REPLAY_MAX_TOOL_OUTPUT` are the dials.
 
+When a thread outgrows the budget, older turns are shortened rather than dropped. A
+shortened turn is marked `· brief` and keeps what the next turn can be wrong about — the
+ask, the decision, the commands and their exit codes, every failure — and loses the prose
+and the tool output:
+
+```
+### codex · brief
+**codex:** Chose Postgres over SQLite because two processes write concurrently. …
+  `npm run migrate` → error
+```
+
+The newest turn is always sent in full. Turns are dropped outright only when even the
+brief forms overflow, which at the default budget takes about a hundred of them. See
+[ARCHITECTURE.md §4](./ARCHITECTURE.md) for why the floor exists.
+
 ## Approvals
 
 Codex raises approvals natively over its JSON-RPC channel. Claude has no callback channel
