@@ -224,12 +224,52 @@ session. Either half can be lost without losing the conversation.
 
 ## 7. Concurrency
 
-- **One turn in flight per thread.** Sending to Codex while Claude is mid-turn is
-  rejected by the orchestrator rather than queued, because the two would race on the
-  filesystem. The UI disables the composer for the duration.
+The limit was never the two agents; it was the one directory they share. So the thread has
+two modes, and the mode decides how many turns can be in flight.
+
+- **Shared directory (default).** One turn in flight per thread. Sending to Codex while
+  Claude is mid-turn is rejected by the orchestrator rather than queued, because the two
+  would race on the filesystem. The UI disables the composer for the duration.
+- **Lanes (`parallel`).** Each agent gets its own `git worktree` of the same repository, so
+  the turn lock becomes per agent and both can run at once. The UI disables only the lane
+  you are sending to.
 - **Interrupts** map to `turn/interrupt` (Codex) and a `control_request`/`interrupt`
-  on stdin (Claude), with a SIGTERM fallback after `INTERRUPT_GRACE_MS`.
+  on stdin (Claude), with a SIGTERM fallback after `INTERRUPT_GRACE_MS`. With lanes,
+  interrupting names one agent; without them there is only ever one to name.
 - **Multiple threads** run fully in parallel — each owns its own process pair.
+
+### Lanes
+
+A lane is a detached worktree under `<dataDir>/threads/<id>/lanes/<agent>`, provisioned on
+that agent's first turn. Detached, so no branch appears in the user's repo; and nothing is
+ever committed on their behalf.
+
+**Seeded from the working tree, not from `HEAD`.** `git worktree add` checks out a commit,
+so a plain lane would miss whatever is uncommitted — usually the very work being continued.
+The lane is checked out at `HEAD` and then the diff from `HEAD` to a snapshot of the
+working tree is applied on top, which reuses the same snapshot machinery §9 uses for turn
+diffs. What the agent sees is what the user sees.
+
+**Integration is explicit, and all or nothing.** A lane's work reaches the thread directory
+only when the user asks. The patch is checked with `git apply --check` before it is
+applied, so a collision changes nothing rather than leaving conflict markers in files
+nobody asked anyone to touch; the refusal is recorded and can be retried once the collision
+is resolved. The lane's baseline advances only on success, so integrating twice is not
+integrating twice. There is no merge commit and no branch — the transcript is the history,
+and the lane is only where the files were while it was made.
+
+**What lanes cost.** A worktree holds what git tracks, so files git ignores are not there —
+for most repos `node_modules` and build output, which means an agent that can edit the
+source but not run the tests. `AWOS_LANE_SETUP` names a command to run once in each new
+lane for exactly that. The harness does not guess one: what makes a checkout usable is
+project knowledge it does not have.
+
+Turning lanes on or off restarts both agents, because an adapter's working directory is
+fixed when it spawns. Their native sessions go with them and the watermarks reset, so the
+next turn replays the thread's full history into a fresh session — the rebuild §6 already
+promises when a native session is lost. Leaving lanes is refused while one still holds work
+that was never integrated, and a thread that closes with such a lane keeps it on disk and
+says where: the alternative is deleting the only copy of something the user never saw.
 
 ---
 
@@ -316,8 +356,10 @@ down when it is created.
   emits the delta as the same `diff.updated` event Codex produces (`util/git.ts`). Ground
   truth from the filesystem, never an interpretation of tool output. It is a no-op outside
   a git repository, and Codex is never shadowed since it reports its own.
-- **No multi-agent parallelism inside one thread.** Two agents on the same working
-  directory at the same time is a correctness problem, not a feature.
+- **No multi-agent parallelism in one shared directory.** Two agents writing to the same
+  working directory at the same time is a correctness problem, not a feature. Parallelism
+  is offered only where it is safe — one worktree per agent, see §7 — and never by
+  loosening the rule in the shared-directory mode.
 - **No summarization.** By your decision — full replay, and when the budget cannot hold it,
   the brief tier from §4. Both tiers are deterministic renderings of logged events; no
   model reads the transcript to compress it, so a replay never contains a claim no agent

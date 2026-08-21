@@ -85,6 +85,26 @@ interface FoldState {
   lastDividerAgent: AgentId | null;
 }
 
+/** One line saying where an agent's files are, and whether the user has them yet. */
+function laneNotice(
+  agent: AgentId | null,
+  status: 'provisioned' | 'integrated' | 'refused' | 'removed',
+  detail: string | null,
+): string {
+  const who = agent ?? 'the agent';
+  const suffix = detail ? ` — ${detail}` : '';
+  switch (status) {
+    case 'provisioned':
+      return `${who} is working in its own lane${suffix}`;
+    case 'integrated':
+      return `Integrated ${who}'s lane${suffix}`;
+    case 'refused':
+      return `${who}'s lane does not apply to your working directory${suffix}`;
+    case 'removed':
+      return `${who}'s lane was closed${suffix}`;
+  }
+}
+
 function createFoldState(): FoldState {
   return {
     items: [],
@@ -331,6 +351,19 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
         seq: event.seq,
         level: 'error',
         text: event.message,
+        ts: event.ts,
+      });
+      break;
+
+    case 'lane.updated':
+      // Where an agent's files went is part of the conversation: work that is in a lane
+      // and not in the user's directory is the thing they most need not to be surprised by.
+      items.push({
+        kind: 'notice',
+        id: event.id,
+        seq: event.seq,
+        level: event.status === 'refused' ? 'error' : 'info',
+        text: laneNotice(event.agent, event.status, event.detail),
         ts: event.ts,
       });
       break;

@@ -1,10 +1,11 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { HarnessEvent } from '@awos/protocol';
+import type { HarnessEvent, ThreadRuntimeState } from '@awos/protocol';
 import { Orchestrator } from './orchestrator.js';
 import type { HarnessConfig } from './config.js';
 
@@ -23,6 +24,7 @@ const FAKE_CODEX = join(here, 'testing', 'fake-codex.js');
 
 let dataDir: string;
 let orchestrator: Orchestrator | null = null;
+const repos: string[] = [];
 
 function makeConfig(overrides: Partial<HarnessConfig> = {}): HarnessConfig {
   return {
@@ -40,8 +42,25 @@ function makeConfig(overrides: Partial<HarnessConfig> = {}): HarnessConfig {
     interruptGraceMs: 1_000,
     approvalTimeoutMs: 5_000,
     codexInitTimeoutMs: 10_000,
+    laneSetup: '',
+    laneSetupTimeoutMs: 60_000,
     ...overrides,
   };
+}
+
+/** A throwaway git repo to act as a thread's working directory. Lanes need a real one. */
+function makeRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'awos-e2e-repo-'));
+  repos.push(dir);
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+  // Keep the host's line-ending policy out of assertions about file contents.
+  execFileSync('git', ['config', 'core.autocrlf', 'false'], { cwd: dir });
+  writeFileSync(join(dir, 'seed.txt'), 'seed\n');
+  execFileSync('git', ['add', '-A'], { cwd: dir });
+  execFileSync('git', ['commit', '-qm', 'initial'], { cwd: dir });
+  return dir;
 }
 
 async function boot(config: HarnessConfig): Promise<{ orch: Orchestrator; events: HarnessEvent[] }> {
@@ -61,6 +80,7 @@ afterEach(async () => {
   await orchestrator?.stop();
   orchestrator = null;
   rmSync(dataDir, { recursive: true, force: true });
+  while (repos.length > 0) rmSync(repos.pop() as string, { recursive: true, force: true });
 });
 
 describe('Claude adapter end to end', () => {
@@ -419,6 +439,74 @@ describe('cross-agent handoff', () => {
       /still working/,
     );
     await first;
+  });
+
+  test('runs both agents at once once each has a lane', async () => {
+    const { orch } = await boot(
+      makeConfig({
+        claudeBinArgs: [FAKE_CLAUDE, '--slow'],
+        codexBinArgs: [FAKE_CODEX, '--slow'],
+      }),
+    );
+    const thread = orch.createThread({ cwd: makeRepo() });
+    await orch.setParallel(thread.id, true);
+
+    // Sample the runtime state as it changes, so "both were working" is something the
+    // test observed rather than something it assumed from two resolved promises.
+    let peak = 0;
+    orch.on('state', (state: ThreadRuntimeState) => {
+      peak = Math.max(peak, state.busy.length);
+    });
+
+    const first = orch.send(thread.id, 'claude', 'long running');
+    const second = orch.send(thread.id, 'codex', 'at the same time');
+    await Promise.all([first, second]);
+
+    assert.equal(peak, 2, 'both agents held a turn at the same moment');
+
+    const state = orch.state(thread.id);
+    assert.equal(state.busy.length, 0, 'both turns finished');
+    assert.ok(state.lanes.claude, 'claude got a lane');
+    assert.ok(state.lanes.codex, 'codex got a lane');
+    assert.notEqual(state.lanes.claude, state.lanes.codex, 'the lanes are separate directories');
+  });
+
+  test('integrating a lane moves its work into the thread directory', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    const thread = orch.createThread({ cwd });
+    await orch.setParallel(thread.id, true);
+    await orch.send(thread.id, 'claude', 'anything, to provision the lane');
+
+    const lane = orch.state(thread.id).lanes.claude;
+    assert.ok(lane);
+    // Stand in for the agent's edit: the fake CLIs stream events, they don't touch files.
+    writeFileSync(join(lane, 'from-the-lane.txt'), 'work\n');
+    assert.equal(existsSync(join(cwd, 'from-the-lane.txt')), false, 'not there before');
+
+    const result = await orch.integrateLane(thread.id, 'claude');
+    assert.equal(result.ok, true, result.detail);
+    assert.equal(readFileSync(join(cwd, 'from-the-lane.txt'), 'utf8'), 'work\n');
+
+    // The transcript is the record: an integration is part of the conversation.
+    const integrated = orch.store
+      .events(thread.id)
+      .find((e) => e.kind === 'lane.updated' && e.status === 'integrated');
+    assert.ok(integrated, 'the integration is in the log');
+  });
+
+  test('refuses to leave parallel mode while a lane holds unintegrated work', async () => {
+    const { orch } = await boot(makeConfig());
+    const thread = orch.createThread({ cwd: makeRepo() });
+    await orch.setParallel(thread.id, true);
+    await orch.send(thread.id, 'claude', 'provision the lane');
+
+    const lane = orch.state(thread.id).lanes.claude;
+    assert.ok(lane);
+    writeFileSync(join(lane, 'unsaved.txt'), 'would be lost\n');
+
+    await assert.rejects(() => orch.setParallel(thread.id, false), /not in your working directory/);
+    assert.equal(existsSync(join(lane, 'unsaved.txt')), true, 'the work is still there');
   });
 
   test('a thread survives a restart with its transcript and sessions intact', async () => {

@@ -271,11 +271,32 @@ export function useHarness() {
     [client],
   );
 
-  const interrupt = useCallback(async () => {
-    const threadId = activeThreadRef.current;
-    if (threadId === null) return;
-    await client.request({ type: 'turn.interrupt', threadId });
-  }, [client]);
+  const interrupt = useCallback(
+    async (agent?: AgentId) => {
+      const threadId = activeThreadRef.current;
+      if (threadId === null) return;
+      await client.request({ type: 'turn.interrupt', threadId, agent });
+    },
+    [client],
+  );
+
+  const setParallel = useCallback(
+    async (parallel: boolean) => {
+      const threadId = activeThreadRef.current;
+      if (threadId === null) return;
+      await client.request({ type: 'thread.setParallel', threadId, parallel });
+    },
+    [client],
+  );
+
+  const integrateLane = useCallback(
+    async (agent: AgentId) => {
+      const threadId = activeThreadRef.current;
+      if (threadId === null) return;
+      await client.request({ type: 'lane.integrate', threadId, agent });
+    },
+    [client],
+  );
 
   const resolveApproval = useCallback(
     async (approvalId: string, optionId: string) => {
@@ -339,6 +360,8 @@ export function useHarness() {
     resolveApproval,
     setAgent,
     setPermissionMode,
+    setParallel,
+    integrateLane,
   };
 }
 

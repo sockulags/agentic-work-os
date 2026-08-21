@@ -29,6 +29,17 @@ export interface HarnessConfig {
   /** Replay budget. See ARCHITECTURE.md §4. */
   replayMaxChars: number;
   replayMaxToolOutput: number;
+  /**
+   * Shell command run once in each new lane, or empty to skip it.
+   *
+   * A lane is a git worktree, so it holds the source but not what git ignores — for most
+   * repos that means no `node_modules`, and an agent that cannot run the tests. What makes
+   * a lane usable is project knowledge the harness does not have, so it takes the command
+   * rather than guessing one.
+   */
+  laneSetup: string;
+  /** How long that command may run before the lane is offered without it. */
+  laneSetupTimeoutMs: number;
   /** How long to wait for a graceful interrupt before SIGTERM. */
   interruptGraceMs: number;
   /** How long an approval may sit unanswered before it auto-denies. */
@@ -73,6 +84,8 @@ export function loadConfig(): HarnessConfig {
     port: envInt('AWOS_PORT', 4319),
     replayMaxChars: envInt('AWOS_REPLAY_MAX_CHARS', 24_000),
     replayMaxToolOutput: envInt('AWOS_REPLAY_MAX_TOOL_OUTPUT', 800),
+    laneSetup: envStr('AWOS_LANE_SETUP', ''),
+    laneSetupTimeoutMs: envInt('AWOS_LANE_SETUP_TIMEOUT_MS', 10 * 60_000),
     interruptGraceMs: envInt('AWOS_INTERRUPT_GRACE_MS', 4_000),
     approvalTimeoutMs: envInt('AWOS_APPROVAL_TIMEOUT_MS', 10 * 60_000),
     codexInitTimeoutMs: envInt('AWOS_CODEX_INIT_TIMEOUT_MS', 30_000),

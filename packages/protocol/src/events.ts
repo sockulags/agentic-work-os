@@ -162,6 +162,24 @@ export interface DiffUpdatedBody {
 }
 
 /**
+ * Something happened to an agent's lane — its own working copy in parallel mode.
+ *
+ * Lanes are where the files were while the work happened, and the transcript is the
+ * record that it happened. So provisioning, integrating and refusing all land in the log:
+ * "the agent changed these files but they are not in your tree yet" is a fact about the
+ * conversation, and a user reading the thread back later needs it as much as the messages
+ * around it. See ARCHITECTURE.md §7.
+ */
+export interface LaneUpdatedBody {
+  kind: 'lane.updated';
+  status: 'provisioned' | 'integrated' | 'refused' | 'removed';
+  /** Absolute path to the lane's working copy. */
+  path: string;
+  /** Why it was refused, or what landed. Null when the status says everything. */
+  detail: string | null;
+}
+
+/**
  * How the dock should render an artifact. Derived from the file extension, because the
  * publishing agent has no channel to declare it — it just writes a file.
  */
@@ -277,6 +295,7 @@ export type HarnessEventBody =
   | ToolCompletedBody
   | PlanUpdatedBody
   | DiffUpdatedBody
+  | LaneUpdatedBody
   | ArtifactUpdatedBody
   | ApprovalRequestedBody
   | ApprovalResolvedBody

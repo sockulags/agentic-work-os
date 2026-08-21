@@ -186,8 +186,19 @@ export class HarnessServer {
         return { type: 'ok' };
 
       case 'turn.interrupt':
-        await orchestrator.interrupt(msg.threadId);
+        await orchestrator.interrupt(msg.threadId, msg.agent);
         return { type: 'ok' };
+
+      case 'thread.setParallel':
+        await orchestrator.setParallel(msg.threadId, msg.parallel);
+        return { type: 'ok' };
+
+      case 'lane.integrate': {
+        // A refused integration is an answer, not a transport failure, but the UI has one
+        // way to show either — and the reason is the part the user has to act on.
+        const result = await orchestrator.integrateLane(msg.threadId, msg.agent);
+        return result.ok ? { type: 'ok' } : { type: 'error', message: result.detail };
+      }
 
       case 'approval.resolve':
         orchestrator.resolveApproval(msg.threadId, msg.approvalId, msg.optionId);

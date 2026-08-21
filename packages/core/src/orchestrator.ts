@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import { exec } from 'node:child_process';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import type {
   AdapterEvent,
   AgentId,
@@ -20,10 +23,18 @@ import { ContextStore, applyPinnedContext, buildPinnedContext } from './store/co
 import { applyReplay, buildReplay, hasReplay, stripReplay } from './store/replay.js';
 import { ArtifactWatcher } from './artifact-watcher.js';
 import { contentHash } from './store/artifact-store.js';
-import { snapshotWorkingTree, diffTrees } from './util/git.js';
+import { snapshotWorkingTree, diffTrees, headTree } from './util/git.js';
+import type { Lane } from './util/worktree.js';
+import { provisionLane, laneDiff, integrateLane, removeLane } from './util/worktree.js';
 import { createLogger } from './util/logger.js';
 
 const log = createLogger('orchestrator');
+const execAsync = promisify(exec);
+
+/** How many files a patch touches, for a one-line report of what an integration moved. */
+function countChangedFiles(patch: string): number {
+  return patch.split('\n').filter((line) => line.startsWith('diff --git ')).length;
+}
 
 export interface OrchestratorEvents {
   event: (event: HarnessEvent) => void;
@@ -48,14 +59,22 @@ class Thread {
 
   readonly #adapters = new Map<AgentId, AgentAdapter>();
   #permissionMode: PermissionMode = 'default';
-  #busyWith: AgentId | null = null;
-  #currentTurnId: string | null = null;
+  /**
+   * Agents with a turn in flight, each mapped to the turn it is running.
+   *
+   * A map rather than a single field because parallel mode lifts the one-turn rule: with
+   * a lane each, two agents cannot race on the filesystem, so the lock is per agent.
+   */
+  readonly #turns = new Map<AgentId, string | null>();
   #lastTurnAgent: AgentId | null = null;
   #plan: PlanItem[] = [];
   #diff: string | null = null;
+  #parallel = false;
+  readonly #lanes = new Map<AgentId, Lane>();
   readonly #pendingApprovals = new Map<string, ApprovalRequestedBody>();
   readonly #agentStatus = new Map<AgentId, { status: string; model: string | null }>();
-  readonly #artifacts: ArtifactWatcher | null = null;
+  /** One per watched working copy: the thread directory, plus a lane each in parallel mode. */
+  readonly #watchers = new Map<string, ArtifactWatcher>();
 
   constructor(
     id: string,
@@ -95,22 +114,49 @@ class Thread {
     }
 
     const cwd = this.#store.get(id)?.cwd;
-    if (cwd) {
-      this.#artifacts = new ArtifactWatcher({
-        cwd,
-        known: publishedArtifacts,
-        // Attributed to the turn in flight, which is a guess the watcher cannot verify —
-        // it sees a file change, not an author — but during a turn the agent is the only
-        // thing writing, and knowing which turn produced a document is worth more than
-        // the rare misattribution of a file the user saved at the same moment.
-        emit: (body) => this.#record(null, { ...body, turnId: this.#currentTurnId }),
-      });
-      this.#artifacts.start();
-    }
+    if (cwd) this.#watch(cwd, null, publishedArtifacts);
+  }
+
+  /**
+   * Watch one working copy's artifacts directory.
+   *
+   * `agent` names the lane it belongs to, or null for the thread's shared directory. Lane
+   * artifacts carry their agent in the id, because two lanes are two directories and both
+   * may hold a file called `plan.md` — without that, whichever wrote last would silently
+   * replace the other in the dock.
+   */
+  #watch(cwd: string, agent: AgentId | null, known?: Map<string, string>): void {
+    if (this.#watchers.has(cwd)) return;
+    const watcher = new ArtifactWatcher({
+      cwd,
+      known: known ?? new Map(),
+      // Attributed to the turn in flight, which is a guess the watcher cannot verify —
+      // it sees a file change, not an author — but during a turn the agent is the only
+      // thing writing, and knowing which turn produced a document is worth more than
+      // the rare misattribution of a file the user saved at the same moment.
+      emit: (body) =>
+        this.#record(agent, {
+          ...body,
+          artifactId: agent ? `${agent}/${body.artifactId}` : body.artifactId,
+          turnId: agent ? (this.#turns.get(agent) ?? null) : this.#currentTurnId,
+        }),
+    });
+    this.#watchers.set(cwd, watcher);
+    watcher.start();
   }
 
   get busyWith(): AgentId | null {
-    return this.#busyWith;
+    return this.#busy[0] ?? null;
+  }
+
+  get #busy(): AgentId[] {
+    return [...this.#turns.keys()];
+  }
+
+  /** The turn the UI should attribute loose events to: the one that started most recently. */
+  get #currentTurnId(): string | null {
+    const turns = [...this.#turns.values()].filter((id): id is string => id !== null);
+    return turns[turns.length - 1] ?? null;
   }
 
   setPermissionMode(mode: PermissionMode): void {
@@ -125,9 +171,14 @@ class Thread {
       claude: this.#agentStatus.get('claude') ?? { status: 'idle', model: null },
       codex: this.#agentStatus.get('codex') ?? { status: 'idle', model: null },
     };
+    const lanes: Partial<Record<AgentId, string>> = {};
+    for (const [agent, lane] of this.#lanes) lanes[agent] = lane.path;
+
     return {
       threadId: this.id,
-      busyWith: this.#busyWith,
+      busyWith: this.busyWith,
+      busy: this.#busy,
+      lanes,
       currentTurnId: this.#currentTurnId,
       lastTurnAgent: this.#lastTurnAgent,
       plan: this.#plan,
@@ -140,14 +191,23 @@ class Thread {
   // -------------------------------------------------------------------------
 
   async send(agent: AgentId, text: string): Promise<void> {
-    if (this.#busyWith !== null) {
+    if (this.#turns.has(agent)) {
+      throw new Error(`${agent} is still working. Interrupt it before sending again.`);
+    }
+    // Without lanes the two agents share one directory, so the old rule stands: one turn
+    // at a time, because the alternative is two processes editing the same files.
+    if (!this.#parallel && this.#busy.length > 0) {
       throw new Error(
-        `${this.#busyWith} is still working. Interrupt it before sending to ${agent}.`,
+        `${this.busyWith} is still working. Interrupt it, or turn on parallel mode to give each agent its own lane.`,
       );
     }
 
     const summary = this.#store.get(this.id);
     if (!summary) throw new Error(`Unknown thread ${this.id}`);
+
+    // Provisioning is lazy for the same reason adapters are: a thread that only ever
+    // talks to Claude should not pay for a Codex checkout.
+    const cwd = this.#parallel ? await this.#lane(agent, summary.cwd) : summary.cwd;
 
     // Build the replay *before* recording the new message. The user message counts as a
     // foreign event (its agent is null), so recording first would fold the prompt into
@@ -189,32 +249,30 @@ class Thread {
     }
 
     const payload = applyPinnedContext(pinned, applyReplay(replay.preamble, text));
-    const adapter = this.#adapter(agent);
+    const adapter = this.#adapter(agent, cwd);
 
-    // Claim the turn synchronously, before any await, so a second concurrent send sees
-    // the thread busy and is rejected rather than racing in.
-    this.#busyWith = agent;
+    // Claim the turn synchronously, before any await, so a second send to the same agent
+    // sees it busy and is rejected rather than racing in.
+    this.#turns.set(agent, null);
     this.#onState();
 
     // Agents that don't report their own turn diff (Claude) get one synthesized from a
     // git snapshot taken around the turn. Ground truth from the working tree, never a
     // guess parsed from tool output. Codex reports its own, so we don't shadow it.
-    const diffBaseline = adapter.capabilities.turnDiff
-      ? null
-      : await snapshotWorkingTree(summary.cwd);
+    const diffBaseline = adapter.capabilities.turnDiff ? null : await snapshotWorkingTree(cwd);
 
     try {
       await adapter.sendTurn(payload);
     } finally {
       // Emit the synthesized diff before clearing the turn id, so it's attributed to the
       // turn that produced it. A no-op when nothing changed or the cwd isn't a git repo.
+      const turnId = this.#turns.get(agent) ?? null;
       if (diffBaseline !== null) {
-        const after = await snapshotWorkingTree(summary.cwd);
-        const patch = after ? await diffTrees(summary.cwd, diffBaseline, after) : null;
-        if (patch) this.#record(agent, { kind: 'diff.updated', turnId: this.#currentTurnId, patch });
+        const after = await snapshotWorkingTree(cwd);
+        const patch = after ? await diffTrees(cwd, diffBaseline, after) : null;
+        if (patch) this.#record(agent, { kind: 'diff.updated', turnId, patch });
       }
-      this.#busyWith = null;
-      this.#currentTurnId = null;
+      this.#turns.delete(agent);
       // Advance the watermark whether or not the turn succeeded: the agent received the
       // context either way, and re-sending it would duplicate history in its session.
       this.#store.setWatermark(this.id, agent, this.#store.head(this.id));
@@ -222,10 +280,94 @@ class Thread {
     }
   }
 
-  async interrupt(): Promise<void> {
-    const agent = this.#busyWith;
-    if (!agent) return;
-    await this.#adapters.get(agent)?.interrupt();
+  /** Interrupt one agent, or everything that is running when none is named. */
+  async interrupt(agent?: AgentId): Promise<void> {
+    const targets = agent ? [agent] : this.#busy;
+    await Promise.all(targets.map((id) => this.#adapters.get(id)?.interrupt()));
+  }
+
+  /**
+   * Turn lanes on or off.
+   *
+   * Both directions restart the agents' processes, because an adapter's working directory
+   * is fixed when it spawns. Their native sessions are dropped with them and the
+   * watermarks reset, so the next turn replays the thread's full history into a fresh
+   * session — the same rebuild §6 promises when an agent's own session is lost. It costs
+   * a replay; it is the only way the agent's idea of where it is stays true.
+   */
+  async setParallel(on: boolean): Promise<void> {
+    if (on === this.#parallel) return;
+
+    const summary = this.#store.get(this.id);
+    if (!summary) throw new Error(`Unknown thread ${this.id}`);
+    if (this.#busy.length > 0) {
+      throw new Error(`${this.busyWith} is working. Interrupt it before changing lanes.`);
+    }
+
+    if (on) {
+      // Fail here rather than at the first turn: a repo-less directory cannot have lanes,
+      // and the user should learn that from the switch they just flipped.
+      if ((await headTree(summary.cwd)) === null) {
+        throw new Error(
+          'Parallel mode needs the thread directory to be a git repository with at least one commit.',
+        );
+      }
+    } else {
+      // Leaving lanes behind would throw away work the user never saw. Refuse instead.
+      for (const [agent, lane] of this.#lanes) {
+        if ((await laneDiff(lane)) !== null) {
+          throw new Error(
+            `${agent}'s lane has changes that are not in your working directory yet. Integrate or discard them first.`,
+          );
+        }
+      }
+    }
+
+    await Promise.all([...this.#adapters.values()].map((adapter) => adapter.stop()));
+    this.#adapters.clear();
+    this.#store.update(this.id, { parallel: on, nativeSessions: {}, watermarks: { claude: 0, codex: 0 } });
+    this.#parallel = on;
+
+    if (!on) await this.#dropLanes();
+    log.info('parallel mode set', { threadId: this.id, parallel: on });
+    this.#onState();
+  }
+
+  /**
+   * Apply one lane's work to the thread directory, all of it or none of it.
+   *
+   * Explicit rather than automatic: the thread directory is the one the user has open, and
+   * an agent's work appearing in it without being asked for is the kind of surprise this
+   * harness exists to avoid. A refusal is recorded too — an integration that did not
+   * happen is a fact about the thread.
+   */
+  async integrate(agent: AgentId): Promise<{ ok: boolean; detail: string }> {
+    const summary = this.#store.get(this.id);
+    if (!summary) throw new Error(`Unknown thread ${this.id}`);
+
+    const lane = this.#lanes.get(agent);
+    if (!lane) throw new Error(`${agent} has no lane to integrate.`);
+    if (this.#turns.has(agent)) {
+      throw new Error(`${agent} is still working. Interrupt it before integrating its lane.`);
+    }
+
+    const result = await integrateLane(lane, summary.cwd);
+    if (!result.ok) {
+      this.#record(agent, {
+        kind: 'lane.updated',
+        status: 'refused',
+        path: lane.path,
+        detail: result.reason,
+      });
+      return { ok: false, detail: result.reason };
+    }
+
+    const detail =
+      result.patch === null
+        ? 'nothing to integrate'
+        : `${countChangedFiles(result.patch)} file(s) applied to ${summary.cwd}`;
+    this.#record(agent, { kind: 'lane.updated', status: 'integrated', path: lane.path, detail });
+    return { ok: true, detail };
   }
 
   resolveApproval(approvalId: string, optionId: string): void {
@@ -238,15 +380,92 @@ class Thread {
   }
 
   async stop(): Promise<void> {
-    this.#artifacts?.stop();
+    for (const watcher of this.#watchers.values()) watcher.stop();
+    this.#watchers.clear();
     await Promise.all([...this.#adapters.values()].map((adapter) => adapter.stop()));
     this.#adapters.clear();
+    await this.#dropLanes();
     this.#bridge.unregisterThread(this.id);
   }
 
   // -------------------------------------------------------------------------
 
-  #adapter(agent: AgentId): AgentAdapter {
+  /** The agent's lane, provisioned on first use. Its path, ready to be a working directory. */
+  async #lane(agent: AgentId, baseCwd: string): Promise<string> {
+    const existing = this.#lanes.get(agent);
+    if (existing) return existing.path;
+
+    const path = join(this.#config.dataDir, 'threads', this.id, 'lanes', agent);
+    const result = await provisionLane(baseCwd, path);
+    if (!result.ok) throw new Error(`Could not give ${agent} a lane: ${result.reason}`);
+
+    this.#lanes.set(agent, result.lane);
+    this.#watch(path, agent);
+
+    const setup = await this.#runLaneSetup(path);
+    this.#record(agent, {
+      kind: 'lane.updated',
+      status: 'provisioned',
+      path,
+      detail: setup,
+    });
+    this.#onState();
+    return path;
+  }
+
+  /**
+   * Run the configured setup command in a fresh lane.
+   *
+   * Returns what to tell the user rather than throwing: a lane whose `npm install` failed
+   * is still a lane the agent can read and edit in, and stopping the turn over it would be
+   * a worse trade than saying so.
+   */
+  async #runLaneSetup(cwd: string): Promise<string | null> {
+    const command = this.#config.laneSetup.trim();
+    if (command === '') {
+      return 'files git ignores were not copied; set AWOS_LANE_SETUP to install dependencies here';
+    }
+
+    try {
+      await execAsync(command, {
+        cwd,
+        timeout: this.#config.laneSetupTimeoutMs,
+        windowsHide: true,
+        maxBuffer: 32 * 1024 * 1024,
+      });
+      return `ran ${command}`;
+    } catch (err) {
+      const detail = String((err as { stderr?: string }).stderr ?? (err as Error).message ?? '')
+        .trim()
+        .slice(0, 400);
+      log.warn('lane setup failed', { cwd, command, detail });
+      return `setup command failed: ${command} — ${detail}`;
+    }
+  }
+
+  /** Remove every lane, keeping any that still holds work the user has not seen. */
+  async #dropLanes(): Promise<void> {
+    const summary = this.#store.get(this.id);
+    for (const [agent, lane] of [...this.#lanes]) {
+      if (summary && (await laneDiff(lane)) !== null) {
+        // Deleting this would destroy the only copy of that work. Leave it on disk and
+        // name it, so the path is in the log rather than only in the user's memory.
+        log.warn('keeping a lane with unintegrated work', { agent, path: lane.path });
+        this.#record(agent, {
+          kind: 'lane.updated',
+          status: 'removed',
+          path: lane.path,
+          detail: 'kept on disk: it still holds changes that were never integrated',
+        });
+        this.#lanes.delete(agent);
+        continue;
+      }
+      if (summary) await removeLane(summary.cwd, lane.path);
+      this.#lanes.delete(agent);
+    }
+  }
+
+  #adapter(agent: AgentId, cwd: string): AgentAdapter {
     const existing = this.#adapters.get(agent);
     if (existing) return existing;
 
@@ -255,7 +474,7 @@ class Thread {
 
     const ctx: AdapterContext = {
       threadId: this.id,
-      cwd: summary.cwd,
+      cwd,
       config: this.#config,
       permissionMode: this.#permissionMode,
       resumeSessionId: summary.nativeSessions[agent] ?? null,
@@ -275,7 +494,8 @@ class Thread {
 
     switch (event.kind) {
       case 'turn.started':
-        this.#currentTurnId = event.turnId;
+        // Bind the turn to the agent running it, so two lanes in flight keep their own.
+        if (event.agent) this.#turns.set(event.agent, event.turnId);
         this.#lastTurnAgent = event.agent;
         // The diff is scoped to a turn. Carrying it over would show the previous
         // agent's changes as if the current one had made them.
@@ -380,8 +600,18 @@ export class Orchestrator extends EventEmitter {
     if (after) this.emit('thread', after);
   }
 
-  async interrupt(threadId: string): Promise<void> {
-    await this.#thread(threadId).interrupt();
+  async interrupt(threadId: string, agent?: AgentId): Promise<void> {
+    await this.#thread(threadId).interrupt(agent);
+  }
+
+  async setParallel(threadId: string, parallel: boolean): Promise<void> {
+    await this.#thread(threadId).setParallel(parallel);
+    const after = this.store.get(threadId);
+    if (after) this.emit('thread', after);
+  }
+
+  async integrateLane(threadId: string, agent: AgentId): Promise<{ ok: boolean; detail: string }> {
+    return this.#thread(threadId).integrate(agent);
   }
 
   resolveApproval(threadId: string, approvalId: string, optionId: string): void {

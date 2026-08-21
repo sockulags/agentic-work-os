@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
-import { X } from 'lucide-react';
-import type { PermissionMode } from '@awos/protocol';
+import { GitMerge, X } from 'lucide-react';
+import type { AgentId, PermissionMode } from '@awos/protocol';
 import { useHarnessContext } from '@/state/HarnessContext';
 import { ThreadSidebar } from '@/components/ThreadSidebar';
 import { Transcript } from '@/components/Transcript';
@@ -40,6 +40,11 @@ export default function App(): React.JSX.Element {
           totals={h.transcript.totals}
           onPermissionMode={(mode) => void h.setPermissionMode(mode)}
           hasThread={h.activeThread !== null}
+          parallel={h.activeThread?.parallel ?? false}
+          lanes={h.runtime?.lanes ?? {}}
+          busy={h.runtime?.busy ?? []}
+          onParallel={(on) => void h.setParallel(on)}
+          onIntegrate={(agent) => void h.integrateLane(agent)}
         />
 
         {h.notice && (
@@ -85,6 +90,11 @@ function Header({
   totals,
   onPermissionMode,
   hasThread,
+  parallel,
+  lanes,
+  busy,
+  onParallel,
+  onIntegrate,
 }: {
   title: string;
   cwd: string | null;
@@ -92,6 +102,11 @@ function Header({
   totals: { inputTokens: number; outputTokens: number; costUsd: number };
   onPermissionMode: (mode: PermissionMode) => void;
   hasThread: boolean;
+  parallel: boolean;
+  lanes: Partial<Record<AgentId, string>>;
+  busy: AgentId[];
+  onParallel: (on: boolean) => void;
+  onIntegrate: (agent: AgentId) => void;
 }): React.JSX.Element {
   return (
     <header className="flex shrink-0 items-center gap-3 border-b border-border px-6 py-2.5">
@@ -99,6 +114,46 @@ function Header({
         <h2 className="truncate text-sm font-medium">{title}</h2>
         {cwd && <p className="truncate font-mono text-[11px] text-muted-foreground">{cwd}</p>}
       </div>
+
+      {hasThread && (
+        <div className="flex items-center gap-1.5">
+          {/* One button per lane with work to hand over. Integration is explicit because
+              the thread directory is the user's, and files arriving in it unasked is the
+              surprise this whole mode has to avoid. */}
+          {parallel &&
+            (Object.keys(lanes) as AgentId[]).map((agent) => (
+              <button
+                key={agent}
+                type="button"
+                onClick={() => onIntegrate(agent)}
+                disabled={busy.includes(agent)}
+                title={`Apply ${agent}'s lane to ${cwd ?? 'the thread directory'}`}
+                className="rounded-md border border-input px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent disabled:opacity-40"
+              >
+                <GitMerge className="mr-1 inline h-3 w-3" />
+                {agent}
+              </button>
+            ))}
+
+          <button
+            type="button"
+            onClick={() => onParallel(!parallel)}
+            title={
+              parallel
+                ? 'Agents each work in their own copy of the repository and can run at the same time'
+                : 'Agents share this directory, so only one can work at a time'
+            }
+            className={cn(
+              'rounded-md border px-2 py-1 text-xs transition-colors',
+              parallel
+                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500'
+                : 'border-input text-muted-foreground hover:bg-accent',
+            )}
+          >
+            {parallel ? 'Lanes on' : 'Lanes off'}
+          </button>
+        </div>
+      )}
 
       {hasThread && <DensityToggle />}
 
