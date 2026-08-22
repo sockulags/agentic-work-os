@@ -1,10 +1,11 @@
-import { GitCompare, ListChecks, Pin, Shapes, type LucideIcon } from 'lucide-react';
+import { Boxes, GitCompare, ListChecks, Pin, Shapes, type LucideIcon } from 'lucide-react';
 import type { Harness } from '@/hooks/useHarness';
 import { parseUnifiedDiff } from '@/lib/diff';
 import { PlanPanel } from './tabs/PlanPanel';
 import { ChangesPanel } from './tabs/ChangesPanel';
 import { ArtifactsTab } from './tabs/ArtifactsTab';
 import { ContextTab } from './tabs/ContextTab';
+import { WorkspacePanel } from './tabs/WorkspacePanel';
 
 export interface DockTab {
   id: string;
@@ -61,6 +62,16 @@ export const DOCK_TABS: readonly [DockTab, ...DockTab[]] = [
     badge: (h) => countPinnedLines(h.pinnedContext?.text),
     Component: ContextTab,
   },
+  {
+    id: 'workspace',
+    label: 'Workspace',
+    icon: Boxes,
+    // Counts what needs attention, not what is configured. A workspace that resolves
+    // cleanly is the normal case and has nothing to badge; an undeclared directory has
+    // nothing to fix either, so both read zero.
+    badge: (h) => countWorkspaceProblems(h),
+    Component: WorkspacePanel,
+  },
 ];
 
 /**
@@ -75,6 +86,12 @@ export function resolveActiveTab(
   activeTabId: string | null,
 ): DockTab {
   return tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+}
+
+function countWorkspaceProblems(harness: Harness): number {
+  const resolution = harness.workspace?.resolution;
+  if (resolution === undefined || resolution.status === 'none') return 0;
+  return resolution.problems.length;
 }
 
 function countPinnedLines(text: string | undefined): number {

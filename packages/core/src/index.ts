@@ -17,6 +17,13 @@ export {
   applyPinnedContext,
   type PinnedContextOptions,
 } from './store/context-store.js';
+export {
+  resolveWorkspace,
+  findWorkspaceRoot,
+  type ResolveOptions as WorkspaceResolveOptions,
+} from './workspace/resolve.js';
+export { parseDeclaration, type WorkspaceDeclaration } from './workspace/declaration.js';
+export { buildWorkspaceBlock, applyWorkspace } from './workspace/prompt.js';
 export { PermissionBridge } from './permission-bridge.js';
 export { ClaudeAdapter } from './adapters/claude.js';
 export { CodexAdapter } from './adapters/codex.js';

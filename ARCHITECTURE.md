@@ -260,9 +260,10 @@ and the lane is only where the files were while it was made.
 
 **What lanes cost.** A worktree holds what git tracks, so files git ignores are not there —
 for most repos `node_modules` and build output, which means an agent that can edit the
-source but not run the tests. `AWOS_LANE_SETUP` names a command to run once in each new
-lane for exactly that. The harness does not guess one: what makes a checkout usable is
-project knowledge it does not have.
+source but not run the tests. `setup.command` in the project's workspace declaration (§10)
+names a command to run once in each new lane for exactly that. The harness does not guess
+one: what makes a checkout usable is project knowledge it does not have, which is why it
+asks the project rather than the machine.
 
 Turning lanes on or off restarts both agents, because an adapter's working directory is
 fixed when it spawns. Their native sessions go with them and the watermarks reset, so the
@@ -277,7 +278,7 @@ says where: the alternative is deleting the only copy of something the user neve
 
 ```
 packages/protocol   pure types, zero deps — HarnessEvent, both wire formats, UI↔core RPC
-packages/core       adapters, store, replay, orchestrator, ws server, permission MCP
+packages/core       adapters, store, replay, workspace, orchestrator, ws server, permission MCP
 apps/ui             React + Tailwind + shadcn-style components, Vite
 apps/desktop        Tauri shell
 ```
@@ -345,7 +346,61 @@ down when it is created.
 
 ---
 
-## 10. What v1 deliberately does not do
+## 10. The project workspace contract
+
+`HarnessConfig` (§8, `config.ts`) describes the **machine**: where the binaries are, which
+port to bind, where threads are stored. All of it comes from `AWOS_*` environment
+variables, because all of it is a property of the install.
+
+None of that is where a *project's* rules belong. Which agents may work in a repository,
+what makes a fresh checkout usable, what "verified" means here — those are properties of
+the repository, they should be reviewed like code, and they should not have to be
+rediscovered by every thread. So a repository declares them in `.awos/workspace.json`,
+committed:
+
+```json
+{
+  "version": 1,
+  "name": "agentic-work-os",
+  "repository": { "root": ".", "github": "sockulags/agentic-work-os" },
+  "agents": ["claude", "codex"],
+  "setup": { "command": "npm install", "timeoutMs": 600000 },
+  "verify": [{ "name": "test", "command": "npm test" }],
+  "context": { "references": ["ARCHITECTURE.md"], "notes": "…" }
+}
+```
+
+**Resolved from a path, never from a thread.** `resolveWorkspace(cwd)` walks up to the
+nearest declaration. Two threads in the same checkout get the same answer; a directory
+that was never opened as a thread still resolves; and no stored thread carries a copy that
+could go stale. That is also the whole migration story for existing threads: `ThreadSummary`
+is unchanged, because there is nothing about a workspace to store on a thread.
+
+**Read on every use, cached nowhere.** The declaration is a file in the repository, so a
+pull, a branch switch, or an agent's own edit can change it between turns. Two small
+synchronous reads cost less than a rule for when a cache is stale — the same reasoning as
+the pinned notes in §4.
+
+**Precedence runs in two tiers, and they point opposite ways.** Machine settings are
+environment-first and the declaration cannot touch them. Project settings are
+declaration-first: `.awos/local/workspace.json` (not committed) overrides the shared file
+field by field, and `AWOS_LANE_SETUP` is consulted only where the project declares no
+setup command. A repository that states how it installs should not be broken by a stale
+export in someone's shell.
+
+**The schema is closed.** An unknown key is an error rather than something ignored, which
+is what keeps a committed file from becoming a place to put a token. Nothing in the schema
+takes a credential, and the resolved workspace never reaches `events.jsonl` — like the
+replay preamble, it is transport, rendered into the prompt and not into the log.
+
+**Validation reports everything at once**, with the file, the path inside it, and a
+sentence about the project rather than about the schema. Errors mean the workspace does not
+resolve; warnings mean it resolved but something in it points at nothing, which the dock's
+**Workspace** tab shows beside the effective values and their provenance.
+
+---
+
+## 11. What v1 deliberately does not do
 
 - **Diff parity via working-tree snapshots.** Codex reports a cumulative turn diff via
   `turn/diff/updated`. Claude has no equivalent in the stream-json protocol: its

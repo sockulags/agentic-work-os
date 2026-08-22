@@ -8,6 +8,7 @@
 
 import type { AgentId, ApprovalRequestedBody, HarnessEvent, PlanItem } from './events.js';
 import type { AgentCapabilities } from './capabilities.js';
+import type { WorkspaceResolution } from './workspace.js';
 
 export type PermissionMode =
   | 'default'
@@ -105,6 +106,14 @@ export type ClientRequest =
   | { type: 'approval.resolve'; threadId: string; approvalId: string; optionId: string }
   | { type: 'context.get'; threadId: string }
   | { type: 'context.set'; threadId: string; text: string }
+  /**
+   * Resolve the workspace for a thread's directory, or for any path at all.
+   *
+   * Both forms exist because a workspace is a property of a directory, not of a
+   * conversation: the new-thread form wants to say what a folder is before a thread
+   * exists for it. Naming both is an error rather than a precedence rule to remember.
+   */
+  | { type: 'workspace.get'; threadId?: string; cwd?: string }
   | { type: 'agents.probe' };
 
 export type ClientMessage = ClientRequest & { requestId: string };
@@ -121,6 +130,8 @@ export type ServerResponseBody =
   | { type: 'thread.created'; thread: ThreadSummary }
   /** Carries its `threadId` so a reply that arrives after a thread switch can be dropped. */
   | { type: 'context'; threadId: string; text: string }
+  /** Carries the directory it resolved, for the same reason `context` carries its thread. */
+  | { type: 'workspace'; cwd: string; resolution: WorkspaceResolution }
   | { type: 'agents.probe'; agents: AgentAvailability[] };
 
 export type ServerResponse = ServerResponseBody & { requestId: string };

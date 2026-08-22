@@ -1,11 +1,12 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { HarnessEvent, ThreadRuntimeState } from '@awos/protocol';
+import { WORKSPACE_FILE, WORKSPACE_SCHEMA_VERSION } from '@awos/protocol';
 import { Orchestrator } from './orchestrator.js';
 import type { HarnessConfig } from './config.js';
 
@@ -23,6 +24,15 @@ const FAKE_CLAUDE = join(here, 'testing', 'fake-claude.js');
 const FAKE_CODEX = join(here, 'testing', 'fake-codex.js');
 
 let dataDir: string;
+/**
+ * The default working directory for a thread under test.
+ *
+ * A throwaway directory rather than `process.cwd()`, which is this repository. Now that a
+ * repository can declare a workspace, running the suite from inside one would put that
+ * project's rules — its agent list, its prompt block — into tests about something else,
+ * and the result would depend on where `npm test` was started from.
+ */
+let workDir: string;
 let orchestrator: Orchestrator | null = null;
 const repos: string[] = [];
 
@@ -74,19 +84,21 @@ async function boot(config: HarnessConfig): Promise<{ orch: Orchestrator; events
 
 beforeEach(() => {
   dataDir = mkdtempSync(join(tmpdir(), 'awos-e2e-'));
+  workDir = mkdtempSync(join(tmpdir(), 'awos-e2e-cwd-'));
 });
 
 afterEach(async () => {
   await orchestrator?.stop();
   orchestrator = null;
   rmSync(dataDir, { recursive: true, force: true });
+  rmSync(workDir, { recursive: true, force: true });
   while (repos.length > 0) rmSync(repos.pop() as string, { recursive: true, force: true });
 });
 
 describe('Claude adapter end to end', () => {
   test('streams a turn and records the full event sequence', async () => {
     const { orch, events } = await boot(makeConfig());
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
 
     await orch.send(thread.id, 'claude', 'hello there');
 
@@ -106,7 +118,7 @@ describe('Claude adapter end to end', () => {
 
   test('captures the native session id so a later run can resume', async () => {
     const { orch } = await boot(makeConfig());
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
     await orch.send(thread.id, 'claude', 'hello');
 
     const saved = orch.store.get(thread.id);
@@ -117,7 +129,7 @@ describe('Claude adapter end to end', () => {
     const { orch, events } = await boot(
       makeConfig({ claudeBinArgs: [FAKE_CLAUDE, '--tool'] }),
     );
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
     await orch.send(thread.id, 'claude', 'run something');
 
     const started = events.find((e) => e.kind === 'tool.started');
@@ -135,7 +147,7 @@ describe('Claude adapter end to end', () => {
     const { orch, events } = await boot(
       makeConfig({ claudeBinArgs: [FAKE_CLAUDE, '--tools'] }),
     );
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
     await orch.send(thread.id, 'claude', 'do several things');
 
     const started = events.filter((e) => e.kind === 'tool.started');
@@ -157,7 +169,7 @@ describe('Claude adapter end to end', () => {
 
   test('streams a thinking block as reasoning deltas and one completion', async () => {
     const { orch, events } = await boot(makeConfig({ claudeBinArgs: [FAKE_CLAUDE, '--think'] }));
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
 
     await orch.send(thread.id, 'claude', 'think about it');
 
@@ -186,7 +198,7 @@ describe('Claude adapter end to end', () => {
 
   test('records usage from the result event', async () => {
     const { orch, events } = await boot(makeConfig());
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
     await orch.send(thread.id, 'claude', 'hi');
 
     const usage = events.find((e) => e.kind === 'usage');
@@ -197,7 +209,7 @@ describe('Claude adapter end to end', () => {
 
   test('handles several sequential turns on one process', async () => {
     const { orch, events } = await boot(makeConfig());
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
 
     await orch.send(thread.id, 'claude', 'first');
     await orch.send(thread.id, 'claude', 'second');
@@ -213,7 +225,7 @@ describe('Claude adapter end to end', () => {
 describe('Codex adapter end to end', () => {
   test('completes the handshake and streams a turn', async () => {
     const { orch, events } = await boot(makeConfig());
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
 
     await orch.send(thread.id, 'codex', 'do the thing');
 
@@ -228,7 +240,7 @@ describe('Codex adapter end to end', () => {
 
   test('streams incremental command output', async () => {
     const { orch, events } = await boot(makeConfig({ codexBinArgs: [FAKE_CODEX, '--tool'] }));
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
     await orch.send(thread.id, 'codex', 'run it');
 
     const output = events.find((e) => e.kind === 'tool.output');
@@ -240,7 +252,7 @@ describe('Codex adapter end to end', () => {
     const { orch, events } = await boot(
       makeConfig({ codexBinArgs: [FAKE_CODEX, '--tool', '--approval'] }),
     );
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
 
     // Answer the approval as soon as it appears; the turn cannot finish before then.
     orch.on('event', (event: HarnessEvent) => {
@@ -267,7 +279,7 @@ describe('Codex adapter end to end', () => {
     const { orch, events } = await boot(
       makeConfig({ codexBinArgs: [FAKE_CODEX, '--tool', '--approval'] }),
     );
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
 
     orch.on('event', (event: HarnessEvent) => {
       if (event.kind === 'approval.requested') {
@@ -285,7 +297,7 @@ describe('Codex adapter end to end', () => {
 
   test('promotes a turn diff to a first-class event and thread state', async () => {
     const { orch, events } = await boot(makeConfig({ codexBinArgs: [FAKE_CODEX, '--diff'] }));
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
     await orch.send(thread.id, 'codex', 'change something');
 
     const diff = events.find((e) => e.kind === 'diff.updated');
@@ -301,7 +313,7 @@ describe('Codex adapter end to end', () => {
     const { orch } = await boot(
       makeConfig({ codexBinArgs: [FAKE_CODEX, '--diff'], claudeBinArgs: [FAKE_CLAUDE] }),
     );
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
 
     await orch.send(thread.id, 'codex', 'change something');
     assert.ok(orch.state(thread.id).diff, 'codex reported a diff');
@@ -316,7 +328,7 @@ describe('Codex adapter end to end', () => {
     const { orch } = await boot(
       makeConfig({ codexBinArgs: [FAKE_CODEX, '--diff'], claudeBinArgs: [FAKE_CLAUDE] }),
     );
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
     const liveStates: Array<ReturnType<Orchestrator['state']>> = [];
     orch.on('state', (state) => liveStates.push(state));
 
@@ -343,7 +355,7 @@ describe('Codex adapter end to end', () => {
       claudeBinArgs: [FAKE_CLAUDE],
     });
     const { orch } = await boot(config);
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
 
     await orch.send(thread.id, 'codex', 'change something');
     await orch.send(thread.id, 'claude', 'now look at it');
@@ -362,7 +374,7 @@ describe('Codex adapter end to end', () => {
 
   test('falls back to a fresh thread when resume is rejected', async () => {
     const { orch } = await boot(makeConfig());
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
     // Plant a session id the fake server will reject.
     orch.store.setNativeSession(thread.id, 'codex', 'stale-thread');
 
@@ -376,7 +388,7 @@ describe('Codex adapter end to end', () => {
 describe('cross-agent handoff', () => {
   test('replays the other agent\'s work into the incoming agent', async () => {
     const { orch } = await boot(makeConfig({ claudeBinArgs: [FAKE_CLAUDE, '--tool'] }));
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
 
     await orch.send(thread.id, 'claude', 'set up the project');
     await orch.send(thread.id, 'codex', 'now add tests');
@@ -397,7 +409,7 @@ describe('cross-agent handoff', () => {
 
   test('advances the watermark so context is not replayed twice', async () => {
     const { orch } = await boot(makeConfig());
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
 
     await orch.send(thread.id, 'claude', 'first');
     await orch.send(thread.id, 'codex', 'second');
@@ -417,7 +429,7 @@ describe('cross-agent handoff', () => {
 
   test('the first turn for an agent carries no replay block', async () => {
     const { orch } = await boot(makeConfig());
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
 
     await orch.send(thread.id, 'claude', 'the very first message');
 
@@ -429,7 +441,7 @@ describe('cross-agent handoff', () => {
 
   test('refuses a second turn while one is in flight', async () => {
     const { orch } = await boot(makeConfig({ claudeBinArgs: [FAKE_CLAUDE, '--slow'] }));
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
 
     const first = orch.send(thread.id, 'claude', 'long running');
     // Two agents writing to the same working directory at once is a correctness
@@ -512,7 +524,7 @@ describe('cross-agent handoff', () => {
   test('a thread survives a restart with its transcript and sessions intact', async () => {
     const config = makeConfig();
     const { orch } = await boot(config);
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
     await orch.send(thread.id, 'claude', 'remember this');
     await orch.stop();
     orchestrator = null;
@@ -538,7 +550,7 @@ describe('pinned context', () => {
 
   test('rides on every turn, not just the first', async () => {
     const { orch } = await boot(makeConfig());
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
     orch.setPinnedContext(thread.id, 'House rules: never push to main.');
 
     await orch.send(thread.id, 'claude', 'first');
@@ -551,7 +563,7 @@ describe('pinned context', () => {
 
   test('an empty context adds nothing to the prompt', async () => {
     const { orch } = await boot(makeConfig());
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
 
     await orch.send(thread.id, 'claude', 'no notes here');
 
@@ -560,7 +572,7 @@ describe('pinned context', () => {
 
   test('the recorded user message stays what the user typed', async () => {
     const { orch } = await boot(makeConfig());
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
     orch.setPinnedContext(thread.id, 'House rules: never push to main.');
 
     await orch.send(thread.id, 'claude', 'just this');
@@ -574,7 +586,7 @@ describe('pinned context', () => {
   test('is picked up from disk after a restart', async () => {
     const config = makeConfig();
     const { orch } = await boot(config);
-    const thread = orch.createThread({ cwd: process.cwd() });
+    const thread = orch.createThread({ cwd: workDir });
     orch.setPinnedContext(thread.id, 'House rules: never push to main.');
     await orch.stop();
     orchestrator = null;
@@ -591,5 +603,147 @@ describe('pinned context', () => {
     const { orch } = await boot(makeConfig());
     assert.throws(() => orch.setPinnedContext('nope', 'hi'), /Unknown thread/);
     assert.throws(() => orch.getPinnedContext('nope'), /Unknown thread/);
+  });
+});
+
+describe('workspace contract', () => {
+  /** Declare a directory a workspace, the way a repository would in Git. */
+  function declare(root: string, declaration: Record<string, unknown>): void {
+    mkdirSync(join(root, '.awos'), { recursive: true });
+    writeFileSync(
+      join(root, WORKSPACE_FILE),
+      JSON.stringify({ version: WORKSPACE_SCHEMA_VERSION, name: 'under-test', ...declaration }),
+      'utf8',
+    );
+  }
+
+  /** The fake echoes the head of what it received, so this reads the actual wire payloads. */
+  function receivedBy(orch: Orchestrator, threadId: string, agent: 'claude' | 'codex'): string[] {
+    return orch.store
+      .events(threadId)
+      .filter((e) => e.kind === 'message.completed' && e.agent === agent)
+      .map((e) => (e.kind === 'message.completed' ? e.text : ''));
+  }
+
+  /** The most recent turn's payload. */
+  function lastReceivedBy(orch: Orchestrator, threadId: string, agent: 'claude' | 'codex'): string {
+    const all = receivedBy(orch, threadId, agent);
+    return all[all.length - 1] ?? '';
+  }
+
+  test('rides on the prompt of every turn, for either agent', async () => {
+    const { orch } = await boot(makeConfig());
+    declare(workDir, {});
+    const thread = orch.createThread({ cwd: workDir });
+
+    await orch.send(thread.id, 'claude', 'first');
+    await orch.send(thread.id, 'claude', 'second');
+    await orch.send(thread.id, 'codex', 'third');
+
+    const claude = receivedBy(orch, thread.id, 'claude');
+    assert.equal(claude.length, 2);
+    for (const payload of claude) assert.match(payload, /<workspace>/);
+    assert.match(lastReceivedBy(orch, thread.id, 'codex'), /<workspace>/);
+  });
+
+  test('an undeclared directory works exactly as it did before', async () => {
+    const { orch } = await boot(makeConfig());
+    const thread = orch.createThread({ cwd: workDir });
+
+    await orch.send(thread.id, 'claude', 'no workspace here');
+
+    assert.doesNotMatch(lastReceivedBy(orch, thread.id, 'claude'), /<workspace>/);
+  });
+
+  test('resolves from a subdirectory of the declared root', async () => {
+    const { orch } = await boot(makeConfig());
+    declare(workDir, {});
+    const nested = join(workDir, 'packages', 'core');
+    mkdirSync(nested, { recursive: true });
+    const thread = orch.createThread({ cwd: nested });
+
+    await orch.send(thread.id, 'claude', 'from inside the project');
+
+    assert.match(lastReceivedBy(orch, thread.id, 'claude'), /<workspace>/);
+  });
+
+  test('refuses a turn to an agent the project does not allow', async () => {
+    const { orch } = await boot(makeConfig());
+    declare(workDir, { agents: ['codex'] });
+    const thread = orch.createThread({ cwd: workDir });
+
+    await assert.rejects(() => orch.send(thread.id, 'claude', 'hello'), /allows codex here/);
+    // A refused turn leaves no trace: nothing was said, so nothing is in the transcript.
+    assert.equal(orch.store.events(thread.id).length, 0);
+
+    await orch.send(thread.id, 'codex', 'hello');
+    assert.ok(orch.store.events(thread.id).length > 0, 'the allowed agent still works');
+  });
+
+  test('keeps the declaration out of the canonical event log', async () => {
+    const { orch } = await boot(makeConfig());
+    declare(workDir, { context: { notes: 'internal-only-note' } });
+    const thread = orch.createThread({ cwd: workDir });
+
+    await orch.send(thread.id, 'claude', 'just this');
+
+    // The block is transport, like the replay preamble and the pinned notes. The log holds
+    // the conversation, so a project's own configuration never accumulates copies in it.
+    const log = readFileSync(join(dataDir, 'threads', thread.id, 'events.jsonl'), 'utf8');
+    assert.doesNotMatch(log, /internal-only-note/);
+    const message = orch.store.events(thread.id).find((e) => e.kind === 'user.message');
+    assert.equal(message?.kind === 'user.message' ? message.text : null, 'just this');
+  });
+
+  test('provisions a lane with the setup command the project declares', async () => {
+    const { orch } = await boot(makeConfig({ laneSetup: 'node -e "process.exit(1)"' }));
+    const cwd = makeRepo();
+    declare(cwd, {
+      setup: { command: `node -e "require('fs').writeFileSync('setup-ran.txt','yes')"` },
+    });
+    const thread = orch.createThread({ cwd });
+    await orch.setParallel(thread.id, true);
+
+    await orch.send(thread.id, 'claude', 'provision the lane');
+
+    const lane = orch.state(thread.id).lanes.claude;
+    assert.ok(lane);
+    // The project's command ran, and the stale environment variable did not.
+    assert.equal(readFileSync(join(lane, 'setup-ran.txt'), 'utf8'), 'yes');
+    const provisioned = orch.store
+      .events(thread.id)
+      .find((e) => e.kind === 'lane.updated' && e.status === 'provisioned');
+    assert.match(
+      provisioned?.kind === 'lane.updated' ? (provisioned.detail ?? '') : '',
+      /^ran node -e/,
+    );
+  });
+
+  test('a thread stored before workspaces existed still opens', async () => {
+    const config = makeConfig();
+    const { orch } = await boot(config);
+    const thread = orch.createThread({ cwd: workDir });
+    await orch.send(thread.id, 'claude', 'from an older build');
+    await orch.stop();
+    orchestrator = null;
+
+    // Rewrite the stored metadata as an older build wrote it, then declare the directory
+    // a workspace under the thread. Nothing about the thread names one, and nothing has
+    // to: the workspace is resolved from the directory every time it is needed.
+    const metaPath = join(dataDir, 'threads', thread.id, 'meta.json');
+    const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as Record<string, unknown>;
+    delete meta['parallel'];
+    writeFileSync(metaPath, JSON.stringify(meta), 'utf8');
+    declare(workDir, {});
+
+    const revived = new Orchestrator(config);
+    await revived.start();
+    orchestrator = revived;
+
+    const reloaded = revived.store.get(thread.id);
+    assert.equal(reloaded?.cwd, workDir);
+    assert.equal(revived.workspace(workDir).status, 'ok');
+    await revived.send(thread.id, 'claude', 'and still works');
+    assert.match(lastReceivedBy(revived, thread.id, 'claude'), /<workspace>/);
   });
 });
