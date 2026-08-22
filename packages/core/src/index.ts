@@ -24,6 +24,9 @@ export {
 } from './workspace/resolve.js';
 export { parseDeclaration, type WorkspaceDeclaration } from './workspace/declaration.js';
 export { buildWorkspaceBlock, applyWorkspace } from './workspace/prompt.js';
+export { WorkItemStore } from './work/store.js';
+export { fetchIssue, parseIssueRef, type GitHubOptions } from './work/github.js';
+export { buildWorkItemBlock, applyWorkItem } from './work/prompt.js';
 export { PermissionBridge } from './permission-bridge.js';
 export { ClaudeAdapter } from './adapters/claude.js';
 export { CodexAdapter } from './adapters/codex.js';

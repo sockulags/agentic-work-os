@@ -180,6 +180,46 @@ export interface LaneUpdatedBody {
 }
 
 /**
+ * A run began: one agent, one work item, one composed context.
+ *
+ * A run is the unit that answers "what authorized this work and what did the agent
+ * actually read". It lives in the event log rather than in a register of its own because
+ * the log is already the canonical, append-only, restart-proof record — a second store
+ * would be a second truth to keep in sync, and the interesting question about a run is
+ * exactly the question the log exists to answer.
+ *
+ * `context` is the payload as sent, verbatim. That is what makes the record auditable:
+ * a summary of what the agent was given is not evidence of what it was given.
+ *
+ * `revision` is the source's `updatedAt` at the moment the run started, frozen here. It
+ * is what lets a later refresh say "the issue moved since this run" without anything
+ * rewriting the run — an event that has been appended cannot change.
+ */
+export interface RunStartedBody {
+  kind: 'run.started';
+  runId: string;
+  workItemId: string;
+  /** `owner/name#number`, denormalized so the log reads on its own. */
+  source: string;
+  revision: string;
+  context: string;
+  /** What the user asked for in this run, without the surrounding context blocks. */
+  instruction: string;
+}
+
+/** How a run ended. A narrowing of `TurnStopReason` to what a run can be. */
+export type RunState = 'completed' | 'interrupted' | 'error';
+
+/** A run reached a terminal state. */
+export interface RunCompletedBody {
+  kind: 'run.completed';
+  runId: string;
+  state: RunState;
+  /** Why it ended that way, when the state alone does not say. */
+  detail: string | null;
+}
+
+/**
  * How the dock should render an artifact. Derived from the file extension, because the
  * publishing agent has no channel to declare it — it just writes a file.
  */
@@ -296,6 +336,8 @@ export type HarnessEventBody =
   | PlanUpdatedBody
   | DiffUpdatedBody
   | LaneUpdatedBody
+  | RunStartedBody
+  | RunCompletedBody
   | ArtifactUpdatedBody
   | ApprovalRequestedBody
   | ApprovalResolvedBody

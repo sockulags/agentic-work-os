@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { exec } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type {
@@ -11,9 +12,11 @@ import type {
   PlanItem,
   ThreadRuntimeState,
   ThreadSummary,
+  WorkItem,
+  WorkSourceError,
   WorkspaceResolution,
 } from '@awos/protocol';
-import { PINNED_CONTEXT_MAX_CHARS } from '@awos/protocol';
+import { PINNED_CONTEXT_MAX_CHARS, RUN_CONTEXT_MAX_CHARS } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
 import type { AgentAdapter, AdapterContext } from './adapters/agent.js';
 import { ClaudeAdapter } from './adapters/claude.js';
@@ -23,6 +26,9 @@ import { ThreadStore } from './store/thread-store.js';
 import { ContextStore, applyPinnedContext, buildPinnedContext } from './store/context-store.js';
 import { resolveWorkspace } from './workspace/resolve.js';
 import { applyWorkspace, buildWorkspaceBlock } from './workspace/prompt.js';
+import { WorkItemStore } from './work/store.js';
+import { applyWorkItem, buildWorkItemBlock } from './work/prompt.js';
+import { fetchIssue, parseIssueRef } from './work/github.js';
 import { applyReplay, buildReplay, hasReplay, stripReplay } from './store/replay.js';
 import { ArtifactWatcher } from './artifact-watcher.js';
 import { contentHash } from './store/artifact-store.js';
@@ -33,6 +39,19 @@ import { createLogger } from './util/logger.js';
 
 const log = createLogger('orchestrator');
 const execAsync = promisify(exec);
+
+/**
+ * Keep a recorded context within its budget.
+ *
+ * The cut is marked rather than silent: a run's value is as evidence, and evidence that
+ * has been trimmed without saying so is worse than no evidence.
+ */
+function capContext(payload: string): string {
+  if (payload.length <= RUN_CONTEXT_MAX_CHARS) return payload;
+  return `${payload.slice(0, RUN_CONTEXT_MAX_CHARS)}
+
+_[cut here: the context sent was ${payload.length} characters; this record holds the first ${RUN_CONTEXT_MAX_CHARS}]_`;
+}
 
 /** How many files a patch touches, for a one-line report of what an integration moved. */
 function countChangedFiles(patch: string): number {
@@ -56,6 +75,7 @@ class Thread {
   readonly #config: HarnessConfig;
   readonly #store: ThreadStore;
   readonly #context: ContextStore;
+  readonly #work: WorkItemStore;
   readonly #bridge: PermissionBridge;
   readonly #emit: (event: HarnessEvent) => void;
   readonly #onState: () => void;
@@ -85,6 +105,7 @@ class Thread {
       config: HarnessConfig;
       store: ThreadStore;
       context: ContextStore;
+      work: WorkItemStore;
       bridge: PermissionBridge;
       emit: (event: HarnessEvent) => void;
       onState: () => void;
@@ -94,6 +115,7 @@ class Thread {
     this.#config = deps.config;
     this.#store = deps.store;
     this.#context = deps.context;
+    this.#work = deps.work;
     this.#bridge = deps.bridge;
     this.#emit = deps.emit;
     this.#onState = deps.onState;
@@ -193,7 +215,16 @@ class Thread {
 
   // -------------------------------------------------------------------------
 
-  async send(agent: AgentId, text: string): Promise<void> {
+  /**
+   * Take a turn.
+   *
+   * `asRun` marks the turn as the start of a run against the thread's work item: the same
+   * dispatch, bracketed by `run.started` and `run.completed` so the log records what
+   * authorized the work, what the agent was given, and how it ended. Ordinary messages in
+   * the same thread still carry the work item in their context — the issue is standing
+   * truth about the thread — but they are conversation, not a run.
+   */
+  async send(agent: AgentId, text: string, asRun = false): Promise<void> {
     if (this.#turns.has(agent)) {
       throw new Error(`${agent} is still working. Interrupt it before sending again.`);
     }
@@ -262,11 +293,31 @@ class Thread {
       log.info('pinning context', { threadId: this.id, agent, chars: pinned.length });
     }
 
+    const item = this.workItem();
     const payload = applyWorkspace(
       buildWorkspaceBlock(workspace),
-      applyPinnedContext(pinned, applyReplay(replay.preamble, text)),
+      applyWorkItem(
+        buildWorkItemBlock(item),
+        applyPinnedContext(pinned, applyReplay(replay.preamble, text)),
+      ),
     );
     const adapter = this.#adapter(agent, cwd);
+
+    // Recorded before dispatch, and before the run can fail, so a run that dies on the
+    // first token still leaves behind what it was asked to do and what it was given.
+    const runId = asRun && item ? randomUUID() : null;
+    const runFrom = this.#store.head(this.id);
+    if (runId && item) {
+      this.#record(agent, {
+        kind: 'run.started',
+        runId,
+        workItemId: item.id,
+        source: `${item.source.repo}#${item.source.number}`,
+        revision: item.snapshot.revision,
+        context: capContext(payload),
+        instruction: text,
+      });
+    }
 
     // Claim the turn synchronously, before any await, so a second send to the same agent
     // sees it busy and is rejected rather than racing in.
@@ -278,8 +329,12 @@ class Thread {
     // guess parsed from tool output. Codex reports its own, so we don't shadow it.
     const diffBaseline = adapter.capabilities.turnDiff ? null : await snapshotWorkingTree(cwd);
 
+    let failure: string | null = null;
     try {
       await adapter.sendTurn(payload);
+    } catch (err) {
+      failure = (err as Error).message;
+      throw err;
     } finally {
       // Emit the synthesized diff before clearing the turn id, so it's attributed to the
       // turn that produced it. A no-op when nothing changed or the cwd isn't a git repo.
@@ -290,6 +345,7 @@ class Thread {
         if (patch) this.#record(agent, { kind: 'diff.updated', turnId, patch });
       }
       this.#turns.delete(agent);
+      if (runId) this.#closeRun(agent, runId, runFrom, failure);
       // Advance the watermark whether or not the turn succeeded: the agent received the
       // context either way, and re-sending it would duplicate history in its session.
       this.#store.setWatermark(this.id, agent, this.#store.head(this.id));
@@ -418,6 +474,67 @@ class Thread {
    */
   #workspace(cwd: string): WorkspaceResolution {
     return resolveWorkspace(cwd, { laneSetup: this.#config.laneSetup });
+  }
+
+  /** The work item this thread answers, or null. Read through, never cached. */
+  workItem(): WorkItem | null {
+    const id = this.#store.get(this.id)?.workItemId ?? null;
+    return id === null ? null : (this.#work.get(id) ?? null);
+  }
+
+  /**
+   * Close a run with how its turn actually ended.
+   *
+   * Read back out of the log rather than tracked in a field: the terminal state is
+   * already recorded there by whichever path finished the turn, and a second copy kept
+   * alongside would be one more thing that can disagree with the transcript.
+   */
+  #closeRun(agent: AgentId, runId: string, fromSeq: number, failure: string | null): void {
+    if (failure !== null) {
+      this.#record(agent, { kind: 'run.completed', runId, state: 'error', detail: failure });
+      return;
+    }
+
+    const completion = this.#store
+      .eventsSince(this.id, fromSeq)
+      .filter((event) => event.kind === 'turn.completed' && event.agent === agent)
+      .pop();
+
+    if (completion?.kind !== 'turn.completed') {
+      this.#record(agent, {
+        kind: 'run.completed',
+        runId,
+        state: 'completed',
+        detail: 'the agent ended the turn without reporting how',
+      });
+      return;
+    }
+
+    switch (completion.reason) {
+      case 'completed':
+        this.#record(agent, { kind: 'run.completed', runId, state: 'completed', detail: null });
+        return;
+      case 'interrupted':
+        this.#record(agent, { kind: 'run.completed', runId, state: 'interrupted', detail: null });
+        return;
+      case 'error':
+        this.#record(agent, {
+          kind: 'run.completed',
+          runId,
+          state: 'error',
+          detail: completion.error,
+        });
+        return;
+      default:
+        // max_turns and max_budget: the agent stopped short of the work, which is not a
+        // finished run however cleanly the process exited.
+        this.#record(agent, {
+          kind: 'run.completed',
+          runId,
+          state: 'error',
+          detail: `the agent stopped early (${completion.reason})`,
+        });
+    }
   }
 
   /** The agent's lane, provisioned on first use. Its path, ready to be a working directory. */
@@ -578,6 +695,7 @@ class Thread {
 export class Orchestrator extends EventEmitter {
   readonly store: ThreadStore;
   readonly context: ContextStore;
+  readonly work: WorkItemStore;
   readonly #config: HarnessConfig;
   readonly #bridge = new PermissionBridge();
   readonly #threads = new Map<string, Thread>();
@@ -587,6 +705,7 @@ export class Orchestrator extends EventEmitter {
     this.#config = config;
     this.store = new ThreadStore(config.dataDir);
     this.context = new ContextStore(config.dataDir);
+    this.work = new WorkItemStore(config.dataDir);
   }
 
   async start(): Promise<void> {
@@ -616,7 +735,7 @@ export class Orchestrator extends EventEmitter {
     return this.#thread(threadId).state();
   }
 
-  async send(threadId: string, agent: AgentId, text: string): Promise<void> {
+  async send(threadId: string, agent: AgentId, text: string, asRun = false): Promise<void> {
     const summary = this.store.get(threadId);
     if (!summary) throw new Error(`Unknown thread ${threadId}`);
 
@@ -631,7 +750,7 @@ export class Orchestrator extends EventEmitter {
       this.emit('thread', this.store.update(threadId, { title }));
     }
 
-    await this.#thread(threadId).send(agent, text);
+    await this.#thread(threadId).send(agent, text, asRun);
     const after = this.store.get(threadId);
     if (after) this.emit('thread', after);
   }
@@ -670,6 +789,118 @@ export class Orchestrator extends EventEmitter {
     return resolveWorkspace(cwd, { laneSetup: this.#config.laneSetup });
   }
 
+  // -------------------------------------------------------------------------
+  // Work items
+  // -------------------------------------------------------------------------
+
+  /** The item a thread answers, or null. */
+  workItem(threadId: string): WorkItem | null {
+    const id = this.store.get(threadId)?.workItemId ?? null;
+    return id === null ? null : (this.work.get(id) ?? null);
+  }
+
+  /**
+   * Attach a GitHub issue to a thread.
+   *
+   * The reference may be a URL, `owner/name#12`, or a bare number resolved against the
+   * workspace's declared repository — which is the whole reason the workspace contract
+   * came first: without it there is nothing a bare `#14` could mean.
+   *
+   * A failure to reach GitHub is returned rather than thrown. Every one of them is
+   * something the user can act on, and the panel that asked has to be able to say which.
+   */
+  async attachWorkItem(
+    threadId: string,
+    reference: string,
+  ): Promise<{ item: WorkItem | null; error: WorkSourceError | null }> {
+    const summary = this.store.get(threadId);
+    if (!summary) throw new Error(`Unknown thread ${threadId}`);
+
+    const workspace = this.workspace(summary.cwd);
+    if (workspace.status !== 'ok') {
+      return {
+        item: null,
+        error: {
+          kind: 'unknown',
+          // Where the record would belong is undefined without a workspace, and a work
+          // item filed against nothing would be unreachable from every other thread.
+          message:
+            'This directory is not a workspace yet. Declare .awos/workspace.json first, so the issue has a project to belong to.',
+          retryable: false,
+        },
+      };
+    }
+
+    const parsed = parseIssueRef(reference, workspace.workspace.repository.github);
+    if ('error' in parsed) {
+      return { item: null, error: { kind: 'not-found', message: parsed.error, retryable: false } };
+    }
+
+    const result = await fetchIssue(parsed, this.#github());
+    if (!result.ok) return { item: null, error: result.error };
+
+    const item = this.work.record({
+      workspaceRoot: workspace.workspace.root,
+      ref: result.ref,
+      snapshot: result.snapshot,
+    });
+
+    if (summary.workItemId !== item.id) {
+      this.emit('thread', this.store.update(threadId, { workItemId: item.id }));
+    }
+    log.info('work item attached', { threadId, source: `${item.source.repo}#${item.source.number}` });
+    return { item, error: null };
+  }
+
+  /**
+   * Ask GitHub again.
+   *
+   * Nothing that has already run is touched: a run's context and revision are events, and
+   * events do not change. What moves is the item's own snapshot, which is what later turns
+   * and later runs will carry — so the UI can compare the two and say the source has
+   * changed since a run, without anything having rewritten that run's history.
+   */
+  async refreshWorkItem(
+    threadId: string,
+  ): Promise<{ item: WorkItem | null; error: WorkSourceError | null }> {
+    const current = this.workItem(threadId);
+    if (current === null) {
+      return {
+        item: null,
+        error: { kind: 'not-found', message: 'This thread has no work item to refresh.', retryable: false },
+      };
+    }
+
+    const result = await fetchIssue(
+      { repo: current.source.repo, number: current.source.number },
+      this.#github(),
+    );
+    if (!result.ok) return { item: current, error: result.error };
+
+    const item = this.work.record({
+      workspaceRoot: current.workspaceRoot,
+      ref: result.ref,
+      snapshot: result.snapshot,
+    });
+    return { item, error: null };
+  }
+
+  /** Unlink a thread from its item. The item and the runs that used it both survive. */
+  detachWorkItem(threadId: string): void {
+    const summary = this.store.get(threadId);
+    if (!summary) throw new Error(`Unknown thread ${threadId}`);
+    if (summary.workItemId === null) return;
+    this.emit('thread', this.store.update(threadId, { workItemId: null }));
+  }
+
+  #github(): { bin: string; binArgs: string[]; timeoutMs: number } {
+    return {
+      bin: this.#config.ghBin,
+      binArgs: this.#config.ghBinArgs,
+      timeoutMs: this.#config.ghTimeoutMs,
+    };
+  }
+
   getPinnedContext(threadId: string): string {
     this.#requireThread(threadId);
     return this.context.get(threadId);
@@ -701,6 +932,7 @@ export class Orchestrator extends EventEmitter {
       config: this.#config,
       store: this.store,
       context: this.context,
+      work: this.work,
       bridge: this.#bridge,
       emit: (event) => this.emit('event', event),
       onState: () => this.emit('state', thread.state()),

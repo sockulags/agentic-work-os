@@ -220,6 +220,36 @@ export class HarnessServer {
         return { type: 'workspace', cwd, resolution: orchestrator.workspace(cwd) };
       }
 
+      case 'work.get':
+        return {
+          type: 'work',
+          threadId: msg.threadId,
+          item: orchestrator.workItem(msg.threadId),
+          error: null,
+        };
+
+      case 'work.attach': {
+        const result = await orchestrator.attachWorkItem(msg.threadId, msg.reference);
+        return { type: 'work', threadId: msg.threadId, ...result };
+      }
+
+      case 'work.refresh': {
+        const result = await orchestrator.refreshWorkItem(msg.threadId);
+        return { type: 'work', threadId: msg.threadId, ...result };
+      }
+
+      case 'work.detach':
+        orchestrator.detachWorkItem(msg.threadId);
+        return { type: 'work', threadId: msg.threadId, item: null, error: null };
+
+      case 'work.start':
+        // Not awaited, for the same reason `turn.send` is not: a run is a turn, and a turn
+        // is minutes of streamed events rather than a request to wait on.
+        void orchestrator.send(msg.threadId, msg.agent, msg.text, true).catch((err: Error) => {
+          this.broadcast({ type: 'notice', level: 'error', message: err.message });
+        });
+        return { type: 'ok' };
+
       case 'agents.probe':
         return { type: 'agents.probe', agents: await this.#probeAgents() };
 

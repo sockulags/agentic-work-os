@@ -48,6 +48,17 @@ export interface HarnessConfig {
   approvalTimeoutMs: number;
   /** Startup handshake budget for `codex app-server`. */
   codexInitTimeoutMs: number;
+  /**
+   * The GitHub CLI, used to read work items as the user.
+   *
+   * A binary rather than an API token on purpose: `gh` is already authenticated, so the
+   * harness never holds a credential of its own. Overridable for the same reasons the
+   * agent binaries are — a wrapper, a different install, or a fake in the tests.
+   */
+  ghBin: string;
+  ghBinArgs: string[];
+  /** How long a single `gh` call may take before it counts as unreachable. */
+  ghTimeoutMs: number;
 }
 
 function envStr(key: string, fallback: string): string {
@@ -91,5 +102,8 @@ export function loadConfig(): HarnessConfig {
     interruptGraceMs: envInt('AWOS_INTERRUPT_GRACE_MS', 4_000),
     approvalTimeoutMs: envInt('AWOS_APPROVAL_TIMEOUT_MS', 10 * 60_000),
     codexInitTimeoutMs: envInt('AWOS_CODEX_INIT_TIMEOUT_MS', 30_000),
+    ghBin: envStr('AWOS_GH_BIN', 'gh'),
+    ghBinArgs: envArgs('AWOS_GH_BIN_ARGS'),
+    ghTimeoutMs: envInt('AWOS_GH_TIMEOUT_MS', 20_000),
   };
 }

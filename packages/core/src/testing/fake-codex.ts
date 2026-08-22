@@ -13,6 +13,17 @@
 import { LineDecoder } from '../util/jsonl.js';
 
 const args = new Set(process.argv.slice(2));
+
+/**
+ * How much of the prompt the fake echoes back.
+ *
+ * The echo is how a test sees what actually landed on the wire. Twenty characters was
+ * enough when a prompt was the user's message; standing context blocks — workspace, work
+ * item, pinned notes — now sit in front of it, and a window that narrow can only ever show
+ * the first of them.
+ */
+const ECHO_CHARS = 600;
+
 const THREAD_ID = 'thr_fake_1';
 
 let turnCounter = 0;
@@ -94,11 +105,26 @@ const TURN_DIFF = [
   '',
 ].join('\n');
 
+/**
+ * Set by `turn/interrupt`, so a slow turn stops instead of finishing anyway.
+ *
+ * Without it an interrupted turn would report `interrupted` and then `completed` a moment
+ * later, which no real agent does and which would let a test pass on the wrong event.
+ */
+let interrupted = false;
+
 async function runTurn(threadId: string, text: string): Promise<void> {
   turnCounter += 1;
+  interrupted = false;
   const turnId = `turn_${turnCounter}`;
 
   emit({ method: 'turn/started', params: { turn: { id: turnId, threadId } } });
+
+  // Long enough for a test to interrupt mid-turn, short enough not to pad the suite.
+  if (args.has('--slow')) {
+    await sleep(400);
+    if (interrupted) return;
+  }
 
   if (args.has('--tool')) {
     const itemId = `item_exec_${turnCounter}`;
@@ -150,14 +176,14 @@ async function runTurn(threadId: string, text: string): Promise<void> {
   }
 
   const itemId = `item_msg_${turnCounter}`;
-  for (const delta of ['Codex ', 'handled: ', text.slice(0, 20)]) {
+  for (const delta of ['Codex ', 'handled: ', text.slice(0, ECHO_CHARS)]) {
     emit({ method: 'item/agentMessage/delta', params: { itemId, delta } });
     await sleep(1);
   }
 
   emit({
     method: 'item/completed',
-    params: { item: { id: itemId, type: 'agentMessage', text: `Codex handled: ${text.slice(0, 20)}` } },
+    params: { item: { id: itemId, type: 'agentMessage', text: `Codex handled: ${text.slice(0, ECHO_CHARS)}` } },
   });
 
   emit({
@@ -227,6 +253,7 @@ function main(): void {
         }
 
         case 'turn/interrupt':
+          interrupted = true;
           emit({ id: msg.id, result: {} });
           emit({
             method: 'turn/completed',

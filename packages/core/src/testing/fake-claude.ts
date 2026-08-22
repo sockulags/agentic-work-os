@@ -13,6 +13,17 @@
 import { LineDecoder } from '../util/jsonl.js';
 
 const args = new Set(process.argv.slice(2));
+
+/**
+ * How much of the prompt the fake echoes back.
+ *
+ * The echo is how a test sees what actually landed on the wire. Twenty characters was
+ * enough when a prompt was the user's message; standing context blocks — workspace, work
+ * item, pinned notes — now sit in front of it, and a window that narrow can only ever show
+ * the first of them.
+ */
+const ECHO_CHARS = 600;
+
 const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 
 let turn = 0;
@@ -86,7 +97,7 @@ function sleep(ms: number): Promise<void> {
 function markdownChunks(prompt: string): string[] {
   return [
     '## Plan for ',
-    prompt.slice(0, 20),
+    prompt.slice(0, ECHO_CHARS),
     '\n\nThree steps, in order:\n\n',
     '1. **Read** the current renderer\n',
     '   - `Transcript.tsx` owns the message branch\n',
@@ -151,7 +162,7 @@ async function runTurn(text: string): Promise<void> {
     const chunks = [
       'Let me look at what was asked. ',
       'The request is: ',
-      text.slice(0, 20),
+      text.slice(0, ECHO_CHARS),
       '. I should check the obvious places first, ',
       'then decide whether a tool call is warranted.',
     ];
@@ -189,7 +200,7 @@ async function runTurn(text: string): Promise<void> {
 
   const chunks = args.has('--markdown')
     ? markdownChunks(text)
-    : ['Working', ' on: ', text.slice(0, 20)];
+    : ['Working', ' on: ', text.slice(0, ECHO_CHARS)];
 
   for (const chunk of chunks) {
     emit({
