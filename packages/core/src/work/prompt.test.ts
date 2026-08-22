@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { ISSUE_BODY_MAX_CHARS, type WorkItem } from '@awos/protocol';
-import { applyWorkItem, buildWorkItemBlock } from './prompt.js';
+import { ISSUE_BODY_MAX_CHARS, type RetainedItem, type WorkItem } from '@awos/protocol';
+import { applyRetained, applyWorkItem, buildRetainedBlock, buildWorkItemBlock } from './prompt.js';
 
 function item(overrides: Partial<WorkItem['snapshot']> = {}): WorkItem {
   return {
@@ -68,5 +68,67 @@ describe('applyWorkItem', () => {
 
   test('leaves the prompt alone when there is no work item', () => {
     assert.equal(applyWorkItem(null, 'Do it.'), 'Do it.');
+  });
+});
+
+describe('buildRetainedBlock', () => {
+  function kept(overrides: Partial<RetainedItem> = {}): RetainedItem {
+    return {
+      id: 'k1',
+      workItemId: 'w1',
+      kind: 'decision',
+      text: 'Read GitHub through gh, never through a token of our own',
+      runId: 'r1',
+      threadId: 't1',
+      source: 'claude',
+      at: 1,
+      selected: true,
+      retired: false,
+      ...overrides,
+    };
+  }
+
+  test('nothing retained adds nothing to the prompt', () => {
+    assert.equal(buildRetainedBlock([]), null);
+  });
+
+  test('groups by kind, so a decision does not read as an open question', () => {
+    const block =
+      buildRetainedBlock([
+        kept(),
+        kept({ id: 'k2', kind: 'question', text: 'Who owns the rate limit?' }),
+        kept({ id: 'k3', kind: 'constraint', text: 'No network in tests' }),
+        kept({ id: 'k4', kind: 'discovery', text: 'gh exits 1 for everything' }),
+      ]) ?? '';
+
+    assert.match(block, /^<retained-context>/);
+    assert.match(block, /Decided:\n- Read GitHub through gh/);
+    assert.match(block, /Constraints:\n- No network in tests/);
+    assert.match(block, /Found out:\n- gh exits 1/);
+    assert.match(block, /Still open:\n- Who owns the rate limit\?/);
+  });
+
+  test('says who established each line', () => {
+    assert.match(buildRetainedBlock([kept()]) ?? '', /_\(claude\)_/);
+  });
+
+  test('tells the agent this is belief, not fact', () => {
+    assert.match(buildRetainedBlock([kept()]) ?? '', /what was believed at the time/);
+  });
+
+  test('cuts an oversized ledger and says where the rest is', () => {
+    const many = Array.from({ length: 200 }, (_, i) =>
+      kept({ id: `k${i}`, text: `a decision long enough to matter, number ${i}` }),
+    );
+
+    const block = buildRetainedBlock(many) ?? '';
+    assert.match(block, /cut here: retained context exceeded/);
+    assert.match(block, /Work panel/);
+  });
+});
+
+describe('applyRetained', () => {
+  test('leaves the prompt alone when nothing was retained', () => {
+    assert.equal(applyRetained(null, 'Do it.'), 'Do it.');
   });
 });

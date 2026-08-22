@@ -1,4 +1,9 @@
-import { ISSUE_BODY_MAX_CHARS, type WorkItem } from '@awos/protocol';
+import {
+  ISSUE_BODY_MAX_CHARS,
+  RETAINED_CONTEXT_MAX_CHARS,
+  type RetainedItem,
+  type WorkItem,
+} from '@awos/protocol';
 
 /**
  * The work item as the agent reads it.
@@ -44,5 +49,59 @@ export function buildWorkItemBlock(item: WorkItem | null): string | null {
 
 /** Prepend the block to a prompt, after the workspace and before the pinned notes. */
 export function applyWorkItem(block: string | null, text: string): string {
+  return block === null ? text : `${block}\n\n${text}`;
+}
+
+const RETAINED_OPEN = '<retained-context>';
+const RETAINED_CLOSE = '</retained-context>';
+
+const RETAINED_HEADING: Record<RetainedItem['kind'], string> = {
+  discovery: 'Found out',
+  decision: 'Decided',
+  constraint: 'Constraints',
+  question: 'Still open',
+};
+
+/**
+ * What earlier work on this item established, carried forward.
+ *
+ * This is the part that makes a second run cheaper than the first: what was discovered,
+ * what was decided and why, what the work is boxed in by, and what nobody has answered
+ * yet. Each line says who established it, because "the previous agent believed this" and
+ * "the person who filed the issue said this" are worth different amounts.
+ *
+ * Only what somebody selected, and only what has not been retired. The whole ledger would
+ * grow without bound and turn every later run into a reading exercise.
+ */
+export function buildRetainedBlock(items: readonly RetainedItem[]): string | null {
+  if (items.length === 0) return null;
+
+  const sections: string[] = [];
+  for (const kind of ['decision', 'constraint', 'discovery', 'question'] as const) {
+    const lines = items
+      .filter((item) => item.kind === kind)
+      .map((item) => `- ${item.text} _(${item.source})_`);
+    if (lines.length > 0) sections.push(`${RETAINED_HEADING[kind]}:\n${lines.join('\n')}`);
+  }
+  if (sections.length === 0) return null;
+
+  const body = sections.join('\n\n');
+  const header =
+    'Kept from earlier work on this issue by the people and agents who did it. It is not part ' +
+    'of the issue itself, and it is not automatically true — treat it as what was believed at ' +
+    'the time, and say so if you find otherwise.';
+
+  return [
+    RETAINED_OPEN,
+    header,
+    body.length <= RETAINED_CONTEXT_MAX_CHARS
+      ? body
+      : `${body.slice(0, RETAINED_CONTEXT_MAX_CHARS)}\n\n_[cut here: retained context exceeded its ${RETAINED_CONTEXT_MAX_CHARS}-character budget; the rest is in the Work panel]_`,
+    RETAINED_CLOSE,
+  ].join('\n\n');
+}
+
+/** Prepend the block to a prompt, right after the work item it belongs to. */
+export function applyRetained(block: string | null, text: string): string {
   return block === null ? text : `${block}\n\n${text}`;
 }

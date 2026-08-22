@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { exec } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type {
@@ -11,12 +12,18 @@ import type {
   PermissionMode,
   PlanItem,
   ThreadRuntimeState,
+  EvidenceKind,
+  EvidenceRef,
+  RetainedItem,
+  RetainedKind,
+  RunClaim,
   ThreadSummary,
   WorkItem,
+  WorkingState,
   WorkSourceError,
   WorkspaceResolution,
 } from '@awos/protocol';
-import { PINNED_CONTEXT_MAX_CHARS, RUN_CONTEXT_MAX_CHARS } from '@awos/protocol';
+import { PINNED_CONTEXT_MAX_CHARS, RETAINED_FILE, RUN_CONTEXT_MAX_CHARS } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
 import type { AgentAdapter, AdapterContext } from './adapters/agent.js';
 import { ClaudeAdapter } from './adapters/claude.js';
@@ -27,12 +34,18 @@ import { ContextStore, applyPinnedContext, buildPinnedContext } from './store/co
 import { resolveWorkspace } from './workspace/resolve.js';
 import { applyWorkspace, buildWorkspaceBlock } from './workspace/prompt.js';
 import { WorkItemStore } from './work/store.js';
-import { applyWorkItem, buildWorkItemBlock } from './work/prompt.js';
+import {
+  applyRetained,
+  applyWorkItem,
+  buildRetainedBlock,
+  buildWorkItemBlock,
+} from './work/prompt.js';
+import { foldRetained, selectedForContext } from './work/ledger.js';
 import { fetchIssue, parseIssueRef } from './work/github.js';
 import { applyReplay, buildReplay, hasReplay, stripReplay } from './store/replay.js';
 import { ArtifactWatcher } from './artifact-watcher.js';
 import { contentHash } from './store/artifact-store.js';
-import { snapshotWorkingTree, diffTrees, headTree } from './util/git.js';
+import { snapshotWorkingTree, diffTrees, headTree, headCommit } from './util/git.js';
 import type { Lane } from './util/worktree.js';
 import { provisionLane, laneDiff, integrateLane, removeLane } from './util/worktree.js';
 import { createLogger } from './util/logger.js';
@@ -51,6 +64,15 @@ function capContext(payload: string): string {
   return `${payload.slice(0, RUN_CONTEXT_MAX_CHARS)}
 
 _[cut here: the context sent was ${payload.length} characters; this record holds the first ${RUN_CONTEXT_MAX_CHARS}]_`;
+}
+
+const RETAINED_KINDS = ['discovery', 'decision', 'constraint', 'question'] as const;
+
+/** A retained kind an agent actually wrote, or null for anything else it put there. */
+function asRetainedKind(value: unknown): RetainedKind | null {
+  return (RETAINED_KINDS as readonly string[]).includes(value as string)
+    ? (value as RetainedKind)
+    : null;
 }
 
 /** How many files a patch touches, for a one-line report of what an integration moved. */
@@ -294,11 +316,15 @@ class Thread {
     }
 
     const item = this.workItem();
+    const retained = item === null ? [] : this.retained(item.id);
     const payload = applyWorkspace(
       buildWorkspaceBlock(workspace),
       applyWorkItem(
         buildWorkItemBlock(item),
-        applyPinnedContext(pinned, applyReplay(replay.preamble, text)),
+        applyRetained(
+          buildRetainedBlock(selectedForContext(retained)),
+          applyPinnedContext(pinned, applyReplay(replay.preamble, text)),
+        ),
       ),
     );
     const adapter = this.#adapter(agent, cwd);
@@ -345,6 +371,10 @@ class Thread {
         if (patch) this.#record(agent, { kind: 'diff.updated', turnId, patch });
       }
       this.#turns.delete(agent);
+      // Read after the turn rather than watched during it: nothing needs these the moment
+      // they are written, and a file read on a boundary we already have beats another
+      // watcher with its own debounce and restart story.
+      if (item) this.#ingestRetained(agent, cwd, item.id, runId);
       if (runId) this.#closeRun(agent, runId, runFrom, failure);
       // Advance the watermark whether or not the turn succeeded: the agent received the
       // context either way, and re-sending it would duplicate history in its session.
@@ -474,6 +504,190 @@ class Thread {
    */
   #workspace(cwd: string): WorkspaceResolution {
     return resolveWorkspace(cwd, { laneSetup: this.#config.laneSetup });
+  }
+
+  /**
+   * Retained context for a work item, from every thread that has worked on it.
+   *
+   * Folded across threads because the item outlives any one of them: a second thread on
+   * the same issue must not start out ignorant of what the first one established. The
+   * store holds every thread's events in memory already, so this is a filter rather than
+   * a read.
+   */
+  retained(workItemId: string): RetainedItem[] {
+    return foldRetained(this.#store.allEvents()).filter(
+      (entry) => entry.workItemId === workItemId,
+    );
+  }
+
+  /**
+   * Take what the agent wrote to `.awos/retained.jsonl` and put it in the ledger.
+   *
+   * Deduplicated on kind and text rather than on file position, so an agent that rewrites
+   * the file, or a restart that re-reads it, adds nothing. The file is left alone: it is
+   * the agent's scratch, and deleting other people's files to track our own bookkeeping is
+   * how you lose someone's notes.
+   */
+  #ingestRetained(agent: AgentId, cwd: string, workItemId: string, runId: string | null): void {
+    const path = join(cwd, RETAINED_FILE);
+    if (!existsSync(path)) return;
+
+    let raw: string;
+    try {
+      raw = readFileSync(path, 'utf8');
+    } catch (err) {
+      log.warn('unreadable retained file', { path, message: (err as Error).message });
+      return;
+    }
+
+    const known = new Set(
+      this.retained(workItemId).map((entry) => `${entry.kind}:${entry.text}`),
+    );
+
+    for (const line of raw.split('\n')) {
+      if (line.trim() === '') continue;
+      let parsed: { kind?: unknown; text?: unknown };
+      try {
+        parsed = JSON.parse(line) as { kind?: unknown; text?: unknown };
+      } catch {
+        // One malformed line is the agent's typo, not a reason to drop the rest.
+        log.warn('malformed retained line', { path });
+        continue;
+      }
+
+      const kind = asRetainedKind(parsed.kind);
+      const text = typeof parsed.text === 'string' ? parsed.text.trim() : '';
+      if (kind === null || text === '') continue;
+      if (known.has(`${kind}:${text}`)) continue;
+      known.add(`${kind}:${text}`);
+
+      this.#record(agent, {
+        kind: 'context.retained',
+        retainedId: randomUUID(),
+        workItemId,
+        retainedKind: kind,
+        text,
+        runId,
+        // On by default: an agent that bothered to write something down meant it to be
+        // read, and the person can drop it in one click if they disagree.
+        selected: true,
+        retired: false,
+      });
+    }
+  }
+
+  /**
+   * The code an evidence item is about.
+   *
+   * Taken from the lane when the agent has one, because that is where its work actually
+   * is; a claim about the thread directory would be a claim about files the agent never
+   * touched.
+   */
+  async #workingState(agent: AgentId | null): Promise<WorkingState> {
+    const summary = this.#store.get(this.id);
+    const lane = agent === null ? undefined : this.#lanes.get(agent);
+    const cwd = lane?.path ?? summary?.cwd;
+    if (cwd === undefined) return { commit: null, tree: null, dirty: false };
+
+    const [commit, tree, head] = await Promise.all([
+      headCommit(cwd),
+      snapshotWorkingTree(cwd),
+      headTree(cwd),
+    ]);
+    return { commit, tree, dirty: tree !== null && head !== null && tree !== head };
+  }
+
+  /** Close a run with what it actually achieved. */
+  closeRun(runId: string, claim: RunClaim, statement: string): void {
+    if (!this.#hasRun(runId)) throw new Error(`No run ${runId} in this thread.`);
+    this.#record(null, { kind: 'run.closed', runId, claim, statement });
+    this.#onState();
+  }
+
+  /** Attach evidence to a run, with the tree it applies to captured now. */
+  async recordEvidence(input: {
+    runId: string;
+    kind: EvidenceKind;
+    ref: EvidenceRef;
+    summary: string;
+    evidenceId?: string;
+  }): Promise<void> {
+    const started = this.#runStarted(input.runId);
+    if (!started) throw new Error(`No run ${input.runId} in this thread.`);
+
+    this.#record(null, {
+      kind: 'evidence.recorded',
+      evidenceId: input.evidenceId ?? randomUUID(),
+      runId: input.runId,
+      workItemId: started.workItemId,
+      evidenceKind: input.kind,
+      ref: input.ref,
+      summary: input.summary,
+      state: await this.#workingState(started.agent),
+    });
+    this.#onState();
+  }
+
+  /** Write something down against the work item. */
+  retainContext(input: {
+    kind: RetainedKind;
+    text: string;
+    runId?: string | null;
+    retainedId?: string;
+    selected?: boolean;
+    retired?: boolean;
+  }): void {
+    const item = this.workItem();
+    if (item === null) throw new Error('This thread has no work item to retain anything against.');
+
+    this.#record(null, {
+      kind: 'context.retained',
+      retainedId: input.retainedId ?? randomUUID(),
+      workItemId: item.id,
+      retainedKind: input.kind,
+      text: input.text,
+      runId: input.runId ?? null,
+      selected: input.selected ?? true,
+      retired: input.retired ?? false,
+    });
+    this.#onState();
+  }
+
+  /**
+   * Change whether a retained item is carried forward, or retire it.
+   *
+   * Composed here from the current record rather than taken from the caller, so a client
+   * cannot rewrite the text of a claim while pretending to tick a box. The new record is
+   * appended; the old one stays exactly as it was written.
+   */
+  amendRetained(retainedId: string, patch: { selected?: boolean; retired?: boolean }): void {
+    const current = this.retained(this.workItem()?.id ?? '').find((entry) => entry.id === retainedId);
+    if (!current) throw new Error(`No retained item ${retainedId} on this work item.`);
+
+    this.#record(null, {
+      kind: 'context.retained',
+      retainedId: current.id,
+      workItemId: current.workItemId,
+      retainedKind: current.kind,
+      text: current.text,
+      runId: current.runId,
+      selected: patch.selected ?? current.selected,
+      retired: patch.retired ?? current.retired,
+    });
+    this.#onState();
+  }
+
+  #hasRun(runId: string): boolean {
+    return this.#runStarted(runId) !== null;
+  }
+
+  #runStarted(runId: string): { workItemId: string; agent: AgentId | null } | null {
+    for (const event of this.#store.events(this.id)) {
+      if (event.kind === 'run.started' && event.runId === runId) {
+        return { workItemId: event.workItemId, agent: event.agent };
+      }
+    }
+    return null;
   }
 
   /** The work item this thread answers, or null. Read through, never cached. */
@@ -891,6 +1105,56 @@ export class Orchestrator extends EventEmitter {
     if (!summary) throw new Error(`Unknown thread ${threadId}`);
     if (summary.workItemId === null) return;
     this.emit('thread', this.store.update(threadId, { workItemId: null }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Outcomes, evidence and retained context
+  // -------------------------------------------------------------------------
+
+  /**
+   * State what a run achieved, as opposed to how its turn ended.
+   *
+   * Never inferred from the turn: an agent that exits cleanly having done the wrong thing
+   * is the case this exists for, and no signal in the log tells it apart from success.
+   * Correcting a claim is another call — the record is appended, not edited.
+   */
+  closeRun(threadId: string, runId: string, claim: RunClaim, statement: string): void {
+    this.#thread(threadId).closeRun(runId, claim, statement);
+  }
+
+  /** Attach evidence to a run, with the tree it applies to captured as it stands now. */
+  async recordEvidence(
+    threadId: string,
+    input: { runId: string; kind: EvidenceKind; ref: EvidenceRef; summary: string; evidenceId?: string },
+  ): Promise<void> {
+    await this.#thread(threadId).recordEvidence(input);
+  }
+
+  /** Write something down against the thread's work item. */
+  retainContext(
+    threadId: string,
+    input: { kind: RetainedKind; text: string; runId?: string | null; retainedId?: string },
+  ): void {
+    this.#thread(threadId).retainContext(input);
+  }
+
+  /** Carry a retained item forward or stop carrying it, without rewriting what it says. */
+  amendRetained(
+    threadId: string,
+    retainedId: string,
+    patch: { selected?: boolean; retired?: boolean },
+  ): void {
+    this.#thread(threadId).amendRetained(retainedId, patch);
+  }
+
+  /**
+   * Everything retained about a thread's work item, from every thread that has touched it.
+   *
+   * Empty for a thread with no work item — there is nothing for the context to be about.
+   */
+  retainedFor(threadId: string): RetainedItem[] {
+    const item = this.workItem(threadId);
+    return item === null ? [] : this.#thread(threadId).retained(item.id);
   }
 
   #github(): { bin: string; binArgs: string[]; timeoutMs: number } {

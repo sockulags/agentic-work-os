@@ -10,6 +10,13 @@ import type { AgentId, ApprovalRequestedBody, HarnessEvent, PlanItem } from './e
 import type { AgentCapabilities } from './capabilities.js';
 import type { WorkspaceResolution } from './workspace.js';
 import type { WorkItem, WorkSourceError } from './work.js';
+import type {
+  EvidenceKind,
+  EvidenceRef,
+  RetainedItem,
+  RetainedKind,
+  RunClaim,
+} from './evidence.js';
 
 export type PermissionMode =
   | 'default'
@@ -137,6 +144,38 @@ export type ClientRequest =
    * message that is merely conversation should not have to pretend otherwise.
    */
   | { type: 'work.start'; threadId: string; agent: AgentId; text: string }
+  /**
+   * State what a run achieved. Sending it again with the same `runId` is a correction:
+   * the later claim stands and the earlier one stays in the log.
+   */
+  | { type: 'run.close'; threadId: string; runId: string; claim: RunClaim; statement: string }
+  /** Attach a fact to a run in support of its claim. */
+  | {
+      type: 'evidence.record';
+      threadId: string;
+      runId: string;
+      evidenceKind: EvidenceKind;
+      ref: EvidenceRef;
+      summary: string;
+      /** Pass an existing id to correct that item rather than add another. */
+      evidenceId?: string;
+    }
+  /** Keep a discovery, decision, constraint or open question against the work item. */
+  | {
+      type: 'context.retain';
+      threadId: string;
+      retainedKind: RetainedKind;
+      text: string;
+      runId?: string | null;
+    }
+  /** Carry a retained item forward or stop, without rewriting what it says. */
+  | {
+      type: 'context.amend';
+      threadId: string;
+      retainedId: string;
+      selected?: boolean;
+      retired?: boolean;
+    }
   | { type: 'agents.probe' };
 
 export type ClientMessage = ClientRequest & { requestId: string };
@@ -161,7 +200,19 @@ export type ServerResponseBody =
    * Both, because a refresh that fails still has the last known item to show: blanking
    * the panel over a dropped connection would lose the thing the user was reading.
    */
-  | { type: 'work'; threadId: string; item: WorkItem | null; error: WorkSourceError | null }
+  | {
+      type: 'work';
+      threadId: string;
+      item: WorkItem | null;
+      error: WorkSourceError | null;
+      /**
+       * Everything retained about the item, from every thread that has worked on it.
+       *
+       * Sent with the item rather than folded by the UI, because the events it comes from
+       * live in threads this client has not opened.
+       */
+      retained: RetainedItem[];
+    }
   | { type: 'agents.probe'; agents: AgentAvailability[] };
 
 export type ServerResponse = ServerResponseBody & { requestId: string };

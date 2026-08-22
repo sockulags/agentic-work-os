@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { HarnessEvent, ThreadRuntimeState } from '@awos/protocol';
-import { WORKSPACE_FILE, WORKSPACE_SCHEMA_VERSION } from '@awos/protocol';
+import { RETAINED_FILE, WORKSPACE_FILE, WORKSPACE_SCHEMA_VERSION } from '@awos/protocol';
+import { foldEvidence, foldOutcomes, foldRetained } from './work/ledger.js';
 import { Orchestrator } from './orchestrator.js';
 import type { HarnessConfig } from './config.js';
 
@@ -976,5 +977,311 @@ describe('work items', () => {
 
     assert.equal(orch.workItem(thread.id), null);
     assert.equal(runs(orch, thread.id).length, 1, 'a run that happened is not undone');
+  });
+});
+
+describe('outcomes, evidence and retained context', () => {
+  function declare(root: string): void {
+    mkdirSync(join(root, '.awos'), { recursive: true });
+    writeFileSync(
+      join(root, WORKSPACE_FILE),
+      JSON.stringify({
+        version: WORKSPACE_SCHEMA_VERSION,
+        name: 'under-test',
+        repository: { github: 'sockulags/agentic-work-os' },
+      }),
+      'utf8',
+    );
+  }
+
+  /** A thread with an issue attached and one run against it. */
+  async function withRun(orch: Orchestrator, cwd: string) {
+    declare(cwd);
+    const thread = orch.createThread({ cwd });
+    await orch.attachWorkItem(thread.id, '#14');
+    await orch.send(thread.id, 'claude', 'start on this', true);
+
+    const started = orch.store.events(thread.id).find((e) => e.kind === 'run.started');
+    assert.ok(started?.kind === 'run.started');
+    return { thread, runId: started.runId, workItemId: started.workItemId };
+  }
+
+  function ledger(orch: Orchestrator, threadId: string) {
+    const events = orch.store.events(threadId);
+    return {
+      outcomes: foldOutcomes(events),
+      evidence: foldEvidence(events),
+      retained: foldRetained(events),
+    };
+  }
+
+  test('a run can claim an outcome its terminal state cannot express', async () => {
+    const { orch } = await boot(makeConfig());
+    const { thread, runId } = await withRun(orch, workDir);
+
+    // The turn ended cleanly. What the run achieved is a different question.
+    const completed = orch.store.events(thread.id).find((e) => e.kind === 'run.completed');
+    assert.equal(completed?.kind === 'run.completed' ? completed.state : null, 'completed');
+
+    orch.closeRun(thread.id, runId, 'partial', 'the parser is done, the UI is not');
+
+    const outcome = ledger(orch, thread.id).outcomes.get(runId);
+    assert.equal(outcome?.claim, 'partial');
+    assert.equal(outcome?.statement, 'the parser is done, the UI is not');
+    assert.equal(outcome?.source, 'user');
+  });
+
+  test('a correction stands without erasing what it corrected', async () => {
+    const { orch } = await boot(makeConfig());
+    const { thread, runId } = await withRun(orch, workDir);
+
+    orch.closeRun(thread.id, runId, 'delivered', 'done');
+    orch.closeRun(thread.id, runId, 'partial', 'the tests were passing for the wrong reason');
+
+    assert.equal(ledger(orch, thread.id).outcomes.get(runId)?.claim, 'partial');
+    const claims = orch.store.events(thread.id).filter((e) => e.kind === 'run.closed');
+    assert.equal(claims.length, 2, 'both claims are in the log, in the order they were made');
+  });
+
+  test('refuses to close a run this thread never started', async () => {
+    const { orch } = await boot(makeConfig());
+    const { thread } = await withRun(orch, workDir);
+
+    assert.throws(() => orch.closeRun(thread.id, 'not-a-run', 'delivered', 'x'), /No run/);
+  });
+
+  test('evidence points at a fact in the log and the tree it applies to', async () => {
+    const { orch } = await boot(makeConfig({ claudeBinArgs: [FAKE_CLAUDE, '--tool'] }));
+    const cwd = makeRepo();
+    const { thread, runId, workItemId } = await withRun(orch, cwd);
+
+    const command = orch.store.events(thread.id).find((e) => e.kind === 'tool.completed');
+    assert.ok(command, 'the run ran a command to point at');
+
+    await orch.recordEvidence(thread.id, {
+      runId,
+      kind: 'command',
+      ref: { eventId: command.id, url: null, label: 'echo hello' },
+      summary: 'exit 0',
+    });
+
+    const [item] = ledger(orch, thread.id).evidence;
+    assert.equal(item?.ref.eventId, command.id);
+    assert.equal(item?.runId, runId);
+    assert.equal(item?.workItemId, workItemId);
+    // A claim about code is a claim about a particular tree, so the tree is captured.
+    assert.match(item?.state.commit ?? '', /^[0-9a-f]{40}$/);
+    assert.match(item?.state.tree ?? '', /^[0-9a-f]{40}$/);
+  });
+
+  test('evidence records whether the tree had uncommitted work in it', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    const { thread, runId } = await withRun(orch, cwd);
+
+    // Stand in for the agent's edit; the fakes stream events, they do not touch files.
+    writeFileSync(join(cwd, 'changed.txt'), 'not committed\n');
+    await orch.recordEvidence(thread.id, {
+      runId,
+      kind: 'note',
+      ref: { eventId: null, url: null, label: 'by hand' },
+      summary: 'checked it myself',
+    });
+
+    assert.equal(ledger(orch, thread.id).evidence[0]?.state.dirty, true);
+  });
+
+  test('an external link is evidence a person vouches for', async () => {
+    const { orch } = await boot(makeConfig());
+    const { thread, runId } = await withRun(orch, workDir);
+
+    await orch.recordEvidence(thread.id, {
+      runId,
+      kind: 'link',
+      ref: { eventId: null, url: 'https://example.com/ci/9', label: 'CI run 9' },
+      summary: 'green',
+    });
+
+    const [item] = ledger(orch, thread.id).evidence;
+    assert.equal(item?.ref.url, 'https://example.com/ci/9');
+    assert.equal(item?.source, 'user');
+    // Outside a repository there is no tree to name, and saying nothing beats guessing.
+    assert.equal(item?.state.commit, null);
+  });
+
+  test('refuses evidence for a run this thread never started', async () => {
+    const { orch } = await boot(makeConfig());
+    const { thread } = await withRun(orch, workDir);
+
+    await assert.rejects(
+      () =>
+        orch.recordEvidence(thread.id, {
+          runId: 'not-a-run',
+          kind: 'note',
+          ref: { eventId: null, url: null, label: 'x' },
+          summary: 'x',
+        }),
+      /No run/,
+    );
+  });
+
+  describe('retained context', () => {
+    test('is kept against the work item without touching the issue', async () => {
+      const { orch } = await boot(makeConfig());
+      const { thread, runId, workItemId } = await withRun(orch, workDir);
+
+      orch.retainContext(thread.id, {
+        kind: 'decision',
+        text: 'gh, never a token of our own',
+        runId,
+      });
+
+      const [item] = orch.retainedFor(thread.id);
+      assert.equal(item?.text, 'gh, never a token of our own');
+      assert.equal(item?.workItemId, workItemId);
+      assert.equal(item?.runId, runId);
+      assert.equal(item?.selected, true);
+      // The issue itself is untouched: nothing here writes back to GitHub.
+      assert.equal(orch.workItem(thread.id)?.snapshot.body, 'The issue body, as GitHub has it.');
+    });
+
+    test('reaches the next run on the same item', async () => {
+      const { orch } = await boot(makeConfig());
+      const { thread } = await withRun(orch, workDir);
+      orch.retainContext(thread.id, { kind: 'constraint', text: 'no network in tests' });
+
+      await orch.send(thread.id, 'claude', 'carry on', true);
+
+      const runs = orch.store.events(thread.id).filter((e) => e.kind === 'run.started');
+      const latest = runs[runs.length - 1];
+      assert.ok(latest?.kind === 'run.started');
+      assert.match(latest.context, /<retained-context>/);
+      assert.match(latest.context, /no network in tests/);
+    });
+
+    test('is carried into a second thread working the same issue', async () => {
+      const { orch } = await boot(makeConfig());
+      const { thread } = await withRun(orch, workDir);
+      orch.retainContext(thread.id, { kind: 'discovery', text: 'gh exits 1 for everything' });
+
+      // A different conversation, the same issue: the second thread must not start out
+      // ignorant of what the first one established.
+      const second = orch.createThread({ cwd: workDir });
+      await orch.attachWorkItem(second.id, '#14');
+      await orch.send(second.id, 'codex', 'pick this up', true);
+
+      assert.equal(orch.retainedFor(second.id).length, 1);
+      const started = orch.store.events(second.id).find((e) => e.kind === 'run.started');
+      assert.match(started?.kind === 'run.started' ? started.context : '', /gh exits 1 for everything/);
+    });
+
+    test('dropping it from the context leaves the record and its history', async () => {
+      const { orch } = await boot(makeConfig());
+      const { thread } = await withRun(orch, workDir);
+      orch.retainContext(thread.id, { kind: 'decision', text: 'a decision we changed our minds about' });
+      const [item] = orch.retainedFor(thread.id);
+      assert.ok(item);
+
+      orch.amendRetained(thread.id, item.id, { selected: false, retired: true });
+
+      const [after] = orch.retainedFor(thread.id);
+      assert.equal(after?.text, item.text, 'an amendment cannot rewrite the words');
+      assert.equal(after?.selected, false);
+      assert.equal(after?.retired, true);
+      assert.equal(
+        orch.store.events(thread.id).filter((e) => e.kind === 'context.retained').length,
+        2,
+        'both versions are in the log',
+      );
+
+      await orch.send(thread.id, 'claude', 'carry on', true);
+      const runs = orch.store.events(thread.id).filter((e) => e.kind === 'run.started');
+      const latest = runs[runs.length - 1];
+      assert.doesNotMatch(
+        latest?.kind === 'run.started' ? latest.context : '',
+        /changed our minds/,
+      );
+    });
+
+    test('an agent keeps something by writing a line, the way it publishes an artifact', async () => {
+      const { orch } = await boot(makeConfig());
+      declare(workDir);
+      const thread = orch.createThread({ cwd: workDir });
+      await orch.attachWorkItem(thread.id, '#14');
+
+      mkdirSync(join(workDir, '.awos'), { recursive: true });
+      writeFileSync(
+        join(workDir, RETAINED_FILE),
+        `${JSON.stringify({ kind: 'discovery', text: 'the CLI reports rate limits as exit 1' })}\n` +
+          'this line is not JSON and must not stop the next one\n' +
+          `${JSON.stringify({ kind: 'nonsense', text: 'an unknown kind is skipped' })}\n` +
+          `${JSON.stringify({ kind: 'question', text: 'who owns the rate limit?' })}\n`,
+        'utf8',
+      );
+
+      await orch.send(thread.id, 'claude', 'go', true);
+
+      const kept = orch.retainedFor(thread.id);
+      assert.deepEqual(
+        kept.map((entry) => entry.kind).sort(),
+        ['discovery', 'question'],
+      );
+      assert.equal(kept[0]?.source, 'claude', 'attributed to the agent that wrote it');
+    });
+
+    test('reading the file again adds nothing, so a restart cannot duplicate it', async () => {
+      const config = makeConfig();
+      const { orch } = await boot(config);
+      declare(workDir);
+      const thread = orch.createThread({ cwd: workDir });
+      await orch.attachWorkItem(thread.id, '#14');
+      mkdirSync(join(workDir, '.awos'), { recursive: true });
+      writeFileSync(
+        join(workDir, RETAINED_FILE),
+        `${JSON.stringify({ kind: 'decision', text: 'written once' })}\n`,
+        'utf8',
+      );
+
+      await orch.send(thread.id, 'claude', 'first', true);
+      await orch.send(thread.id, 'claude', 'second', true);
+      await orch.stop();
+      orchestrator = null;
+
+      const revived = new Orchestrator(config);
+      await revived.start();
+      orchestrator = revived;
+      await revived.send(thread.id, 'claude', 'after a restart', true);
+
+      assert.equal(revived.retainedFor(thread.id).length, 1);
+    });
+  });
+
+  test('the ledger survives a restart, still linked to its run and its issue', async () => {
+    const config = makeConfig();
+    const { orch } = await boot(config);
+    const { thread, runId, workItemId } = await withRun(orch, workDir);
+    orch.closeRun(thread.id, runId, 'delivered', 'the boundary is done');
+    await orch.recordEvidence(thread.id, {
+      runId,
+      kind: 'link',
+      ref: { eventId: null, url: 'https://example.com/ci/9', label: 'CI run 9' },
+      summary: 'green',
+    });
+    orch.retainContext(thread.id, { kind: 'decision', text: 'gh, never a token of our own' });
+    await orch.stop();
+    orchestrator = null;
+
+    const revived = new Orchestrator(config);
+    await revived.start();
+    orchestrator = revived;
+
+    const after = ledger(revived, thread.id);
+    assert.equal(after.outcomes.get(runId)?.claim, 'delivered');
+    assert.equal(after.evidence[0]?.runId, runId);
+    assert.equal(after.evidence[0]?.workItemId, workItemId);
+    assert.equal(after.evidence[0]?.ref.url, 'https://example.com/ci/9');
+    const [kept] = revived.retainedFor(thread.id);
+    assert.equal(kept?.workItemId, workItemId);
+    assert.equal(kept?.text, 'gh, never a token of our own');
   });
 });

@@ -12,6 +12,14 @@
  *      ordering authority across two concurrently running processes.
  */
 
+import type {
+  EvidenceKind,
+  EvidenceRef,
+  RetainedKind,
+  RunClaim,
+  WorkingState,
+} from './evidence.js';
+
 export type AgentId = 'claude' | 'codex';
 
 export const AGENT_IDS: readonly AgentId[] = ['claude', 'codex'] as const;
@@ -220,6 +228,68 @@ export interface RunCompletedBody {
 }
 
 /**
+ * What a run claims to have achieved, stated by a person or an agent.
+ *
+ * Separate from `run.completed`, which says how the *process* ended. An agent that exits
+ * cleanly having done the wrong thing produces `completed` and `abandoned`, and a log that
+ * cannot express that difference cannot be used to decide anything.
+ *
+ * A correction is another `run.closed` with the same `runId`: the fold takes the last one,
+ * and every earlier claim stays in the log with its author and its time.
+ */
+export interface RunClosedBody {
+  kind: 'run.closed';
+  runId: string;
+  claim: RunClaim;
+  statement: string;
+}
+
+/**
+ * Something offered in support of a run's claim.
+ *
+ * Points at a fact rather than restating one: `ref.eventId` names a command, diff,
+ * artifact or approval already in this log, so the evidence cannot drift from what
+ * happened. `ref.url` covers what is only true outside the harness, which a person has to
+ * vouch for.
+ *
+ * `state` is captured when the evidence is recorded, not when it is read. "The tests
+ * passed" is a claim about a particular tree, and a tree that has moved on since is
+ * exactly what a reader needs to know.
+ */
+export interface EvidenceRecordedBody {
+  kind: 'evidence.recorded';
+  evidenceId: string;
+  runId: string;
+  workItemId: string;
+  /** Named around `kind`, which the union has already claimed as its discriminant. */
+  evidenceKind: EvidenceKind;
+  ref: EvidenceRef;
+  summary: string;
+  state: WorkingState;
+}
+
+/**
+ * A discovery, decision, constraint or open question worth outliving the transcript.
+ *
+ * Kept here rather than written back to the issue: GitHub owns the issue, and what was
+ * learned while working is not an edit to what was asked. `selected` decides whether a
+ * later run on the same work item is given it — toggling is another record with the same
+ * `retainedId`, so a change of mind is history rather than an overwrite.
+ */
+export interface ContextRetainedBody {
+  kind: 'context.retained';
+  retainedId: string;
+  workItemId: string;
+  retainedKind: RetainedKind;
+  text: string;
+  /** The run it came out of, or null when it was written down outside one. */
+  runId: string | null;
+  selected: boolean;
+  /** Kept, but no longer true or no longer useful. Nothing is ever deleted. */
+  retired: boolean;
+}
+
+/**
  * How the dock should render an artifact. Derived from the file extension, because the
  * publishing agent has no channel to declare it — it just writes a file.
  */
@@ -338,6 +408,9 @@ export type HarnessEventBody =
   | LaneUpdatedBody
   | RunStartedBody
   | RunCompletedBody
+  | RunClosedBody
+  | EvidenceRecordedBody
+  | ContextRetainedBody
   | ArtifactUpdatedBody
   | ApprovalRequestedBody
   | ApprovalResolvedBody
