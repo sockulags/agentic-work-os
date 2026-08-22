@@ -65,6 +65,18 @@ export class ThreadStore {
     return this.#events.get(threadId) ?? [];
   }
 
+  /**
+   * Every event in every thread.
+   *
+   * For the folds that are about something a thread does not own — a work item is picked
+   * up again in a new thread, and what earlier ones learned about it has to be findable.
+   * The store already holds all of this in memory, so this is a concatenation rather than
+   * a read; at one human's volume that is the cheaper half of any alternative index.
+   */
+  allEvents(): HarnessEvent[] {
+    return [...this.#events.values()].flat();
+  }
+
   /** Events after `seq`, in order. The basis of replay. */
   eventsSince(threadId: string, seq: number): HarnessEvent[] {
     return this.events(threadId).filter((event) => event.seq > seq);

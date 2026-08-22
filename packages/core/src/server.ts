@@ -6,6 +6,8 @@ import type {
   ClientMessage,
   ServerMessage,
   ServerResponseBody,
+  WorkItem,
+  WorkSourceError,
 } from '@awos/protocol';
 import { AGENT_IDS } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
@@ -221,26 +223,52 @@ export class HarnessServer {
       }
 
       case 'work.get':
-        return {
-          type: 'work',
-          threadId: msg.threadId,
-          item: orchestrator.workItem(msg.threadId),
-          error: null,
-        };
+        return this.#work(msg.threadId, { item: orchestrator.workItem(msg.threadId), error: null });
 
-      case 'work.attach': {
-        const result = await orchestrator.attachWorkItem(msg.threadId, msg.reference);
-        return { type: 'work', threadId: msg.threadId, ...result };
-      }
+      case 'work.attach':
+        return this.#work(msg.threadId, await orchestrator.attachWorkItem(msg.threadId, msg.reference));
 
-      case 'work.refresh': {
-        const result = await orchestrator.refreshWorkItem(msg.threadId);
-        return { type: 'work', threadId: msg.threadId, ...result };
-      }
+      case 'work.refresh':
+        return this.#work(msg.threadId, await orchestrator.refreshWorkItem(msg.threadId));
 
       case 'work.detach':
         orchestrator.detachWorkItem(msg.threadId);
-        return { type: 'work', threadId: msg.threadId, item: null, error: null };
+        return { type: 'work', threadId: msg.threadId, item: null, error: null, retained: [] };
+
+      case 'run.close':
+        orchestrator.closeRun(msg.threadId, msg.runId, msg.claim, msg.statement);
+        return { type: 'ok' };
+
+      case 'evidence.record':
+        await orchestrator.recordEvidence(msg.threadId, {
+          runId: msg.runId,
+          kind: msg.evidenceKind,
+          ref: msg.ref,
+          summary: msg.summary,
+          ...(msg.evidenceId === undefined ? {} : { evidenceId: msg.evidenceId }),
+        });
+        return { type: 'ok' };
+
+      case 'context.retain':
+        orchestrator.retainContext(msg.threadId, {
+          kind: msg.retainedKind,
+          text: msg.text,
+          runId: msg.runId ?? null,
+        });
+        return this.#work(msg.threadId, {
+          item: orchestrator.workItem(msg.threadId),
+          error: null,
+        });
+
+      case 'context.amend':
+        orchestrator.amendRetained(msg.threadId, msg.retainedId, {
+          ...(msg.selected === undefined ? {} : { selected: msg.selected }),
+          ...(msg.retired === undefined ? {} : { retired: msg.retired }),
+        });
+        return this.#work(msg.threadId, {
+          item: orchestrator.workItem(msg.threadId),
+          error: null,
+        });
 
       case 'work.start':
         // Not awaited, for the same reason `turn.send` is not: a run is a turn, and a turn
@@ -258,6 +286,25 @@ export class HarnessServer {
         throw new Error(`Unhandled request: ${JSON.stringify(exhaustive)}`);
       }
     }
+  }
+
+  /**
+   * One shape for every answer about a thread's work.
+   *
+   * The retained ledger comes along with each of them: it changes whenever the item does,
+   * and a client that had to ask twice would spend half its life showing one of the two
+   * halves out of date.
+   */
+  #work(
+    threadId: string,
+    result: { item: WorkItem | null; error: WorkSourceError | null },
+  ): ServerResponseBody {
+    return {
+      type: 'work',
+      threadId,
+      ...result,
+      retained: this.#orchestrator.retainedFor(threadId),
+    };
   }
 
   /**

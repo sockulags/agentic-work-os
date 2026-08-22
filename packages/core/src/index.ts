@@ -26,7 +26,13 @@ export { parseDeclaration, type WorkspaceDeclaration } from './workspace/declara
 export { buildWorkspaceBlock, applyWorkspace } from './workspace/prompt.js';
 export { WorkItemStore } from './work/store.js';
 export { fetchIssue, parseIssueRef, type GitHubOptions } from './work/github.js';
-export { buildWorkItemBlock, applyWorkItem } from './work/prompt.js';
+export {
+  buildWorkItemBlock,
+  applyWorkItem,
+  buildRetainedBlock,
+  applyRetained,
+} from './work/prompt.js';
+export { foldEvidence, foldOutcomes, foldRetained, selectedForContext } from './work/ledger.js';
 export { PermissionBridge } from './permission-bridge.js';
 export { ClaudeAdapter } from './adapters/claude.js';
 export { CodexAdapter } from './adapters/codex.js';

@@ -70,6 +70,12 @@ export async function headTree(cwd: string): Promise<string | null> {
   return sha && sha.length > 0 ? sha : null;
 }
 
+/** The current commit SHA, or null outside a repo or on an unborn branch. */
+export async function headCommit(cwd: string): Promise<string | null> {
+  const sha = (await runGit(cwd, ['rev-parse', 'HEAD']))?.trim();
+  return sha && sha.length > 0 ? sha : null;
+}
+
 /**
  * Apply a unified diff to a working tree, all of it or none of it.
  *
