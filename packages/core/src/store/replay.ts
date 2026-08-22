@@ -56,7 +56,7 @@ const DIGEST_OK_TOOLS = 3;
  * the one the user's new message continues from.
  *
  * Everything here is derived from events already in the log, with no model in the loop —
- * this is elision, not summarization (ARCHITECTURE.md §11).
+ * this is elision, not summarization (ARCHITECTURE.md §12).
  */
 export function buildReplay(
   events: HarnessEvent[],

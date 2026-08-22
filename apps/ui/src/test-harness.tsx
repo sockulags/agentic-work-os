@@ -81,6 +81,12 @@ function stubHarness(overrides: Partial<Harness>): Harness {
     integrateLane: vi.fn(),
     workspace: null,
     refreshWorkspace: vi.fn(),
+    work: null,
+    runs: [],
+    attachWorkItem: vi.fn(),
+    refreshWorkItem: vi.fn(),
+    detachWorkItem: vi.fn(),
+    startRun: vi.fn(),
     ...overrides,
   } as Harness;
 }

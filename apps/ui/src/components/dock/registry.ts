@@ -1,4 +1,4 @@
-import { Boxes, GitCompare, ListChecks, Pin, Shapes, type LucideIcon } from 'lucide-react';
+import { Boxes, CircleDot, GitCompare, ListChecks, Pin, Shapes, type LucideIcon } from 'lucide-react';
 import type { Harness } from '@/hooks/useHarness';
 import { parseUnifiedDiff } from '@/lib/diff';
 import { PlanPanel } from './tabs/PlanPanel';
@@ -6,6 +6,7 @@ import { ChangesPanel } from './tabs/ChangesPanel';
 import { ArtifactsTab } from './tabs/ArtifactsTab';
 import { ContextTab } from './tabs/ContextTab';
 import { WorkspacePanel } from './tabs/WorkspacePanel';
+import { WorkPanel } from './tabs/WorkPanel';
 
 export interface DockTab {
   id: string;
@@ -61,6 +62,15 @@ export const DOCK_TABS: readonly [DockTab, ...DockTab[]] = [
     // where there is room to say what it means.
     badge: (h) => countPinnedLines(h.pinnedContext?.text),
     Component: ContextTab,
+  },
+  {
+    id: 'work',
+    label: 'Work',
+    icon: CircleDot,
+    // Runs, not work items: a thread has at most one issue, and how many times it has been
+    // worked on is the number that changes.
+    badge: (h) => h.runs.length,
+    Component: WorkPanel,
   },
   {
     id: 'workspace',

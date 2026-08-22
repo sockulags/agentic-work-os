@@ -278,7 +278,7 @@ says where: the alternative is deleting the only copy of something the user neve
 
 ```
 packages/protocol   pure types, zero deps — HarnessEvent, both wire formats, UI↔core RPC
-packages/core       adapters, store, replay, workspace, orchestrator, ws server, permission MCP
+packages/core       adapters, store, replay, workspace, work items, orchestrator, ws server, permission MCP
 apps/ui             React + Tailwind + shadcn-style components, Vite
 apps/desktop        Tauri shell
 ```
@@ -400,7 +400,46 @@ resolve; warnings mean it resolved but something in it points at nothing, which 
 
 ---
 
-## 11. What v1 deliberately does not do
+## 11. Work items and runs
+
+The workspace contract (§10) says what a project is. A **work item** says what a thread is
+*for*: the external issue that authorized the work. The transcript records what was said and
+done, which does not reconstruct the intent it was answering — which issue, which version of
+it, and whether it has moved since.
+
+**GitHub is read through the user's `gh`, not through a client of ours.** `gh` is already
+authenticated, so the harness never asks for a token, never stores one, and has none to
+leak; enterprise hosts and SSO come along without a line of code. The cost is a process per
+call and a dependency on `gh` being installed, and the latter is treated as one of the
+ordinary failures rather than as a crash. The boundary is shaped like the agent adapters —
+a binary plus injectable arguments — so tests point it at a fake that speaks the same JSON.
+
+**Four failures, four kinds.** Not logged in, no such issue, rate limited, offline. Each
+needs a different move from the user, and a panel that answers "try again" to all of them is
+wrong three times out of four.
+
+**The item belongs to the workspace, not the thread.** An issue picked up again in a new
+thread is the same issue, and deleting a thread must not delete the record of what it was
+for. Threads point at items; nothing points back.
+
+**A run is an event, not a register.** `run.started` carries the agent, the item, the source
+revision, the instruction, and the composed context *verbatim* — a summary of what an agent
+was given is not evidence of what it was given. `run.completed` carries the terminal state,
+read back out of the log rather than tracked in a field, so it cannot disagree with the
+transcript.
+
+That choice is what makes refresh honest. Because an appended event cannot change, a later
+refresh updates the item's own snapshot and nothing else; the UI compares the two revisions
+and says the source has moved since a run. No rule has to be remembered, and no code path
+exists that could rewrite the context of a run that already happened.
+
+**Every turn carries the issue; only a run claims to be the work.** The issue is standing
+truth about the thread, like the pinned notes. A run is an assertion that this particular
+turn is the work the issue asked for, and it is recorded as such.
+
+---
+
+## 12. What v1 deliberately does not do
 
 - **Diff parity via working-tree snapshots.** Codex reports a cumulative turn diff via
   `turn/diff/updated`. Claude has no equivalent in the stream-json protocol: its
