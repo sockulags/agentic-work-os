@@ -147,10 +147,27 @@ over summarization. Two mitigations are built in:
 - Tool output is truncated to `REPLAY_MAX_TOOL_OUTPUT` (default 800 chars) with a
   `[… N lines elided]` marker — the fact that a command ran and its exit code matter more
   than its full stdout.
-- `REPLAY_MAX_CHARS` (default 24 000) caps the whole block; older turns are dropped first
-  and replaced with a `[N earlier turns elided]` header.
+- `REPLAY_MAX_CHARS` (default 24 000) caps the whole block.
 
 Both are config, not hardcoded, so you can tune toward fidelity or toward cost.
+
+**Fitting the budget — two tiers.** Once the watermark advances, a turn that did not make
+it into the block is not deferred, it is gone: that agent will never be shown it. A single
+budget makes the oldest turns the ones that vanish, and those are where the decisions the
+newer turns rest on were made. So every turn is rendered twice — in full, and in a **brief**
+form that keeps who asked for what, what the agent decided, which tools ran and how they
+exited, while dropping message bodies past 240 chars and all tool output.
+
+The brief is the floor. Turns are admitted as briefs first, newest-first; the leftover
+budget then upgrades them back to full, also newest-first. The newest turn is always full,
+since it is the one the user's new message continues from. Failed tool calls are never
+dropped from a brief — a later turn that assumes a command succeeded is the exact failure
+this tier exists to prevent — while surplus successful ones collapse into a count.
+
+Only what will not fit even as a brief is elided, and the header still says how many. A
+brief runs a few hundred chars against a few thousand, so at the default budget elision
+takes roughly a hundred turns to reach rather than a handful. Nothing here reads the
+transcript back: both tiers are pure functions of events already in the log.
 
 ---
 
@@ -301,6 +318,9 @@ down when it is created.
   a git repository, and Codex is never shadowed since it reports its own.
 - **No multi-agent parallelism inside one thread.** Two agents on the same working
   directory at the same time is a correctness problem, not a feature.
-- **No summarization.** By your decision — full replay only.
+- **No summarization.** By your decision — full replay, and when the budget cannot hold it,
+  the brief tier from §4. Both tiers are deterministic renderings of logged events; no
+  model reads the transcript to compress it, so a replay never contains a claim no agent
+  made.
 - **No auth management.** Both CLIs use their own existing logins. The harness never sees
   a token.
