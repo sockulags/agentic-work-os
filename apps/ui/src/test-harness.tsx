@@ -43,6 +43,8 @@ export function idleRuntime(overrides: Partial<ThreadRuntimeState> = {}): Thread
   return {
     threadId: 't1',
     busyWith: null,
+    busy: [],
+    lanes: {},
     currentTurnId: null,
     lastTurnAgent: null,
     plan: [],
@@ -75,6 +77,8 @@ function stubHarness(overrides: Partial<Harness>): Harness {
     resolveApproval: vi.fn(),
     setAgent: vi.fn(),
     setPermissionMode: vi.fn(),
+    setParallel: vi.fn(),
+    integrateLane: vi.fn(),
     ...overrides,
   } as Harness;
 }

@@ -85,6 +85,8 @@ Every setting is an environment variable, read at core startup.
 | `AWOS_TOKEN` | *(random)* | Shared secret; the dev script pins it to `dev-token` |
 | `AWOS_REPLAY_MAX_CHARS` | `24000` | Ceiling on a replay block |
 | `AWOS_REPLAY_MAX_TOOL_OUTPUT` | `800` | Per-tool output truncation inside replay |
+| `AWOS_LANE_SETUP` | *(none)* | Command run once in each new lane, e.g. `npm install` |
+| `AWOS_LANE_SETUP_TIMEOUT_MS` | `600000` | How long that command may run |
 | `AWOS_APPROVAL_TIMEOUT_MS` | `600000` | Unanswered approvals auto-deny after this |
 | `AWOS_LOG_LEVEL` | `info` | `debug` traces every protocol message |
 
@@ -127,6 +129,34 @@ and the tool output:
 The newest turn is always sent in full. Turns are dropped outright only when even the
 brief forms overflow, which at the default budget takes about a hundred of them. See
 [ARCHITECTURE.md §4](./ARCHITECTURE.md) for why the floor exists.
+
+## Running both agents at once
+
+By default the two agents share the thread's directory, so only one may work at a time —
+two processes editing the same files is a race, not a feature. **Lanes** lift that: each
+agent gets its own `git worktree` of the same repository, and both can run at the same
+time. Turn them on with the **Lanes** button in the thread header.
+
+```
+your repo/            ← yours; nothing lands here until you say so
+~/.awos/threads/<id>/lanes/claude    ← Claude's checkout
+~/.awos/threads/<id>/lanes/codex     ← Codex's checkout
+```
+
+A lane starts from your working tree, uncommitted changes included — not from the last
+commit — so an agent never redoes work you can already see. Nothing is committed on your
+behalf and no branch appears in your repo.
+
+When a lane has something you want, press its button in the header to integrate. It applies
+all of the lane's work to your directory or none of it: a patch that collides is refused
+with the reason, leaving your files exactly as they were, and can be retried once you have
+resolved the collision. Both the integration and the refusal go into the transcript.
+
+Two things to know. A worktree only holds what git tracks, so `node_modules` and build
+output are not in a fresh lane and its agent cannot run the tests until they are — set
+`AWOS_LANE_SETUP` to the command that fixes that for your project. And switching lanes on
+or off restarts both agents, which costs a full replay into their new sessions; the harness
+refuses to switch off while a lane still holds work you have not integrated.
 
 ## Approvals
 
@@ -172,7 +202,7 @@ in-flight save never appears as an artifact of its own. See
 
 ```bash
 npm run typecheck     # tsc across all packages
-npm test              # 183 tests: core (node:test) + ui (vitest)
+npm test              # 395 tests: core (node:test) + ui (vitest)
 npm run build         # protocol → core → ui
 ```
 
@@ -193,8 +223,8 @@ apps/desktop        Tauri shell (~150 LOC of Rust)
 
 ## Known limits
 
-- One turn in flight per thread. Two agents on the same working directory concurrently is
-  a correctness problem, not a feature.
+- One turn in flight per thread while the agents share a directory. Turn on lanes and each
+  gets its own worktree, which is what makes running both at once safe.
 - Claude batches tool output rather than streaming it, so command output appears on
   completion. Codex streams it live. The UI reflects the difference rather than faking it.
 - Codex reports its own turn-level diff; for agents that don't (Claude), the harness

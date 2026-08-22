@@ -281,6 +281,36 @@ describe('foldTranscript — panels and totals', () => {
     expect(items).toHaveLength(0);
   });
 
+  test('lane events land in the transcript, because where the files went is conversation', () => {
+    const { items } = foldTranscript([
+      ev('codex', 't', {
+        kind: 'lane.updated',
+        status: 'provisioned',
+        path: '/lanes/codex',
+        detail: null,
+      }),
+      ev('codex', 't', {
+        kind: 'lane.updated',
+        status: 'refused',
+        path: '/lanes/codex',
+        detail: 'patch does not apply',
+      }),
+      ev('codex', 't', {
+        kind: 'lane.updated',
+        status: 'integrated',
+        path: '/lanes/codex',
+        detail: '2 file(s) applied',
+      }),
+    ]);
+
+    expect(items).toHaveLength(3);
+    expect(items[0]).toMatchObject({ kind: 'notice', level: 'info' });
+    // A refusal is the one the user has to act on, so it reads as an error, not a note.
+    expect(items[1]).toMatchObject({ kind: 'notice', level: 'error' });
+    expect(items[1]).toHaveProperty('text', expect.stringContaining('patch does not apply'));
+    expect(items[2]).toHaveProperty('text', expect.stringContaining('2 file(s) applied'));
+  });
+
   test('an empty log yields empty output rather than throwing', () => {
     const { items, totals } = foldTranscript([]);
     expect(items).toEqual([]);

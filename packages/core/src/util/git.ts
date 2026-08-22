@@ -27,8 +27,24 @@ async function runGit(
   args: string[],
   extraEnv?: NodeJS.ProcessEnv,
 ): Promise<string | null> {
+  return (await tryGit(cwd, args, extraEnv)).stdout;
+}
+
+/**
+ * Run git, reporting whether it worked and why not.
+ *
+ * `runGit` collapses every failure into null, which is right when the answer is "no
+ * snapshot available" and wrong when the caller has to tell the user that a patch did not
+ * apply. Same never-throws contract.
+ */
+export async function tryGit(
+  cwd: string,
+  args: string[],
+  extraEnv?: NodeJS.ProcessEnv,
+  stdin?: string,
+): Promise<{ stdout: string | null; stderr: string }> {
   try {
-    const { stdout } = await execFileAsync('git', args, {
+    const child = execFileAsync('git', args, {
       cwd,
       env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
       // A turn can touch a lot of files; a unified diff for all of them is bounded only
@@ -36,11 +52,46 @@ async function runGit(
       maxBuffer: 128 * 1024 * 1024,
       windowsHide: true,
     });
-    return stdout;
-  } catch {
-    // Not a repo, git not installed, detached weirdness — all "no snapshot available".
-    return null;
+    if (stdin !== undefined) {
+      child.child.stdin?.end(stdin);
+    }
+    const { stdout } = await child;
+    return { stdout, stderr: '' };
+  } catch (err) {
+    // Not a repo, git not installed, detached weirdness, a patch that does not apply.
+    const stderr = String((err as { stderr?: string }).stderr ?? (err as Error).message ?? '');
+    return { stdout: null, stderr: stderr.trim() };
   }
+}
+
+/** The tree SHA of the current commit, or null outside a repo or on an unborn branch. */
+export async function headTree(cwd: string): Promise<string | null> {
+  const sha = (await runGit(cwd, ['rev-parse', 'HEAD^{tree}']))?.trim();
+  return sha && sha.length > 0 ? sha : null;
+}
+
+/**
+ * Apply a unified diff to a working tree, all of it or none of it.
+ *
+ * `--check` runs first so a patch that conflicts changes nothing: the alternative,
+ * `--3way`, leaves conflict markers in files the user did not ask anyone to touch. A
+ * refusal that keeps the tree clean is a state the user can act on; a half-applied tree
+ * with markers in it is one they have to clean up before they can even look at it.
+ */
+export async function applyPatch(
+  cwd: string,
+  patch: string,
+): Promise<{ applied: true } | { applied: false; reason: string }> {
+  const check = await tryGit(cwd, ['apply', '--check', '-'], undefined, patch);
+  if (check.stdout === null) {
+    return { applied: false, reason: check.stderr || 'the patch does not apply to this tree' };
+  }
+
+  const applied = await tryGit(cwd, ['apply', '-'], undefined, patch);
+  if (applied.stdout === null) {
+    return { applied: false, reason: applied.stderr || 'git apply failed' };
+  }
+  return { applied: true };
 }
 
 /**

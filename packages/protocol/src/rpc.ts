@@ -29,12 +29,28 @@ export interface ThreadSummary {
   /** Highest `seq` each agent has been shown. Drives replay. */
   watermarks: Record<AgentId, number>;
   eventCount: number;
+  /**
+   * Whether agents work in their own lanes and may run at the same time.
+   *
+   * Off by default: in one shared directory only one agent can safely run at a time, and
+   * that restriction is what parallel mode trades away. See ARCHITECTURE.md §7.
+   */
+  parallel: boolean;
 }
 
 export interface ThreadRuntimeState {
   threadId: string;
-  /** Non-null while a turn is in flight. */
+  /**
+   * The agent whose turn is in flight, or the first of them in parallel mode.
+   *
+   * Kept for the single-lane case, which is still the default. `busy` is the authority:
+   * with lanes, more than one agent can be working.
+   */
   busyWith: AgentId | null;
+  /** Every agent with a turn in flight right now. */
+  busy: AgentId[];
+  /** Where each agent's working copy is, for the agents that have a lane. */
+  lanes: Partial<Record<AgentId, string>>;
   currentTurnId: string | null;
   /** Agent that owns the most recently started turn, reconstructed from the event log. */
   lastTurnAgent: AgentId | null;
@@ -80,8 +96,12 @@ export type ClientRequest =
   | { type: 'thread.delete'; threadId: string }
   | { type: 'thread.setAgent'; threadId: string; agent: AgentId }
   | { type: 'thread.setPermissionMode'; threadId: string; mode: PermissionMode }
+  | { type: 'thread.setParallel'; threadId: string; parallel: boolean }
+  /** Apply one lane's work to the thread directory, all of it or none of it. */
+  | { type: 'lane.integrate'; threadId: string; agent: AgentId }
   | { type: 'turn.send'; threadId: string; agent: AgentId; text: string }
-  | { type: 'turn.interrupt'; threadId: string }
+  /** Interrupt one agent, or every working agent when none is named. */
+  | { type: 'turn.interrupt'; threadId: string; agent?: AgentId }
   | { type: 'approval.resolve'; threadId: string; approvalId: string; optionId: string }
   | { type: 'context.get'; threadId: string }
   | { type: 'context.set'; threadId: string; text: string }

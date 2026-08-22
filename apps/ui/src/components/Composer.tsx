@@ -16,9 +16,18 @@ import { cn } from '@/lib/utils';
 export function Composer(): React.JSX.Element {
   const h = useHarnessContext();
   const agent = h.activeThread?.activeAgent ?? 'claude';
-  const busyWith = h.runtime?.busyWith ?? null;
+  const busy = h.runtime?.busy ?? [];
+  const parallel = h.activeThread?.parallel ?? false;
   const availability = h.availability;
   const disabled = h.status !== 'open';
+
+  // With lanes, only the agent you are writing to has to be free. Sharing one directory,
+  // any working agent blocks the composer, because the second turn would race the first.
+  const blockedBy = parallel
+    ? busy.includes(agent)
+      ? agent
+      : null
+    : (busy[0] ?? null);
 
   const [text, setText] = useState('');
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -33,7 +42,7 @@ export function Composer(): React.JSX.Element {
 
   const submit = (): void => {
     const trimmed = text.trim();
-    if (trimmed === '' || busyWith !== null || disabled) return;
+    if (trimmed === '' || blockedBy !== null || disabled) return;
     void h.send(trimmed, agent);
     setText('');
   };
@@ -72,17 +81,19 @@ export function Composer(): React.JSX.Element {
               >
                 <span className={cn('h-1.5 w-1.5 rounded-full', style.dot)} />
                 {style.label}
-                {busyWith === id && <span className="text-[10px] opacity-70">working</span>}
+                {busy.includes(id) && <span className="text-[10px] opacity-70">working</span>}
                 {missing && <span className="text-[10px]">not found</span>}
               </button>
             );
           })}
 
-          {busyWith !== null && (
+          {busy.length > 0 && (
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => void h.interrupt()}
+              // In parallel mode Stop means "stop the one I am looking at"; sharing a
+              // directory there is only ever one turn to stop anyway.
+              onClick={() => void h.interrupt(parallel ? agent : undefined)}
               className="ml-auto h-7 gap-1.5 text-xs text-muted-foreground"
             >
               <Square className="h-3 w-3 fill-current" />
@@ -100,16 +111,17 @@ export function Composer(): React.JSX.Element {
             rows={1}
             disabled={disabled}
             placeholder={
-              busyWith !== null
-                ? `${AGENT_STYLE[busyWith].label} is working — stop it to send`
+              blockedBy !== null
+                ? `${AGENT_STYLE[blockedBy].label} is working — stop it to send`
                 : `Message ${AGENT_STYLE[agent].label}…`
             }
             className="max-h-60 min-h-[44px] py-3 pr-12"
           />
           <Button
             size="icon"
+            aria-label="Send"
             onClick={submit}
-            disabled={text.trim() === '' || busyWith !== null || disabled}
+            disabled={text.trim() === '' || blockedBy !== null || disabled}
             className="absolute bottom-2 right-2 h-7 w-7"
           >
             <ArrowUp className="h-4 w-4" />

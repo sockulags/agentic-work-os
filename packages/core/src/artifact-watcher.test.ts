@@ -42,6 +42,8 @@ function makeConfig(): HarnessConfig {
     interruptGraceMs: 1_000,
     approvalTimeoutMs: 5_000,
     codexInitTimeoutMs: 10_000,
+    laneSetup: '',
+    laneSetupTimeoutMs: 60_000,
   };
 }
 
