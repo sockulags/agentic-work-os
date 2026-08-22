@@ -2,6 +2,7 @@ export * from './events.js';
 export * from './capabilities.js';
 export * from './rpc.js';
 export * from './workspace.js';
+export * from './work.js';
 export * as ClaudeWire from './claude-wire.js';
 export * as CodexWire from './codex-wire.js';
 export {

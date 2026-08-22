@@ -6,11 +6,15 @@ import type {
   PermissionMode,
   ThreadRuntimeState,
   ThreadSummary,
+  WorkItem,
+  WorkSourceError,
   WorkspaceResolution,
 } from '@awos/protocol';
+import type { ClientRequest } from '@awos/protocol';
 import { HarnessClient, resolveClientOptions, type ConnectionStatus } from '@/lib/client';
 import { TranscriptFolder } from '@/lib/transcript';
 import { foldArtifacts } from '@/lib/artifacts';
+import { foldRuns } from '@/lib/runs';
 
 /**
  * Long enough that a burst of typing is one write, short enough that you never wonder
@@ -52,6 +56,21 @@ export interface WorkspaceView {
 }
 
 /**
+ * The thread's work item and the last thing that went wrong reaching it.
+ *
+ * Both at once, and tagged with the thread: a refresh that fails still has the issue it
+ * could not update, and blanking the panel over a dropped connection would take away the
+ * thing the user was reading.
+ */
+export interface WorkView {
+  threadId: string;
+  item: WorkItem | null;
+  error: WorkSourceError | null;
+  /** True while a request to GitHub is in flight, so the panel can say it is working. */
+  busy: boolean;
+}
+
+/**
  * All harness state in one hook.
  *
  * The client is created once and kept in a ref; React state holds only what renders.
@@ -74,6 +93,7 @@ export function useHarness() {
   const [notice, setNotice] = useState<{ level: string; message: string } | null>(null);
   const [pinnedContext, setPinnedContext] = useState<PinnedContext | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceView | null>(null);
+  const [work, setWork] = useState<WorkView | null>(null);
 
   // Read inside the push handler without making it a dependency, which would tear down
   // and rebuild the subscription on every thread switch.
@@ -161,6 +181,7 @@ export function useHarness() {
             setRuntime(null);
             setPinnedContext(null);
             setWorkspace(null);
+            setWork(null);
             activeCwdRef.current = null;
           }
           return;
@@ -196,6 +217,76 @@ export function useHarness() {
     [client],
   );
 
+  /**
+   * Every way of asking the core about the work item, in one place.
+   *
+   * They differ only in the request they send: each returns the item, the reason it could
+   * not be read, or both, and each has to leave the panel showing something. Sharing the
+   * reply handling is what keeps a failed refresh from behaving differently to a failed
+   * attach for no reason the user could name.
+   */
+  const askAboutWork = useCallback(
+    async (threadId: string, request: ClientRequest) => {
+      setWork((prev) =>
+        prev !== null && prev.threadId === threadId ? { ...prev, busy: true } : prev,
+      );
+
+      const res = await client.request(request).catch(
+        (err: Error): { type: 'work'; threadId: string; item: null; error: WorkSourceError } => ({
+          type: 'work',
+          threadId,
+          item: null,
+          // A socket that dropped is not a GitHub failure, but it lands in the same place
+          // and the user's next move is the same one.
+          error: { kind: 'offline', message: err.message, retryable: true },
+        }),
+      );
+      if (res.type !== 'work' || res.threadId !== threadId) return;
+      if (activeThreadRef.current !== threadId) return;
+
+      setWork((prev) => ({
+        threadId,
+        // A failure keeps whatever was on screen: the last known issue is still the best
+        // answer available, and losing it would punish the user for a rate limit.
+        item: res.error === null ? res.item : (res.item ?? prev?.item ?? null),
+        error: res.error,
+        busy: false,
+      }));
+    },
+    [client],
+  );
+
+  const attachWorkItem = useCallback(
+    async (reference: string) => {
+      const threadId = activeThreadRef.current;
+      if (threadId === null) return;
+      await askAboutWork(threadId, { type: 'work.attach', threadId, reference });
+    },
+    [askAboutWork],
+  );
+
+  const refreshWorkItem = useCallback(async () => {
+    const threadId = activeThreadRef.current;
+    if (threadId === null) return;
+    await askAboutWork(threadId, { type: 'work.refresh', threadId });
+  }, [askAboutWork]);
+
+  const detachWorkItem = useCallback(async () => {
+    const threadId = activeThreadRef.current;
+    if (threadId === null) return;
+    await askAboutWork(threadId, { type: 'work.detach', threadId });
+  }, [askAboutWork]);
+
+  /** Start a run: the same dispatch as a message, recorded as the work the issue asked for. */
+  const startRun = useCallback(
+    async (text: string, agent: AgentId) => {
+      const threadId = activeThreadRef.current;
+      if (threadId === null) return;
+      await client.request({ type: 'work.start', threadId, agent, text });
+    },
+    [client],
+  );
+
   const refreshThreads = useCallback(async () => {
     const res = await client.request({ type: 'thread.list' });
     if (res.type === 'thread.list') setThreads(res.threads);
@@ -224,6 +315,11 @@ export function useHarness() {
       // panel populated rather than flashing its empty state.
       setWorkspace((prev) => (prev?.cwd === res.thread.cwd ? prev : null));
       void refreshWorkspace(res.thread.cwd);
+      // Read from the core rather than kept from the last thread: a work item belongs to
+      // the thread, and showing the previous one for a moment would be showing the wrong
+      // issue at the moment the user is deciding what to work on.
+      setWork({ threadId, item: null, error: null, busy: true });
+      void askAboutWork(threadId, { type: 'work.get', threadId });
       setEvents(res.events);
       setRuntime(res.state);
       // Reopening the thread already on screen — a reconnect resync, a second click in
@@ -255,7 +351,7 @@ export function useHarness() {
           : { threadId, text: context.text, save: 'saved' },
       );
     },
-    [client, flushPinnedContext, refreshWorkspace],
+    [client, flushPinnedContext, refreshWorkspace, askAboutWork],
   );
 
   /**
@@ -282,6 +378,7 @@ export function useHarness() {
       setRuntime(null);
       setPinnedContext(null);
       setWorkspace(null);
+      setWork(null);
       activeCwdRef.current = null;
       setNotice({
         level: 'warn',
@@ -379,6 +476,7 @@ export function useHarness() {
 
   const transcript = useMemo(() => folder.fold(events), [folder, events]);
   const artifacts = useMemo(() => foldArtifacts(events), [events]);
+  const runs = useMemo(() => foldRuns(events), [events]);
   const activeThread = useMemo(
     () => threads.find((t) => t.id === activeThreadId) ?? null,
     [threads, activeThreadId],
@@ -398,6 +496,12 @@ export function useHarness() {
     editPinnedContext,
     workspace,
     refreshWorkspace,
+    work,
+    runs,
+    attachWorkItem,
+    refreshWorkItem,
+    detachWorkItem,
+    startRun,
     dismissNotice: () => setNotice(null),
     openThread,
     createThread,

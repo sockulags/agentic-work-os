@@ -92,6 +92,7 @@ export class ThreadStore {
       nativeSessions: {},
       watermarks: { claude: 0, codex: 0 },
       eventCount: 0,
+      workItemId: null,
       parallel: false,
     };
 
@@ -211,6 +212,9 @@ export class ThreadStore {
     summary.watermarks ??= { claude: 0, codex: 0 };
     for (const agent of AGENT_IDS) summary.watermarks[agent] ??= 0;
     summary.nativeSessions ??= {};
+    // Written by a build that had no work items. Null is the same answer as "this thread
+    // is not about an issue", so an older thread needs no migration to be readable.
+    summary.workItemId ??= null;
     // Lanes are scratch directories that do not survive a restart, so a thread always
     // reopens in the shared directory and the user turns parallel mode back on if they
     // want it. Reopening straight into lanes would point agents at paths that may be gone.

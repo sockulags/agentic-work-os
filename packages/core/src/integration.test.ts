@@ -22,6 +22,7 @@ import type { HarnessConfig } from './config.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const FAKE_CLAUDE = join(here, 'testing', 'fake-claude.js');
 const FAKE_CODEX = join(here, 'testing', 'fake-codex.js');
+const FAKE_GH = join(here, 'testing', 'fake-gh.js');
 
 let dataDir: string;
 /**
@@ -54,6 +55,9 @@ function makeConfig(overrides: Partial<HarnessConfig> = {}): HarnessConfig {
     codexInitTimeoutMs: 10_000,
     laneSetup: '',
     laneSetupTimeoutMs: 60_000,
+    ghBin: process.execPath,
+    ghBinArgs: [FAKE_GH],
+    ghTimeoutMs: 5_000,
     ...overrides,
   };
 }
@@ -687,11 +691,13 @@ describe('workspace contract', () => {
 
     await orch.send(thread.id, 'claude', 'just this');
 
-    // The block is transport, like the replay preamble and the pinned notes. The log holds
-    // the conversation, so a project's own configuration never accumulates copies in it.
-    const log = readFileSync(join(dataDir, 'threads', thread.id, 'events.jsonl'), 'utf8');
-    assert.doesNotMatch(log, /internal-only-note/);
-    const message = orch.store.events(thread.id).find((e) => e.kind === 'user.message');
+    // The block is transport, like the replay preamble and the pinned notes: the harness
+    // never writes a project's configuration into the log, so it cannot accumulate a copy
+    // per turn. Only what the harness itself authored is asserted on — an agent may quote
+    // anything it was given, and its reply is the agent talking, not the harness storing.
+    const written = orch.store.events(thread.id).filter((event) => event.agent === null);
+    assert.doesNotMatch(JSON.stringify(written), /internal-only-note/);
+    const message = written.find((e) => e.kind === 'user.message');
     assert.equal(message?.kind === 'user.message' ? message.text : null, 'just this');
   });
 
@@ -745,5 +751,230 @@ describe('workspace contract', () => {
     assert.equal(revived.workspace(workDir).status, 'ok');
     await revived.send(thread.id, 'claude', 'and still works');
     assert.match(lastReceivedBy(revived, thread.id, 'claude'), /<workspace>/);
+  });
+});
+
+describe('work items', () => {
+  /** Declare the directory a workspace, since a work item needs a project to belong to. */
+  function declare(root: string, github: string | null = 'sockulags/agentic-work-os'): void {
+    mkdirSync(join(root, '.awos'), { recursive: true });
+    writeFileSync(
+      join(root, WORKSPACE_FILE),
+      JSON.stringify({
+        version: WORKSPACE_SCHEMA_VERSION,
+        name: 'under-test',
+        ...(github === null ? {} : { repository: { github } }),
+      }),
+      'utf8',
+    );
+  }
+
+  function received(orch: Orchestrator, threadId: string, agent: 'claude' | 'codex'): string[] {
+    return orch.store
+      .events(threadId)
+      .filter((e) => e.kind === 'message.completed' && e.agent === agent)
+      .map((e) => (e.kind === 'message.completed' ? e.text : ''));
+  }
+
+  function runs(orch: Orchestrator, threadId: string): HarnessEvent[] {
+    return orch.store.events(threadId).filter((e) => e.kind === 'run.started');
+  }
+
+  afterEach(() => {
+    delete process.env['FAKE_GH_FAIL'];
+    delete process.env['FAKE_GH_TITLE'];
+    delete process.env['FAKE_GH_UPDATED_AT'];
+  });
+
+  test('attaches an issue by URL and links it to the thread', async () => {
+    const { orch } = await boot(makeConfig());
+    declare(workDir);
+    const thread = orch.createThread({ cwd: workDir });
+
+    const { item, error } = await orch.attachWorkItem(
+      thread.id,
+      'https://github.com/sockulags/agentic-work-os/issues/14',
+    );
+
+    assert.equal(error, null);
+    assert.equal(item?.source.number, 14);
+    assert.equal(orch.store.get(thread.id)?.workItemId, item?.id);
+    assert.equal(orch.workItem(thread.id)?.id, item?.id);
+  });
+
+  test('resolves a bare number against the repository the workspace declares', async () => {
+    const { orch } = await boot(makeConfig());
+    declare(workDir);
+    const thread = orch.createThread({ cwd: workDir });
+
+    const { item } = await orch.attachWorkItem(thread.id, '#14');
+
+    assert.equal(item?.source.repo, 'sockulags/agentic-work-os');
+    assert.equal(item?.source.number, 14);
+  });
+
+  test('a directory that is not a workspace has nowhere to file an issue', async () => {
+    const { orch } = await boot(makeConfig());
+    const thread = orch.createThread({ cwd: workDir });
+
+    const { item, error } = await orch.attachWorkItem(thread.id, '#14');
+
+    assert.equal(item, null);
+    assert.match(error?.message ?? '', /not a workspace/);
+  });
+
+  test('reports a missing issue as something to fix, not as a crash', async () => {
+    const { orch } = await boot(makeConfig());
+    declare(workDir);
+    const thread = orch.createThread({ cwd: workDir });
+    process.env['FAKE_GH_FAIL'] = 'not-found';
+
+    const { item, error } = await orch.attachWorkItem(thread.id, '#4242');
+
+    assert.equal(item, null);
+    assert.equal(error?.kind, 'not-found');
+    assert.equal(orch.store.get(thread.id)?.workItemId, null, 'a failed attach links nothing');
+  });
+
+  test('carries the issue into every turn, whether or not it is a run', async () => {
+    const { orch } = await boot(makeConfig());
+    declare(workDir);
+    const thread = orch.createThread({ cwd: workDir });
+    await orch.attachWorkItem(thread.id, '#14');
+
+    await orch.send(thread.id, 'claude', 'a plain message');
+
+    assert.match(received(orch, thread.id, 'claude')[0] ?? '', /<work-item>/);
+    assert.equal(runs(orch, thread.id).length, 0, 'a message is not a run');
+  });
+
+  test('a run records what the agent was given and how it ended', async () => {
+    const { orch } = await boot(makeConfig());
+    declare(workDir);
+    const thread = orch.createThread({ cwd: workDir });
+    const { item } = await orch.attachWorkItem(thread.id, '#14');
+
+    await orch.send(thread.id, 'claude', 'start on this', true);
+
+    const started = runs(orch, thread.id)[0];
+    assert.ok(started?.kind === 'run.started');
+    assert.equal(started.workItemId, item?.id);
+    assert.equal(started.source, 'sockulags/agentic-work-os#14');
+    assert.equal(started.revision, item?.snapshot.revision);
+    assert.equal(started.instruction, 'start on this');
+    assert.equal(started.agent, 'claude', 'the run names the agent that took it');
+    // The context is the payload as sent, which is what makes it evidence.
+    assert.match(started.context, /<workspace>/);
+    assert.match(started.context, /<work-item>/);
+    assert.match(started.context, /start on this/);
+
+    const completed = orch.store.events(thread.id).find((e) => e.kind === 'run.completed');
+    assert.ok(completed?.kind === 'run.completed');
+    assert.equal(completed.runId, started.runId);
+    assert.equal(completed.state, 'completed');
+  });
+
+  test('an interrupted run is recorded as interrupted', async () => {
+    const { orch } = await boot(makeConfig({ codexBinArgs: [FAKE_CODEX, '--slow'] }));
+    declare(workDir);
+    const thread = orch.createThread({ cwd: workDir });
+    await orch.attachWorkItem(thread.id, '#14');
+
+    const running = orch.send(thread.id, 'codex', 'start on this', true);
+    // Interrupt once the turn is actually in flight, not before it exists.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await orch.interrupt(thread.id, 'codex');
+    await running;
+
+    const completed = orch.store.events(thread.id).find((e) => e.kind === 'run.completed');
+    assert.equal(completed?.kind === 'run.completed' ? completed.state : null, 'interrupted');
+  });
+
+  test('the work item and its runs reopen after a restart', async () => {
+    const config = makeConfig();
+    const { orch } = await boot(config);
+    declare(workDir);
+    const thread = orch.createThread({ cwd: workDir });
+    const { item } = await orch.attachWorkItem(thread.id, '#14');
+    await orch.send(thread.id, 'claude', 'start on this', true);
+    await orch.stop();
+    orchestrator = null;
+
+    const revived = new Orchestrator(config);
+    await revived.start();
+    orchestrator = revived;
+
+    assert.equal(revived.workItem(thread.id)?.id, item?.id);
+    assert.equal(revived.workItem(thread.id)?.snapshot.title, item?.snapshot.title);
+    const started = runs(revived, thread.id)[0];
+    assert.ok(started?.kind === 'run.started');
+    assert.match(started.context, /<work-item>/);
+  });
+
+  describe('refreshing', () => {
+    test('a changed issue updates the item without touching the run that already happened', async () => {
+      const { orch } = await boot(makeConfig());
+      declare(workDir);
+      const thread = orch.createThread({ cwd: workDir });
+      process.env['FAKE_GH_TITLE'] = 'As it was';
+      await orch.attachWorkItem(thread.id, '#14');
+      await orch.send(thread.id, 'claude', 'start on this', true);
+
+      process.env['FAKE_GH_TITLE'] = 'Rewritten by someone else';
+      process.env['FAKE_GH_UPDATED_AT'] = '2026-09-01T08:00:00Z';
+      const { item, error } = await orch.refreshWorkItem(thread.id);
+
+      assert.equal(error, null);
+      assert.equal(item?.snapshot.title, 'Rewritten by someone else');
+      assert.equal(item?.snapshot.revision, '2026-09-01T08:00:00Z');
+
+      // The run is an appended event, so the source moving cannot rewrite what it read —
+      // which is what lets the UI say "changed since this run" by comparing the two.
+      const started = runs(orch, thread.id)[0];
+      assert.ok(started?.kind === 'run.started');
+      assert.equal(started.revision, '2026-08-22T19:26:05Z');
+      assert.match(started.context, /As it was/);
+      assert.doesNotMatch(started.context, /Rewritten by someone else/);
+    });
+
+    test('an unchanged issue is still a successful check', async () => {
+      const { orch } = await boot(makeConfig());
+      declare(workDir);
+      const thread = orch.createThread({ cwd: workDir });
+      const attached = await orch.attachWorkItem(thread.id, '#14');
+
+      const { item, error } = await orch.refreshWorkItem(thread.id);
+
+      assert.equal(error, null);
+      assert.equal(item?.snapshot.revision, attached.item?.snapshot.revision);
+      assert.ok((item?.lastRefreshedAt ?? 0) >= (attached.item?.lastRefreshedAt ?? 0));
+    });
+
+    test('an unreachable source keeps the item it could not update', async () => {
+      const { orch } = await boot(makeConfig());
+      declare(workDir);
+      const thread = orch.createThread({ cwd: workDir });
+      await orch.attachWorkItem(thread.id, '#14');
+
+      process.env['FAKE_GH_FAIL'] = 'offline';
+      const { item, error } = await orch.refreshWorkItem(thread.id);
+
+      assert.equal(error?.kind, 'offline');
+      assert.equal(error?.retryable, true);
+      assert.ok(item, 'the last known issue is still there to read');
+    });
+  });
+
+  test('detaching leaves the runs that used the item in the log', async () => {
+    const { orch } = await boot(makeConfig());
+    declare(workDir);
+    const thread = orch.createThread({ cwd: workDir });
+    await orch.attachWorkItem(thread.id, '#14');
+    await orch.send(thread.id, 'claude', 'start on this', true);
+
+    orch.detachWorkItem(thread.id);
+
+    assert.equal(orch.workItem(thread.id), null);
+    assert.equal(runs(orch, thread.id).length, 1, 'a run that happened is not undone');
   });
 });

@@ -174,6 +174,9 @@ process.stdin.on('end', () => process.exit(0));`,
       codexInitTimeoutMs: 2_000,
     laneSetup: '',
     laneSetupTimeoutMs: 60_000,
+    ghBin: process.execPath,
+    ghBinArgs: [],
+    ghTimeoutMs: 5_000,
     };
     const adapter = new CodexAdapter({
       threadId: 'thread-1',

@@ -9,6 +9,7 @@
 import type { AgentId, ApprovalRequestedBody, HarnessEvent, PlanItem } from './events.js';
 import type { AgentCapabilities } from './capabilities.js';
 import type { WorkspaceResolution } from './workspace.js';
+import type { WorkItem, WorkSourceError } from './work.js';
 
 export type PermissionMode =
   | 'default'
@@ -30,6 +31,14 @@ export interface ThreadSummary {
   /** Highest `seq` each agent has been shown. Drives replay. */
   watermarks: Record<AgentId, number>;
   eventCount: number;
+  /**
+   * The work item this thread is answering, or null for a free-form thread.
+   *
+   * A pointer, not a copy: the item itself is workspace-scoped and outlives any one
+   * thread. Optional in every sense — threads opened before work items existed, and
+   * threads that are just a conversation, both carry null.
+   */
+  workItemId: string | null;
   /**
    * Whether agents work in their own lanes and may run at the same time.
    *
@@ -114,6 +123,20 @@ export type ClientRequest =
    * exists for it. Naming both is an error rather than a precedence rule to remember.
    */
   | { type: 'workspace.get'; threadId?: string; cwd?: string }
+  /** Attach a GitHub issue by URL, `owner/name#12`, or a bare number. */
+  | { type: 'work.attach'; threadId: string; reference: string }
+  /** Ask the source again. Never rewrites a run that has already happened. */
+  | { type: 'work.refresh'; threadId: string }
+  | { type: 'work.detach'; threadId: string }
+  | { type: 'work.get'; threadId: string }
+  /**
+   * Start a run against the thread's work item.
+   *
+   * Separate from `turn.send` because a run is a claim about intent: this turn is the
+   * work the issue asked for, and its context and outcome are recorded as such. A
+   * message that is merely conversation should not have to pretend otherwise.
+   */
+  | { type: 'work.start'; threadId: string; agent: AgentId; text: string }
   | { type: 'agents.probe' };
 
 export type ClientMessage = ClientRequest & { requestId: string };
@@ -132,6 +155,13 @@ export type ServerResponseBody =
   | { type: 'context'; threadId: string; text: string }
   /** Carries the directory it resolved, for the same reason `context` carries its thread. */
   | { type: 'workspace'; cwd: string; resolution: WorkspaceResolution }
+  /**
+   * The thread's work item, the reason it could not be read, or both.
+   *
+   * Both, because a refresh that fails still has the last known item to show: blanking
+   * the panel over a dropped connection would lose the thing the user was reading.
+   */
+  | { type: 'work'; threadId: string; item: WorkItem | null; error: WorkSourceError | null }
   | { type: 'agents.probe'; agents: AgentAvailability[] };
 
 export type ServerResponse = ServerResponseBody & { requestId: string };

@@ -22,6 +22,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     nativeSessions: {},
     watermarks: { claude: 0, codex: 0 },
     eventCount: 0,
+    workItemId: null,
     parallel: false,
     ...overrides,
   };

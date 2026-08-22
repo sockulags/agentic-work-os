@@ -87,6 +87,9 @@ Every setting is an environment variable, read at core startup.
 | `AWOS_REPLAY_MAX_TOOL_OUTPUT` | `800` | Per-tool output truncation inside replay |
 | `AWOS_LANE_SETUP` | *(none)* | Fallback lane setup command for directories with no workspace declaration |
 | `AWOS_LANE_SETUP_TIMEOUT_MS` | `600000` | How long that command may run when the workspace does not say |
+| `AWOS_GH_BIN` | `gh` | GitHub CLI used to read work items as you |
+| `AWOS_GH_BIN_ARGS` | `[]` | JSON array injected before its own args |
+| `AWOS_GH_TIMEOUT_MS` | `20000` | How long one `gh` call may take before it counts as unreachable |
 | `AWOS_APPROVAL_TIMEOUT_MS` | `600000` | Unanswered approvals auto-deny after this |
 | `AWOS_LOG_LEVEL` | `info` | `debug` traces every protocol message |
 
@@ -125,6 +128,27 @@ credentials out of a file meant to be committed. Values that are true only on yo
 go in `.awos/local/workspace.json`, which is not committed and overrides the shared file
 field by field. Named `verify` commands are declared here for later gates to reference;
 nothing runs them for you yet.
+
+## Working an issue
+
+A thread can point at a GitHub issue. Paste a URL, `owner/name#14`, or just `#14` — a bare
+number is resolved against the repository the workspace declares — and the **Work** tab
+shows the issue, what has been run against it, and what each run was given.
+
+The issue is read through your own `gh` CLI. The harness never asks for a token, never
+stores one, and has none to lose; whatever your `gh` is logged into is what it can see. The
+four ways that fails — not logged in, no such issue, rate limited, offline — each say which
+one it was and what to do about it.
+
+Every turn in the thread carries the issue in its context. **Start work** does more: it
+records a *run* — which agent took it, which revision of the issue it read, and the exact
+payload it was handed, verbatim. That record is an event in the log like everything else,
+which is what makes it survive a restart and what makes it honest: an appended event cannot
+be rewritten, so refreshing the issue later reports that the source has moved instead of
+quietly changing what a finished run was asked to do.
+
+GitHub stays the owner of the issue. Nothing here writes back to it, and the local copy is
+a cache of what the source said, not an editable second version of it.
 
 ## How the handoff works
 
@@ -238,7 +262,7 @@ in-flight save never appears as an artifact of its own. See
 
 ```bash
 npm run typecheck     # tsc across all packages
-npm test              # 450 tests: core (node:test) + ui (vitest)
+npm test              # 511 tests: core (node:test) + ui (vitest)
 npm run build         # protocol → core → ui
 ```
 

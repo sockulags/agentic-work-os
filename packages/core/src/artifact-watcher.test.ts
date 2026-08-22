@@ -44,6 +44,9 @@ function makeConfig(): HarnessConfig {
     codexInitTimeoutMs: 10_000,
     laneSetup: '',
     laneSetupTimeoutMs: 60_000,
+    ghBin: process.execPath,
+    ghBinArgs: [],
+    ghTimeoutMs: 5_000,
   };
 }
 

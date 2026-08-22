@@ -105,6 +105,19 @@ function laneNotice(
   }
 }
 
+/** One line saying how a run ended, in the same register as the lane notices. */
+function runNotice(state: 'completed' | 'interrupted' | 'error', detail: string | null): string {
+  const suffix = detail ? ` — ${detail}` : '';
+  switch (state) {
+    case 'completed':
+      return `Run finished${suffix}`;
+    case 'interrupted':
+      return `Run interrupted${suffix}`;
+    case 'error':
+      return `Run failed${suffix}`;
+  }
+}
+
 function createFoldState(): FoldState {
   return {
     items: [],
@@ -364,6 +377,31 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
         seq: event.seq,
         level: event.status === 'refused' ? 'error' : 'info',
         text: laneNotice(event.agent, event.status, event.detail),
+        ts: event.ts,
+      });
+      break;
+
+    case 'run.started':
+      // A run is a claim about why this turn exists, and the transcript is where someone
+      // reads the thread back. Which issue authorized the work belongs in that reading,
+      // not only in the panel beside it.
+      items.push({
+        kind: 'notice',
+        id: event.id,
+        seq: event.seq,
+        level: 'info',
+        text: `Started work on ${event.source}`,
+        ts: event.ts,
+      });
+      break;
+
+    case 'run.completed':
+      items.push({
+        kind: 'notice',
+        id: event.id,
+        seq: event.seq,
+        level: event.state === 'error' ? 'error' : 'info',
+        text: runNotice(event.state, event.detail),
         ts: event.ts,
       });
       break;
