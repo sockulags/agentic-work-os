@@ -7,6 +7,8 @@ import type {
   ThreadRuntimeState,
   EvidenceKind,
   EvidenceRef,
+  RequirementResult,
+  WorkingState,
   RetainedItem,
   RetainedKind,
   RunClaim,
@@ -83,6 +85,19 @@ export interface WorkView {
 }
 
 /**
+ * What the integration gate says about one agent's lane.
+ *
+ * Fetched rather than folded: the verdict depends on the lane's working tree as it stands
+ * right now, which is a fact about the filesystem and not about the event log.
+ */
+export interface GateView {
+  agent: AgentId;
+  allowed: boolean;
+  requirements: RequirementResult[];
+  candidate: WorkingState;
+}
+
+/**
  * All harness state in one hook.
  *
  * The client is created once and kept in a ref; React state holds only what renders.
@@ -106,6 +121,7 @@ export function useHarness() {
   const [pinnedContext, setPinnedContext] = useState<PinnedContext | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceView | null>(null);
   const [work, setWork] = useState<WorkView | null>(null);
+  const [gates, setGates] = useState<Partial<Record<AgentId, GateView>>>({});
 
   // Read inside the push handler without making it a dependency, which would tear down
   // and rebuild the subscription on every thread switch.
@@ -194,6 +210,7 @@ export function useHarness() {
             setPinnedContext(null);
             setWorkspace(null);
             setWork(null);
+            setGates({});
             activeCwdRef.current = null;
           }
           return;
@@ -358,6 +375,42 @@ export function useHarness() {
     [askAboutWork],
   );
 
+  /**
+   * Ask what the gate would decide about a lane right now.
+   *
+   * Explicit, because the answer moves whenever the lane does and nothing pushes that.
+   * The panel asks when it opens and after a check reports back, which are the two moments
+   * it can change without the user doing anything visible.
+   */
+  const readGate = useCallback(
+    async (agent: AgentId) => {
+      const threadId = activeThreadRef.current;
+      if (threadId === null) return;
+      const res = await client.request({ type: 'gate.get', threadId, agent }).catch(() => null);
+      if (res?.type !== 'gate' || res.threadId !== activeThreadRef.current) return;
+      setGates((prev) => ({
+        ...prev,
+        [agent]: {
+          agent,
+          allowed: res.allowed,
+          requirements: res.requirements,
+          candidate: res.candidate,
+        },
+      }));
+    },
+    [client],
+  );
+
+  /** Run a named check where the agent's work is. Its result arrives as an event. */
+  const runCheck = useCallback(
+    async (agent: AgentId, name: string) => {
+      const threadId = activeThreadRef.current;
+      if (threadId === null) return;
+      await client.request({ type: 'verify.run', threadId, agent, name });
+    },
+    [client],
+  );
+
   const refreshThreads = useCallback(async () => {
     const res = await client.request({ type: 'thread.list' });
     if (res.type === 'thread.list') setThreads(res.threads);
@@ -385,6 +438,8 @@ export function useHarness() {
       // Blanked on a move to another directory only: reopening the same thread keeps the
       // panel populated rather than flashing its empty state.
       setWorkspace((prev) => (prev?.cwd === res.thread.cwd ? prev : null));
+      // Lanes belong to a thread, so a verdict about another thread's lane is nonsense.
+      setGates({});
       void refreshWorkspace(res.thread.cwd);
       // Read from the core rather than kept from the last thread: a work item belongs to
       // the thread, and showing the previous one for a moment would be showing the wrong
@@ -503,10 +558,15 @@ export function useHarness() {
   );
 
   const integrateLane = useCallback(
-    async (agent: AgentId) => {
+    async (agent: AgentId, override?: { reason: string }) => {
       const threadId = activeThreadRef.current;
       if (threadId === null) return;
-      await client.request({ type: 'lane.integrate', threadId, agent });
+      await client.request({
+        type: 'lane.integrate',
+        threadId,
+        agent,
+        ...(override === undefined ? {} : { override }),
+      });
     },
     [client],
   );
@@ -574,6 +634,9 @@ export function useHarness() {
     detachWorkItem,
     startRun,
     closeRun,
+    gates,
+    readGate,
+    runCheck,
     recordEvidence,
     retainContext,
     amendRetained,

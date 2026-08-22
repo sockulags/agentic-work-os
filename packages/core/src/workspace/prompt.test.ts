@@ -14,6 +14,7 @@ function workspace(overrides: Partial<EffectiveWorkspace> = {}): WorkspaceResolu
       agents: ['claude', 'codex'],
       setup: { command: 'npm install', timeoutMs: null },
       verify: [{ name: 'test', command: 'npm test' }],
+      integration: { requires: [], allowOverride: false },
       context: { references: ['ARCHITECTURE.md'], notes: '' },
       origins: {
         name: 'shared',
@@ -21,6 +22,7 @@ function workspace(overrides: Partial<EffectiveWorkspace> = {}): WorkspaceResolu
         agents: 'shared',
         setup: 'shared',
         verify: 'shared',
+        integration: 'default',
         context: 'shared',
       },
       sources: ['.awos/workspace.json'],

@@ -143,6 +143,58 @@ describe('parseDeclaration', () => {
     assert.deepEqual(paths(result), ['repository.github']);
   });
 
+  describe('integration requirements', () => {
+    test('accepts requirements that name declared verification commands', () => {
+      const result = parse({
+        version: WORKSPACE_SCHEMA_VERSION,
+        name: 'awos',
+        verify: [
+          { name: 'test', command: 'npm test' },
+          { name: 'typecheck', command: 'tsc -b' },
+        ],
+        integration: { requires: ['typecheck', 'test'], allowOverride: false },
+      });
+
+      assert.deepEqual(result.problems, []);
+      assert.deepEqual(result.declaration?.integration?.requires, ['typecheck', 'test']);
+    });
+
+    test('rejects a requirement no verification command answers to', () => {
+      const result = parse({
+        version: WORKSPACE_SCHEMA_VERSION,
+        name: 'awos',
+        verify: [{ name: 'test', command: 'npm test' }],
+        integration: { requires: ['e2e'] },
+      });
+
+      // A requirement that can never be satisfied should fail when the file is written,
+      // not when somebody is trying to hand over work.
+      assert.deepEqual(paths(result), ['integration.requires[0]']);
+      assert.match(result.problems[0]?.message ?? '', /Declare it under "verify"/);
+    });
+
+    test('rejects the same requirement twice', () => {
+      const result = parse({
+        version: WORKSPACE_SCHEMA_VERSION,
+        name: 'awos',
+        verify: [{ name: 'test', command: 'npm test' }],
+        integration: { requires: ['test', 'test'] },
+      });
+
+      assert.deepEqual(paths(result), ['integration.requires[1]']);
+    });
+
+    test('an override permission is a boolean, not a string that reads like one', () => {
+      const result = parse({
+        version: WORKSPACE_SCHEMA_VERSION,
+        name: 'awos',
+        integration: { allowOverride: 'yes' },
+      });
+
+      assert.deepEqual(paths(result), ['integration.allowOverride']);
+    });
+  });
+
   test('says what is wrong with unparseable JSON instead of throwing', () => {
     const result = parseDeclaration('{ "version": 1, ', options);
 

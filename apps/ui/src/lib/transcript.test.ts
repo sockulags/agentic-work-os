@@ -553,3 +553,59 @@ describe('TranscriptFolder — cost', () => {
     expect(fullCount.visits / incrementalCount.visits).toBeGreaterThan(100);
   });
 });
+
+describe('the integration gate in the transcript', () => {
+  const blocked: HarnessEventBody = {
+    kind: 'gate.evaluated',
+    gate: 'lane.integration',
+    allowed: false,
+    candidate: { commit: 'c1', tree: 't1', dirty: false },
+    requirements: [
+      { name: 'test', command: 'npm test', state: 'stale', evidenceId: 'ev1', evidenceTree: 't0' },
+      { name: 'lint', command: 'npm run lint', state: 'satisfied', evidenceId: 'ev2', evidenceTree: 't1' },
+    ],
+    override: null,
+  };
+
+  test('a refusal names what was unsatisfied', () => {
+    const { items } = foldTranscript([ev('claude', null, blocked)]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]?.kind).toBe('notice');
+    const notice = items[0] as Extract<TranscriptItem, { kind: 'notice' }>;
+    expect(notice.level).toBe('error');
+    expect(notice.text).toContain('test stale');
+    expect(notice.text).not.toContain('lint');
+  });
+
+  test('an allowed integration is recorded too, so the yeses can be audited', () => {
+    const { items } = foldTranscript([
+      ev('claude', null, {
+        ...blocked,
+        allowed: true,
+        requirements: [
+          { name: 'test', command: 'npm test', state: 'satisfied', evidenceId: 'ev1', evidenceTree: 't1' },
+        ],
+      }),
+    ]);
+
+    const notice = items[0] as Extract<TranscriptItem, { kind: 'notice' }>;
+    expect(notice.level).toBe('info');
+    expect(notice.text).toContain('test passed');
+  });
+
+  test('an override says who, and what they went around', () => {
+    const { items } = foldTranscript([
+      ev('claude', null, {
+        ...blocked,
+        allowed: true,
+        override: { actor: 'user', reason: 'the suite is broken on main' },
+      }),
+    ]);
+
+    const notice = items[0] as Extract<TranscriptItem, { kind: 'notice' }>;
+    expect(notice.text).toContain('user');
+    expect(notice.text).toContain('test');
+    expect(notice.text).toContain('the suite is broken on main');
+  });
+});

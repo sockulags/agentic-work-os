@@ -1,4 +1,10 @@
-import type { AgentId, HarnessEvent, ToolKind } from '@awos/protocol';
+import type {
+  AgentId,
+  GateOverride,
+  HarnessEvent,
+  RequirementResult,
+  ToolKind,
+} from '@awos/protocol';
 
 /**
  * Folds the raw event log into renderable transcript items.
@@ -103,6 +109,27 @@ function laneNotice(
     case 'removed':
       return `${who}'s lane was closed${suffix}`;
   }
+}
+
+/** One line saying what the gate decided, and what it decided it about. */
+function gateNotice(
+  allowed: boolean,
+  requirements: RequirementResult[],
+  override: GateOverride | null,
+): string {
+  const unsatisfied = requirements.filter((entry) => entry.state !== 'satisfied');
+
+  if (!allowed) {
+    return `Integration blocked: ${unsatisfied.map((entry) => `${entry.name} ${entry.state}`).join(', ')}`;
+  }
+  if (override !== null) {
+    return `Integration allowed by ${override.actor} despite ${unsatisfied
+      .map((entry) => entry.name)
+      .join(', ')} — ${override.reason}`;
+  }
+  return requirements.length === 0
+    ? 'Integration allowed; this project requires no checks'
+    : `Integration allowed: ${requirements.map((entry) => entry.name).join(', ')} passed`;
 }
 
 /** One line saying how a run ended, in the same register as the lane notices. */
@@ -377,6 +404,19 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
         seq: event.seq,
         level: event.status === 'refused' ? 'error' : 'info',
         text: laneNotice(event.agent, event.status, event.detail),
+        ts: event.ts,
+      });
+      break;
+
+    case 'gate.evaluated':
+      // A rule that only leaves a trace when it says no cannot be audited for the times it
+      // said yes, so both land in the transcript.
+      items.push({
+        kind: 'notice',
+        id: event.id,
+        seq: event.seq,
+        level: event.allowed ? 'info' : 'error',
+        text: gateNotice(event.allowed, event.requirements, event.override),
         ts: event.ts,
       });
       break;

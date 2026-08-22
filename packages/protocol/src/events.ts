@@ -13,8 +13,11 @@
  */
 
 import type {
+  CheckResult,
   EvidenceKind,
   EvidenceRef,
+  GateOverride,
+  RequirementResult,
   RetainedKind,
   RunClaim,
   WorkingState,
@@ -259,13 +262,39 @@ export interface RunClosedBody {
 export interface EvidenceRecordedBody {
   kind: 'evidence.recorded';
   evidenceId: string;
-  runId: string;
-  workItemId: string;
+  /** The run it came out of, or null for a check run outside one. */
+  runId: string | null;
+  /** The work item it is about, or null when the thread has none. */
+  workItemId: string | null;
   /** Named around `kind`, which the union has already claimed as its discriminant. */
   evidenceKind: EvidenceKind;
   ref: EvidenceRef;
   summary: string;
   state: WorkingState;
+  /** Set when this came from running a check the workspace names. */
+  check: CheckResult | null;
+}
+
+/**
+ * A rule was evaluated against a candidate, and here is what it decided.
+ *
+ * Recorded whether it allowed or refused, because "we checked and it was fine" is as much
+ * a fact about the thread as a refusal is — and a gate that only leaves a trace when it
+ * says no cannot be audited for the times it said yes.
+ *
+ * The candidate is named by its tree, so the record says exactly which content was
+ * evaluated rather than "the lane, at some point".
+ */
+export interface GateEvaluatedBody {
+  kind: 'gate.evaluated';
+  /** The only gate there is for now. Named so a second one does not need a new event. */
+  gate: 'lane.integration';
+  allowed: boolean;
+  /** The working tree that was up for integration. */
+  candidate: WorkingState;
+  requirements: RequirementResult[];
+  /** Present only when the project permits an override and somebody used one. */
+  override: GateOverride | null;
 }
 
 /**
@@ -410,6 +439,7 @@ export type HarnessEventBody =
   | RunCompletedBody
   | RunClosedBody
   | EvidenceRecordedBody
+  | GateEvaluatedBody
   | ContextRetainedBody
   | ArtifactUpdatedBody
   | ApprovalRequestedBody

@@ -14,6 +14,7 @@ function effective(overrides: Partial<EffectiveWorkspace> = {}): EffectiveWorksp
     agents: ['claude', 'codex'],
     setup: { command: 'npm install', timeoutMs: null },
     verify: [{ name: 'test', command: 'npm test' }],
+    integration: { requires: [], allowOverride: false },
     context: { references: ['ARCHITECTURE.md'], notes: '' },
     origins: {
       name: 'shared',
@@ -21,6 +22,7 @@ function effective(overrides: Partial<EffectiveWorkspace> = {}): EffectiveWorksp
       agents: 'shared',
       setup: 'local',
       verify: 'shared',
+      integration: 'default',
       context: 'default',
     },
     sources: ['.awos/workspace.json', '.awos/local/workspace.json'],

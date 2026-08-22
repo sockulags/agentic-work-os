@@ -1,7 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   AlertTriangle,
+  CheckCircle2,
+  CircleSlash,
   ExternalLink,
+  GitMerge,
   Play,
   Plus,
   RefreshCw,
@@ -10,6 +13,7 @@ import {
 import type {
   AgentId,
   EvidenceItem,
+  RequirementResult,
   RetainedItem,
   RetainedKind,
   RunClaim,
@@ -61,6 +65,7 @@ export function WorkPanel(): React.JSX.Element {
           />
           {work.error && <Problem error={work.error} />}
           <Retained items={work.retained} />
+          <Gates />
           <Runs item={work.item} />
           <StartWork />
         </>
@@ -594,6 +599,145 @@ function Retained({ items }: { items: RetainedItem[] }): React.JSX.Element {
             Keep it
           </Button>
         </form>
+      )}
+    </div>
+  );
+}
+
+/**
+ * What has to hold before each lane's work may be applied.
+ *
+ * Only shown where there is a lane to integrate: without lanes there is nothing to hand
+ * over and nothing to gate. The requirements come from the core's own evaluation rather
+ * than from anything worked out here, so the panel cannot show one verdict while the
+ * integration acts on another.
+ */
+function Gates(): React.JSX.Element | null {
+  const { runtime } = useHarnessContext();
+  const lanes = Object.keys(runtime?.lanes ?? {}) as AgentId[];
+  if (lanes.length === 0) return null;
+
+  return (
+    <div className="space-y-2 border-t border-border pt-2">
+      {lanes.map((agent) => (
+        <Gate key={agent} agent={agent} />
+      ))}
+    </div>
+  );
+}
+
+const REQUIREMENT_ICON: Record<RequirementResult['state'], React.JSX.Element> = {
+  satisfied: <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-emerald-500" />,
+  missing: <CircleSlash className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />,
+  failed: <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-destructive" />,
+  stale: <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-amber-500" />,
+};
+
+const REQUIREMENT_TEXT: Record<RequirementResult['state'], string> = {
+  satisfied: 'passed against this content',
+  missing: 'has not been run',
+  failed: 'failed',
+  stale: 'passed against different content',
+};
+
+function Gate({ agent }: { agent: AgentId }): React.JSX.Element | null {
+  const { gates, readGate, runCheck, integrateLane, runs } = useHarnessContext();
+  const gate = gates[agent];
+  const [overriding, setOverriding] = useState(false);
+  const [reason, setReason] = useState('');
+
+  // Read on open, and again whenever the log grows a run or a result — the two ways the
+  // verdict changes without the user having pressed anything here.
+  const evidenceCount = runs.reduce((total, run) => total + run.evidence.length, 0);
+  useEffect(() => {
+    void readGate(agent);
+  }, [readGate, agent, evidenceCount, runs.length]);
+
+  if (gate === undefined) return null;
+  if (gate.requirements.length === 0) {
+    return (
+      <p className="text-[10px] text-muted-foreground">
+        {agent}&rsquo;s lane: nothing required before integrating.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-1">
+      <p className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+        Before integrating {agent}
+        {gate.allowed && <CheckCircle2 className="h-3 w-3 text-emerald-500" />}
+      </p>
+
+      <ul className="space-y-1">
+        {gate.requirements.map((requirement) => (
+          <li key={requirement.name} className="flex items-start gap-1.5">
+            {REQUIREMENT_ICON[requirement.state]}
+            <span className="min-w-0 flex-1">
+              <span className="font-medium">{requirement.name}</span>{' '}
+              <span className="text-muted-foreground">{REQUIREMENT_TEXT[requirement.state]}</span>
+              <br />
+              <span className="font-mono text-[10px] text-muted-foreground">{requirement.command}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => void runCheck(agent, requirement.name)}
+              title={`Run ${requirement.name} in ${agent}'s lane`}
+              className="shrink-0 rounded-md border border-input px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent"
+            >
+              Run
+            </button>
+          </li>
+        ))}
+      </ul>
+
+      <p className="font-mono text-[10px] text-muted-foreground">
+        candidate {gate.candidate.tree?.slice(0, 7) ?? 'unknown'}
+        {gate.candidate.dirty && ' · uncommitted'}
+      </p>
+
+      {gate.allowed ? (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => void integrateLane(agent)}
+          className="h-auto px-2 py-1 text-xs"
+        >
+          <GitMerge className="mr-1 h-3 w-3" />
+          Integrate {agent}
+        </Button>
+      ) : overriding ? (
+        <form
+          className="space-y-1.5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (reason.trim() === '') return;
+            void integrateLane(agent, { reason: reason.trim() });
+            setReason('');
+            setOverriding(false);
+          }}
+        >
+          <input
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Why integrate without this?"
+            aria-label="Override reason"
+            className="w-full rounded-md border border-input bg-transparent px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          />
+          <Button type="submit" size="sm" variant="outline" className="h-auto px-2 py-1 text-xs">
+            Integrate anyway
+          </Button>
+        </form>
+      ) : (
+        // Offered whatever the workspace says, and refused by the core when it says no.
+        // A button that quietly disappears teaches nobody that the rule exists.
+        <button
+          type="button"
+          onClick={() => setOverriding(true)}
+          className="text-[10px] text-muted-foreground underline-offset-2 hover:underline"
+        >
+          Integrate anyway
+        </button>
       )}
     </div>
   );

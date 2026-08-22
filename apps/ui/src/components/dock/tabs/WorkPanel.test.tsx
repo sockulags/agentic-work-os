@@ -58,6 +58,7 @@ function evidence(overrides: Partial<EvidenceItem> = {}): EvidenceItem {
     ref: { eventId: 'e-cmd', url: null, label: 'npm test' },
     summary: '269 passed',
     state: { commit: 'abc1234def', tree: 'tree1', dirty: false },
+    check: null,
     source: 'user',
     at: 2,
     ...overrides,
@@ -444,5 +445,119 @@ describe('WorkPanel retained context', () => {
 
     expect(screen.getByText('1 retired')).toBeTruthy();
     expect(screen.getByText('turned out to be wrong')).toBeTruthy();
+  });
+});
+
+describe('WorkPanel integration gate', () => {
+  const lane = idleRuntime({ lanes: { claude: '/lanes/claude' } });
+
+  function gate(overrides: Record<string, unknown> = {}) {
+    return {
+      claude: {
+        agent: 'claude' as const,
+        allowed: false,
+        requirements: [
+          {
+            name: 'test',
+            command: 'npm test',
+            state: 'missing' as const,
+            evidenceId: null,
+            evidenceTree: null,
+          },
+        ],
+        candidate: { commit: 'abc1234def', tree: 'tree1234567', dirty: false },
+        ...overrides,
+      },
+    };
+  }
+
+  test('is not shown when there is no lane to integrate', () => {
+    render({ runtime: idleRuntime(), gates: gate() });
+
+    expect(screen.queryByText(/Before integrating/)).toBeNull();
+  });
+
+  test('names each requirement, what it runs, and where it stands', () => {
+    render({ runtime: lane, gates: gate() });
+
+    expect(screen.getByText('test')).toBeTruthy();
+    expect(screen.getByText('npm test')).toBeTruthy();
+    expect(screen.getByText('has not been run')).toBeTruthy();
+    // Which content is being judged is part of the verdict.
+    expect(screen.getByText(/candidate tree123/)).toBeTruthy();
+  });
+
+  test('distinguishes stale from failed, because they need different moves', () => {
+    render({
+      runtime: lane,
+      gates: gate({
+        requirements: [
+          {
+            name: 'test',
+            command: 'npm test',
+            state: 'stale',
+            evidenceId: 'ev1',
+            evidenceTree: 'older',
+          },
+        ],
+      }),
+    });
+
+    expect(screen.getByText('passed against different content')).toBeTruthy();
+  });
+
+  test('runs a check in that lane', () => {
+    const runCheck = vi.fn();
+    render({ runtime: lane, gates: gate(), runCheck });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    expect(runCheck).toHaveBeenCalledWith('claude', 'test');
+  });
+
+  test('offers integration once every requirement holds', () => {
+    const integrateLane = vi.fn();
+    render({
+      runtime: lane,
+      gates: gate({
+        allowed: true,
+        requirements: [
+          {
+            name: 'test',
+            command: 'npm test',
+            state: 'satisfied',
+            evidenceId: 'ev1',
+            evidenceTree: 'tree1234567',
+          },
+        ],
+      }),
+      integrateLane,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Integrate claude/ }));
+
+    expect(integrateLane).toHaveBeenCalledWith('claude');
+  });
+
+  test('an override has to carry a reason', () => {
+    const integrateLane = vi.fn();
+    render({ runtime: lane, gates: gate(), integrateLane });
+
+    fireEvent.click(screen.getByText('Integrate anyway'));
+    fireEvent.click(screen.getByRole('button', { name: 'Integrate anyway' }));
+    expect(integrateLane).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText('Override reason'), {
+      target: { value: 'the suite is broken on main' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Integrate anyway' }));
+
+    expect(integrateLane).toHaveBeenCalledWith('claude', { reason: 'the suite is broken on main' });
+  });
+
+  test('says plainly when a project requires nothing', () => {
+    render({ runtime: lane, gates: gate({ allowed: true, requirements: [] }) });
+
+    expect(screen.getByText(/nothing required before integrating/)).toBeTruthy();
   });
 });

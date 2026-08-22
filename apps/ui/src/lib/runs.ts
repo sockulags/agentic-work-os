@@ -118,6 +118,7 @@ export function foldRuns(events: readonly HarnessEvent[]): RunView[] {
           ref: event.ref,
           summary: event.summary,
           state: event.state,
+          check: event.check,
           source: sourceOf(event),
           at: event.ts,
         });
@@ -177,7 +178,9 @@ export function foldRuns(events: readonly HarnessEvent[]): RunView[] {
   }
 
   for (const item of evidence.values()) {
-    runs.get(item.runId)?.evidence.push(item);
+    // Evidence with no run is a check somebody ran against a lane before any work item
+    // existed. It belongs to the gate, not to a run, and the gate panel shows it.
+    if (item.runId !== null) runs.get(item.runId)?.evidence.push(item);
   }
 
   // Newest first: the run you are looking for is almost always the last one.

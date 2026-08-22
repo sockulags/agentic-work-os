@@ -22,6 +22,7 @@ export interface WorkspaceDeclaration {
   agents?: AgentId[];
   setup?: { command: string; timeoutMs?: number };
   verify?: VerifyCommand[];
+  integration?: { requires?: string[]; allowOverride?: boolean };
   context?: { references?: string[]; notes?: string };
 }
 
@@ -52,6 +53,7 @@ const TOP_LEVEL_KEYS = [
   'agents',
   'setup',
   'verify',
+  'integration',
   'context',
 ] as const;
 
@@ -223,6 +225,59 @@ export function parseDeclaration(raw: string, options: ParseOptions): ParsedDecl
         value.push({ name: entryName, command: entryCommand.trim() });
       });
       declaration.verify = value;
+    }
+  }
+
+  const integration = parsed['integration'];
+  if (integration !== undefined) {
+    if (!isRecord(integration)) {
+      fail('integration', '"integration" must be an object.');
+    } else {
+      rejectUnknown(integration, ['requires', 'allowOverride'], 'integration', fail);
+      const value: { requires?: string[]; allowOverride?: boolean } = {};
+
+      const requires = integration['requires'];
+      if (requires !== undefined) {
+        if (!Array.isArray(requires)) {
+          fail('integration.requires', '"integration.requires" must be an array of verification names.');
+        } else {
+          const declared = new Set((declaration.verify ?? []).map((entry) => entry.name));
+          const names: string[] = [];
+          requires.forEach((entry, index) => {
+            if (typeof entry !== 'string' || entry.trim() === '') {
+              fail(`integration.requires[${index}]`, 'Each requirement is the name of a verification command.');
+              return;
+            }
+            // Checked against this file rather than left to fail at integration time: a
+            // requirement naming a command that does not exist can never be satisfied, and
+            // finding that out while trying to hand over work is the worst moment for it.
+            if (!declared.has(entry)) {
+              fail(
+                `integration.requires[${index}]`,
+                `No verification command called "${entry}". Declare it under "verify" first.`,
+              );
+              return;
+            }
+            if (names.includes(entry)) {
+              fail(`integration.requires[${index}]`, `"${entry}" is required twice.`);
+              return;
+            }
+            names.push(entry);
+          });
+          value.requires = names;
+        }
+      }
+
+      const allowOverride = integration['allowOverride'];
+      if (allowOverride !== undefined) {
+        if (typeof allowOverride !== 'boolean') {
+          fail('integration.allowOverride', '"integration.allowOverride" must be true or false.');
+        } else {
+          value.allowOverride = allowOverride;
+        }
+      }
+
+      declaration.integration = value;
     }
   }
 
