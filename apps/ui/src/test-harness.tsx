@@ -87,6 +87,10 @@ function stubHarness(overrides: Partial<Harness>): Harness {
     refreshWorkItem: vi.fn(),
     detachWorkItem: vi.fn(),
     startRun: vi.fn(),
+    closeRun: vi.fn(),
+    recordEvidence: vi.fn(),
+    retainContext: vi.fn(),
+    amendRetained: vi.fn(),
     ...overrides,
   } as Harness;
 }

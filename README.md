@@ -150,6 +150,31 @@ quietly changing what a finished run was asked to do.
 GitHub stays the owner of the issue. Nothing here writes back to it, and the local copy is
 a cache of what the source said, not an editable second version of it.
 
+### Closing a run
+
+A run that ended without a protocol error has not thereby done the work. So a run can be
+closed with an outcome — delivered, partly done, blocked, abandoned — and a sentence saying
+what actually came of it. That claim is somebody's, attributed to them, and it is separate
+from how the turn ended.
+
+**Evidence** is what supports it. Point at a command the run ran, the diff it produced, an
+artifact it published, an approval you gave — the panel offers them, so you are pointing at
+the fact rather than retelling it — or paste a URL for something only true outside the
+harness. Each item records the commit and working tree it applies to, because "the tests
+passed" means something different when the tree matched no commit.
+
+**What was learned** is kept against the work item: a discovery, a decision, a constraint, an
+open question. Tick the ones later runs should be told, untick the rest, retire the ones that
+turned out to be wrong — nothing is deleted, and none of it edits the GitHub issue. A second
+thread on the same issue starts with what the first one established.
+
+Agents keep things the same way they publish artifacts — by writing a file. A line of JSON in
+`.awos/retained.jsonl` (`{"kind":"decision","text":"…"}`) is picked up when the turn ends and
+attributed to the agent that wrote it.
+
+Corrections are appends. Restating an outcome or unticking a note leaves the earlier version
+in the log, in order, with its author and its time.
+
 ## How the handoff works
 
 The harness owns the canonical log; each agent's native session is a cache that may be
@@ -262,7 +287,7 @@ in-flight save never appears as an artifact of its own. See
 
 ```bash
 npm run typecheck     # tsc across all packages
-npm test              # 511 tests: core (node:test) + ui (vitest)
+npm test              # 565 tests: core (node:test) + ui (vitest)
 npm run build         # protocol → core → ui
 ```
 

@@ -5,6 +5,11 @@ import type {
   HarnessEvent,
   PermissionMode,
   ThreadRuntimeState,
+  EvidenceKind,
+  EvidenceRef,
+  RetainedItem,
+  RetainedKind,
+  RunClaim,
   ThreadSummary,
   WorkItem,
   WorkSourceError,
@@ -66,6 +71,13 @@ export interface WorkView {
   threadId: string;
   item: WorkItem | null;
   error: WorkSourceError | null;
+  /**
+   * Everything kept about the item, including from threads this client never opened.
+   *
+   * Sent by the core rather than folded here, because the events behind it are in other
+   * threads' logs — the one part of this panel the local event stream cannot answer.
+   */
+  retained: RetainedItem[];
   /** True while a request to GitHub is in flight, so the panel can say it is working. */
   busy: boolean;
 }
@@ -232,13 +244,22 @@ export function useHarness() {
       );
 
       const res = await client.request(request).catch(
-        (err: Error): { type: 'work'; threadId: string; item: null; error: WorkSourceError } => ({
+        (
+          err: Error,
+        ): {
+          type: 'work';
+          threadId: string;
+          item: null;
+          error: WorkSourceError;
+          retained: RetainedItem[];
+        } => ({
           type: 'work',
           threadId,
           item: null,
           // A socket that dropped is not a GitHub failure, but it lands in the same place
           // and the user's next move is the same one.
           error: { kind: 'offline', message: err.message, retryable: true },
+          retained: [],
         }),
       );
       if (res.type !== 'work' || res.threadId !== threadId) return;
@@ -250,6 +271,7 @@ export function useHarness() {
         // answer available, and losing it would punish the user for a rate limit.
         item: res.error === null ? res.item : (res.item ?? prev?.item ?? null),
         error: res.error,
+        retained: res.retained,
         busy: false,
       }));
     },
@@ -287,6 +309,55 @@ export function useHarness() {
     [client],
   );
 
+  /**
+   * State what a run achieved.
+   *
+   * Sending it again for the same run is a correction rather than an edit; the panel
+   * re-reads the claim from the log like everything else, so nothing here has to know
+   * that.
+   */
+  const closeRun = useCallback(
+    async (runId: string, claim: RunClaim, statement: string) => {
+      const threadId = activeThreadRef.current;
+      if (threadId === null) return;
+      await client.request({ type: 'run.close', threadId, runId, claim, statement });
+    },
+    [client],
+  );
+
+  const recordEvidence = useCallback(
+    async (runId: string, evidenceKind: EvidenceKind, ref: EvidenceRef, summary: string) => {
+      const threadId = activeThreadRef.current;
+      if (threadId === null) return;
+      await client.request({ type: 'evidence.record', threadId, runId, evidenceKind, ref, summary });
+    },
+    [client],
+  );
+
+  /**
+   * Keep something against the work item.
+   *
+   * The reply carries the whole retained ledger, so the panel updates from the core's
+   * answer rather than from a guess about what the core did with the request.
+   */
+  const retainContext = useCallback(
+    async (retainedKind: RetainedKind, text: string, runId: string | null) => {
+      const threadId = activeThreadRef.current;
+      if (threadId === null) return;
+      await askAboutWork(threadId, { type: 'context.retain', threadId, retainedKind, text, runId });
+    },
+    [askAboutWork],
+  );
+
+  const amendRetained = useCallback(
+    async (retainedId: string, patch: { selected?: boolean; retired?: boolean }) => {
+      const threadId = activeThreadRef.current;
+      if (threadId === null) return;
+      await askAboutWork(threadId, { type: 'context.amend', threadId, retainedId, ...patch });
+    },
+    [askAboutWork],
+  );
+
   const refreshThreads = useCallback(async () => {
     const res = await client.request({ type: 'thread.list' });
     if (res.type === 'thread.list') setThreads(res.threads);
@@ -318,7 +389,7 @@ export function useHarness() {
       // Read from the core rather than kept from the last thread: a work item belongs to
       // the thread, and showing the previous one for a moment would be showing the wrong
       // issue at the moment the user is deciding what to work on.
-      setWork({ threadId, item: null, error: null, busy: true });
+      setWork({ threadId, item: null, error: null, retained: [], busy: true });
       void askAboutWork(threadId, { type: 'work.get', threadId });
       setEvents(res.events);
       setRuntime(res.state);
@@ -502,6 +573,10 @@ export function useHarness() {
     refreshWorkItem,
     detachWorkItem,
     startRun,
+    closeRun,
+    recordEvidence,
+    retainContext,
+    amendRetained,
     dismissNotice: () => setNotice(null),
     openThread,
     createThread,

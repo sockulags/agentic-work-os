@@ -278,7 +278,7 @@ says where: the alternative is deleting the only copy of something the user neve
 
 ```
 packages/protocol   pure types, zero deps — HarnessEvent, both wire formats, UI↔core RPC
-packages/core       adapters, store, replay, workspace, work items, orchestrator, ws server, permission MCP
+packages/core       adapters, store, replay, workspace, work items, ledger, orchestrator, ws server, permission MCP
 apps/ui             React + Tailwind + shadcn-style components, Vite
 apps/desktop        Tauri shell
 ```
@@ -436,6 +436,38 @@ exists that could rewrite the context of a run that already happened.
 **Every turn carries the issue; only a run claims to be the work.** The issue is standing
 truth about the thread, like the pinned notes. A run is an assertion that this particular
 turn is the work the issue asked for, and it is recorded as such.
+
+### Outcomes, evidence and retained context
+
+A `turn.completed` with reason `completed` means an agent stopped without a protocol error.
+Nothing in the log distinguishes that from having done the work, and the distinction is the
+one every later decision rests on. Three more appended records carry it.
+
+**An outcome** (`run.closed`) states what the run achieved — delivered, partial, blocked,
+abandoned — with a sentence, attributed to whoever said it. Never inferred: the case this
+exists for is an agent that exits cleanly having done the wrong thing.
+
+**Evidence** (`evidence.recorded`) points at a fact rather than restating one. `ref.eventId`
+names a command, diff, artifact or approval already in the log, so the evidence cannot drift
+from what happened; `ref.url` covers what is only true outside the harness, and a person has
+to vouch for those. Each item captures the commit and the working-tree hash it applies to,
+taken from the agent's lane when it has one — a claim about code is a claim about a
+particular tree, and a tree that has moved on since is what a reader needs to know.
+
+**Retained context** (`context.retained`) keeps a discovery, decision, constraint or open
+question against the work item rather than editing the issue GitHub owns. Selected items are
+rendered into later runs' prompts as `<retained-context>`, attributed and marked as belief
+rather than fact. The fold runs across every thread, because a work item outlives any one of
+them.
+
+**Corrections are appends.** All three folds take the last record carrying a given id, so the
+current answer is one pass and every earlier claim is still there with its author and its
+time. Amending a retained item is composed server-side from the current record, so ticking a
+box cannot rewrite the words above it.
+
+Nothing here is scored, ranked or inferred, and no model reads the ledger to decide whether
+the work is done. That is the same line §4 draws around replay: the harness renders what was
+recorded and never invents a claim nobody made.
 
 ---
 
