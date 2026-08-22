@@ -469,6 +469,47 @@ Nothing here is scored, ranked or inferred, and no model reads the ledger to dec
 the work is done. That is the same line §4 draws around replay: the harness renders what was
 recorded and never invents a claim nobody made.
 
+### The integration gate
+
+Approvals control individual tool calls; the lane check refuses patches that collide.
+Neither knows what a project means by verified, so a lane could be handed over because its
+patch applied cleanly while the tests had never run. A workspace closes that with the one
+rule this release enforces:
+
+```json
+"integration": { "requires": ["typecheck", "test"], "allowOverride": false }
+```
+
+**Evidence is matched on the tree, not on the lane.** Running a check records evidence
+carrying the working-tree hash it ran against. At integration the lane is hashed again and
+each requirement is `satisfied`, `missing`, `failed` or `stale` — where stale means it
+passed against content that is not this content. That is the failure an instruction in a
+prompt cannot catch, and it is why evidence is bound to a tree at all. Two lanes with
+identical content are identical content, so evidence from either satisfies both.
+
+**The core decides, before anything is applied.** The same `gate(agent)` call answers the
+panel and gates the integration, so the UI cannot show one verdict while the core acts on
+another, and a refusal happens before `git apply` is reached — the user's directory is
+untouched, not rolled back.
+
+**Names, not commands.** A requirement names a `verify` entry, and the declaration is
+rejected at validation time if no such entry exists: a requirement that can never be
+satisfied should fail when the file is written, not when someone is trying to hand over
+work.
+
+**The verdict is appended either way.** `gate.evaluated` records what was decided, the
+candidate it was decided about, every requirement's state, and the override if there was
+one. A gate that only leaves a trace when it says no cannot be audited for the times it
+said yes.
+
+**No bypass unless a project asks for one.** `allowOverride` defaults to false and an
+override is refused outright where it is not set. Where it is, the reason is required and
+goes into the record beside the requirements it went around.
+
+This is deliberately a rule, not a rule *engine*: one gate, four states, no policy
+language. What it is meant to prove is the control-plane shape — the core evaluates, the
+log records, the UI reports — before anything more general is built on it.
+
 ---
 
 ## 12. What v1 deliberately does not do

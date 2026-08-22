@@ -123,6 +123,20 @@ from, and anything that failed to validate or points at a file that is not there
 turn carries a summary of it into the prompt, so both agents work to the same rules without
 being told them again.
 
+It can also require that named checks have passed before an agent's lane work is applied to
+your directory:
+
+```json
+"integration": { "requires": ["typecheck", "test"], "allowOverride": false }
+```
+
+The check is run in the lane, its result is recorded against the exact working tree it ran
+against, and integration is refused if a required check is missing, failed, or passed
+against different content — the case an instruction in a prompt cannot catch, because the
+tests really did pass, just not on this. Nothing is applied to your directory when the gate
+refuses. An override exists only if the project turns one on, and it records who did it and
+why, beside what it went around.
+
 The schema is closed: a setting it does not know is an error, which is what keeps
 credentials out of a file meant to be committed. Values that are true only on your machine
 go in `.awos/local/workspace.json`, which is not committed and overrides the shared file
@@ -237,6 +251,10 @@ all of the lane's work to your directory or none of it: a patch that collides is
 with the reason, leaving your files exactly as they were, and can be retried once you have
 resolved the collision. Both the integration and the refusal go into the transcript.
 
+If the workspace requires checks, the **Work** tab shows where each one stands for each
+lane, with a button to run it there. A lane that has not passed them is refused before
+anything is applied.
+
 Two things to know. A worktree only holds what git tracks, so `node_modules` and build
 output are not in a fresh lane and its agent cannot run the tests until they are — that is
 what `setup.command` in the workspace declaration is for. And switching lanes on
@@ -287,7 +305,7 @@ in-flight save never appears as an artifact of its own. See
 
 ```bash
 npm run typecheck     # tsc across all packages
-npm test              # 565 tests: core (node:test) + ui (vitest)
+npm test              # 604 tests: core (node:test) + ui (vitest)
 npm run build         # protocol → core → ui
 ```
 

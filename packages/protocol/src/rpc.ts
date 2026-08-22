@@ -13,9 +13,11 @@ import type { WorkItem, WorkSourceError } from './work.js';
 import type {
   EvidenceKind,
   EvidenceRef,
+  RequirementResult,
   RetainedItem,
   RetainedKind,
   RunClaim,
+  WorkingState,
 } from './evidence.js';
 
 export type PermissionMode =
@@ -114,8 +116,17 @@ export type ClientRequest =
   | { type: 'thread.setAgent'; threadId: string; agent: AgentId }
   | { type: 'thread.setPermissionMode'; threadId: string; mode: PermissionMode }
   | { type: 'thread.setParallel'; threadId: string; parallel: boolean }
-  /** Apply one lane's work to the thread directory, all of it or none of it. */
-  | { type: 'lane.integrate'; threadId: string; agent: AgentId }
+  /**
+   * Apply one lane's work to the thread directory, all of it or none of it.
+   *
+   * `override` is only accepted where the workspace permits one, and a reason is required
+   * because it goes into the record next to what it bypassed.
+   */
+  | { type: 'lane.integrate'; threadId: string; agent: AgentId; override?: { reason: string } }
+  /** What the integration gate would decide about a lane right now. */
+  | { type: 'gate.get'; threadId: string; agent: AgentId }
+  /** Run a check the workspace names, where the agent's work is. */
+  | { type: 'verify.run'; threadId: string; agent: AgentId; name: string }
   | { type: 'turn.send'; threadId: string; agent: AgentId; text: string }
   /** Interrupt one agent, or every working agent when none is named. */
   | { type: 'turn.interrupt'; threadId: string; agent?: AgentId }
@@ -212,6 +223,20 @@ export type ServerResponseBody =
        * live in threads this client has not opened.
        */
       retained: RetainedItem[];
+    }
+  /**
+   * The gate's verdict on one lane, requirement by requirement.
+   *
+   * Carries the candidate it evaluated, because "the tests passed" and "the tests passed
+   * against this" are different claims and only the second one gates anything.
+   */
+  | {
+      type: 'gate';
+      threadId: string;
+      agent: AgentId;
+      allowed: boolean;
+      requirements: RequirementResult[];
+      candidate: WorkingState;
     }
   | { type: 'agents.probe'; agents: AgentAvailability[] };
 

@@ -58,15 +58,32 @@ export interface WorkingState {
   dirty: boolean;
 }
 
+/**
+ * The result of a check the project named.
+ *
+ * Present only on evidence produced by running one, which is what lets a gate tell "this
+ * is the `test` check, and it passed" from "somebody attached a command that mentions
+ * tests". Everything else — what ran, against which tree — is on the evidence itself.
+ */
+export interface CheckResult {
+  /** A `verify` entry's name. */
+  name: string;
+  passed: boolean;
+  exitCode: number | null;
+}
+
 export interface EvidenceItem {
   id: string;
-  runId: string;
-  workItemId: string;
+  /** The run it came out of, or null for a check run outside one. */
+  runId: string | null;
+  /** The work item it is about, or null when the thread has none. */
+  workItemId: string | null;
   threadId: string;
   kind: EvidenceKind;
   ref: EvidenceRef;
   summary: string;
   state: WorkingState;
+  check: CheckResult | null;
   source: ClaimSource;
   at: number;
 }
@@ -93,6 +110,32 @@ export interface RunOutcome {
   statement: string;
   source: ClaimSource;
   at: number;
+}
+
+/**
+ * Why an integration was allowed or refused, requirement by requirement.
+ *
+ * `missing` — nothing has run it. `failed` — the last result for it was a failure.
+ * `stale` — it passed, but against a tree that is not the one being integrated, which is
+ * the case text instructions cannot catch and the reason evidence is bound to a tree at
+ * all. `satisfied` — it passed against exactly this candidate.
+ */
+export type RequirementState = 'satisfied' | 'missing' | 'failed' | 'stale';
+
+export interface RequirementResult {
+  name: string;
+  command: string;
+  state: RequirementState;
+  /** The evidence that decided it, when there was any. */
+  evidenceId: string | null;
+  /** The tree that evidence was recorded against, for comparison with the candidate. */
+  evidenceTree: string | null;
+}
+
+/** A recorded decision to integrate anyway, where the project permits one. */
+export interface GateOverride {
+  actor: ClaimSource;
+  reason: string;
 }
 
 /** How much retained context a run's prompt will carry. */

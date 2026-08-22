@@ -54,6 +54,7 @@ export function foldEvidence(events: readonly HarnessEvent[]): EvidenceItem[] {
       ref: event.ref,
       summary: event.summary,
       state: event.state,
+      check: event.check,
       source: sourceOf(event),
       at: event.ts,
     });

@@ -58,6 +58,22 @@ export interface WorkspaceRepository {
   github: string | null;
 }
 
+/**
+ * What has to be true before a lane's work may be applied to the user's directory.
+ *
+ * Names of `verify` entries, not commands: the project says *what* must have passed, and
+ * the command behind that name stays in one place. An empty list is the default and means
+ * what it always meant — integration is gated on the patch applying, and nothing else.
+ *
+ * `allowOverride` is off unless a project turns it on. A bypass that exists by default is
+ * one nobody decided to have; a project that wants an escape hatch has to say so, in the
+ * file, where the decision is reviewable.
+ */
+export interface WorkspaceIntegration {
+  requires: string[];
+  allowOverride: boolean;
+}
+
 export interface WorkspaceContext {
   /** Files worth reading before working here, relative to the workspace root. */
   references: string[];
@@ -89,7 +105,14 @@ export interface WorkspaceProblem {
  */
 export type WorkspaceOrigin = 'shared' | 'local' | 'environment' | 'default';
 
-export type WorkspaceField = 'name' | 'repository' | 'agents' | 'setup' | 'verify' | 'context';
+export type WorkspaceField =
+  | 'name'
+  | 'repository'
+  | 'agents'
+  | 'setup'
+  | 'verify'
+  | 'integration'
+  | 'context';
 
 /** A declaration resolved through every layer, with the provenance of each field. */
 export interface EffectiveWorkspace {
@@ -101,6 +124,7 @@ export interface EffectiveWorkspace {
   agents: AgentId[];
   setup: WorkspaceSetup;
   verify: VerifyCommand[];
+  integration: WorkspaceIntegration;
   context: WorkspaceContext;
   origins: Record<WorkspaceField, WorkspaceOrigin>;
   /** Files that contributed, in the order they were applied. */

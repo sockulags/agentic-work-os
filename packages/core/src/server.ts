@@ -198,9 +198,33 @@ export class HarnessServer {
       case 'lane.integrate': {
         // A refused integration is an answer, not a transport failure, but the UI has one
         // way to show either — and the reason is the part the user has to act on.
-        const result = await orchestrator.integrateLane(msg.threadId, msg.agent);
+        const result = await orchestrator.integrateLane(
+          msg.threadId,
+          msg.agent,
+          msg.override === undefined ? null : { actor: 'user', reason: msg.override.reason },
+        );
         return result.ok ? { type: 'ok' } : { type: 'error', message: result.detail };
       }
+
+      case 'gate.get': {
+        const decision = await orchestrator.gate(msg.threadId, msg.agent);
+        return {
+          type: 'gate',
+          threadId: msg.threadId,
+          agent: msg.agent,
+          allowed: decision.allowed,
+          requirements: decision.requirements,
+          candidate: decision.candidate,
+        };
+      }
+
+      case 'verify.run':
+        // Not awaited: a project's test suite is minutes of work, and its result arrives
+        // as an event like everything else that takes time here.
+        void orchestrator.runCheck(msg.threadId, msg.agent, msg.name).catch((err: Error) => {
+          this.broadcast({ type: 'notice', level: 'error', message: err.message });
+        });
+        return { type: 'ok' };
 
       case 'approval.resolve':
         orchestrator.resolveApproval(msg.threadId, msg.approvalId, msg.optionId);

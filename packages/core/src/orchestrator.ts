@@ -12,8 +12,10 @@ import type {
   PermissionMode,
   PlanItem,
   ThreadRuntimeState,
+  EvidenceItem,
   EvidenceKind,
   EvidenceRef,
+  GateOverride,
   RetainedItem,
   RetainedKind,
   RunClaim,
@@ -40,7 +42,8 @@ import {
   buildRetainedBlock,
   buildWorkItemBlock,
 } from './work/prompt.js';
-import { foldRetained, selectedForContext } from './work/ledger.js';
+import { foldEvidence, foldRetained, selectedForContext } from './work/ledger.js';
+import { evaluateGate, explainGate, type GateDecision } from './work/gate.js';
 import { fetchIssue, parseIssueRef } from './work/github.js';
 import { applyReplay, buildReplay, hasReplay, stripReplay } from './store/replay.js';
 import { ArtifactWatcher } from './artifact-watcher.js';
@@ -64,6 +67,12 @@ function capContext(payload: string): string {
   return `${payload.slice(0, RUN_CONTEXT_MAX_CHARS)}
 
 _[cut here: the context sent was ${payload.length} characters; this record holds the first ${RUN_CONTEXT_MAX_CHARS}]_`;
+}
+
+/** The last of a command's output, which is the part that says what went wrong. */
+function tail(output: string, max = 400): string {
+  const trimmed = output.trim();
+  return trimmed.length <= max ? trimmed : `…${trimmed.slice(-max)}`;
 }
 
 const RETAINED_KINDS = ['discovery', 'decision', 'constraint', 'question'] as const;
@@ -444,7 +453,10 @@ class Thread {
    * harness exists to avoid. A refusal is recorded too — an integration that did not
    * happen is a fact about the thread.
    */
-  async integrate(agent: AgentId): Promise<{ ok: boolean; detail: string }> {
+  async integrate(
+    agent: AgentId,
+    override: GateOverride | null = null,
+  ): Promise<{ ok: boolean; detail: string }> {
     const summary = this.#store.get(this.id);
     if (!summary) throw new Error(`Unknown thread ${this.id}`);
 
@@ -452,6 +464,47 @@ class Thread {
     if (!lane) throw new Error(`${agent} has no lane to integrate.`);
     if (this.#turns.has(agent)) {
       throw new Error(`${agent} is still working. Interrupt it before integrating its lane.`);
+    }
+
+    const workspace = this.#workspace(summary.cwd);
+    const allowOverride =
+      workspace.status === 'ok' ? workspace.workspace.integration.allowOverride : false;
+    if (override !== null && !allowOverride) {
+      // Refused rather than ignored: a caller that asked to bypass the gate has to learn
+      // that it did not happen, and a project that never opted in has no bypass to offer.
+      throw new Error(
+        'This workspace does not permit overriding the integration gate. Set integration.allowOverride if it should.',
+      );
+    }
+    if (override !== null && override.reason.trim() === '') {
+      throw new Error('An override has to say why. It is going into the record.');
+    }
+
+    const decision = await this.gate(agent);
+    const allowed = decision.allowed || override !== null;
+
+    // Recorded before anything is applied, so the decision exists in the log whether or
+    // not the patch that follows works out.
+    this.#record(agent, {
+      kind: 'gate.evaluated',
+      gate: 'lane.integration',
+      allowed,
+      candidate: decision.candidate,
+      requirements: decision.requirements,
+      override,
+    });
+
+    if (!allowed) {
+      const detail = `integration is gated: ${explainGate(decision)}`;
+      this.#record(agent, {
+        kind: 'lane.updated',
+        status: 'refused',
+        path: lane.path,
+        detail,
+      });
+      this.#onState();
+      // Nothing has touched the user's directory at this point, and nothing will.
+      return { ok: false, detail };
     }
 
     const result = await integrateLane(lane, summary.cwd);
@@ -624,8 +677,125 @@ class Thread {
       ref: input.ref,
       summary: input.summary,
       state: await this.#workingState(started.agent),
+      check: null,
     });
     this.#onState();
+  }
+
+  /**
+   * Run a check the workspace names, where the work actually is.
+   *
+   * In the agent's lane when it has one, because a check run against the user's directory
+   * says nothing about content that is still in a worktree. The result is evidence like
+   * any other — bound to the tree it ran against, which is what makes it possible to tell
+   * later whether it is still about the same thing.
+   *
+   * A failure is recorded, not thrown. "The tests failed" is the answer to the question,
+   * and losing it would leave the gate unable to say why it is refusing.
+   */
+  async runCheck(name: string, agent: AgentId): Promise<{ passed: boolean; detail: string }> {
+    const summary = this.#store.get(this.id);
+    if (!summary) throw new Error(`Unknown thread ${this.id}`);
+
+    const workspace = this.#workspace(summary.cwd);
+    if (workspace.status !== 'ok') {
+      throw new Error('This directory is not a workspace, so it declares no checks to run.');
+    }
+    const command = workspace.workspace.verify.find((entry) => entry.name === name)?.command;
+    if (command === undefined) {
+      throw new Error(
+        `No verification command called "${name}". The workspace declares: ${
+          workspace.workspace.verify.map((entry) => entry.name).join(', ') || 'none'
+        }.`,
+      );
+    }
+
+    const cwd = this.#lanes.get(agent)?.path ?? summary.cwd;
+    let passed = true;
+    let exitCode: number | null = 0;
+    let output = '';
+    try {
+      const result = await execAsync(command, {
+        cwd,
+        timeout: this.#config.laneSetupTimeoutMs,
+        windowsHide: true,
+        maxBuffer: 32 * 1024 * 1024,
+      });
+      output = tail(String(result.stdout ?? ''));
+    } catch (err) {
+      passed = false;
+      const failure = err as { code?: number; stdout?: string; stderr?: string; message?: string };
+      exitCode = typeof failure.code === 'number' ? failure.code : null;
+      output = tail(String(failure.stderr || failure.stdout || failure.message || ''));
+    }
+
+    // Captured after the command, not before. The evidence has to name the content that
+    // would actually be integrated, and a check that writes tracked files has changed that
+    // content by running — recording the tree it started from would produce evidence that
+    // is stale the moment it is written. Files git ignores never enter the hash at all, so
+    // for the ordinary case of a test suite dropping build output this changes nothing.
+    const state = await this.#workingState(agent);
+    const detail = `${passed ? 'passed' : 'failed'}${exitCode === null ? '' : ` (exit ${exitCode})`}`;
+    const run = this.#latestRun(agent);
+    this.#record(null, {
+      kind: 'evidence.recorded',
+      evidenceId: randomUUID(),
+      // Linked to the run and the item when there are any, and standing on its own when
+      // there are not: a lane can be verified before anyone has filed an issue for it.
+      runId: run?.runId ?? null,
+      workItemId: run?.workItemId ?? this.workItem()?.id ?? null,
+      evidenceKind: 'command',
+      ref: { eventId: null, url: null, label: command },
+      summary: output === '' ? detail : `${detail} — ${output}`,
+      state,
+      check: { name, passed, exitCode },
+    });
+    this.#onState();
+    return { passed, detail };
+  }
+
+  /** Everything this thread has recorded as evidence. */
+  evidence(): EvidenceItem[] {
+    return foldEvidence(this.#store.events(this.id));
+  }
+
+  /**
+   * What the gate would decide about an agent's lane right now.
+   *
+   * Read-only, and the same code path the integration itself takes, so the panel cannot
+   * show one answer while the core acts on another.
+   */
+  async gate(agent: AgentId): Promise<GateDecision & { candidate: WorkingState }> {
+    const summary = this.#store.get(this.id);
+    if (!summary) throw new Error(`Unknown thread ${this.id}`);
+    const workspace = this.#workspace(summary.cwd);
+    const integration =
+      workspace.status === 'ok'
+        ? workspace.workspace.integration
+        : { requires: [], allowOverride: false };
+    const verify = workspace.status === 'ok' ? workspace.workspace.verify : [];
+
+    const candidate = await this.#workingState(agent);
+    return {
+      ...evaluateGate({
+        integration,
+        verify,
+        evidence: this.evidence(),
+        candidateTree: candidate.tree,
+      }),
+      candidate,
+    };
+  }
+
+  /** The most recent run started by an agent in this thread, if any. */
+  #latestRun(agent: AgentId): { runId: string; workItemId: string } | null {
+    let latest: { runId: string; workItemId: string } | null = null;
+    for (const event of this.#store.events(this.id)) {
+      if (event.kind === 'run.started' && event.agent === agent) {
+        latest = { runId: event.runId, workItemId: event.workItemId };
+      }
+    }
+    return latest;
   }
 
   /** Write something down against the work item. */
@@ -979,8 +1149,26 @@ export class Orchestrator extends EventEmitter {
     if (after) this.emit('thread', after);
   }
 
-  async integrateLane(threadId: string, agent: AgentId): Promise<{ ok: boolean; detail: string }> {
-    return this.#thread(threadId).integrate(agent);
+  async integrateLane(
+    threadId: string,
+    agent: AgentId,
+    override: GateOverride | null = null,
+  ): Promise<{ ok: boolean; detail: string }> {
+    return this.#thread(threadId).integrate(agent, override);
+  }
+
+  /** Run a named verification check where the agent's work is. */
+  async runCheck(
+    threadId: string,
+    agent: AgentId,
+    name: string,
+  ): Promise<{ passed: boolean; detail: string }> {
+    return this.#thread(threadId).runCheck(name, agent);
+  }
+
+  /** What the gate would decide about an agent's lane right now. */
+  async gate(threadId: string, agent: AgentId): Promise<GateDecision & { candidate: WorkingState }> {
+    return this.#thread(threadId).gate(agent);
   }
 
   resolveApproval(threadId: string, approvalId: string, optionId: string): void {

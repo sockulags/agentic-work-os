@@ -1285,3 +1285,244 @@ describe('outcomes, evidence and retained context', () => {
     assert.equal(kept?.text, 'gh, never a token of our own');
   });
 });
+
+describe('the integration gate', () => {
+  /**
+   * A workspace whose checks are node one-liners.
+   *
+   * `pass` writes a marker so a test can prove the command really ran; `fail` exits
+   * non-zero the way a broken suite does.
+   */
+  function declare(root: string, integration: Record<string, unknown>): void {
+    mkdirSync(join(root, '.awos'), { recursive: true });
+    writeFileSync(
+      join(root, WORKSPACE_FILE),
+      JSON.stringify({
+        version: WORKSPACE_SCHEMA_VERSION,
+        name: 'under-test',
+        verify: [
+          { name: 'test', command: `node -e "require('fs').writeFileSync('ran-test.txt','yes')"` },
+          { name: 'fail', command: 'node -e "process.exit(1)"' },
+        ],
+        integration,
+      }),
+      'utf8',
+    );
+  }
+
+  /** A thread in lanes mode with a lane provisioned for Claude and work in it. */
+  async function laneWithWork(orch: Orchestrator, cwd: string) {
+    const thread = orch.createThread({ cwd });
+    await orch.setParallel(thread.id, true);
+    await orch.send(thread.id, 'claude', 'provision the lane');
+
+    const lane = orch.state(thread.id).lanes.claude;
+    assert.ok(lane);
+    // Stand in for the agent's edit: the fakes stream events, they do not touch files.
+    writeFileSync(join(lane, 'from-the-lane.txt'), 'work\n');
+    return { thread, lane };
+  }
+
+  function gateEvents(orch: Orchestrator, threadId: string) {
+    return orch.store.events(threadId).filter((e) => e.kind === 'gate.evaluated');
+  }
+
+  test('an unverified lane is refused, and the target directory is untouched', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    const { thread } = await laneWithWork(orch, cwd);
+
+    const result = await orch.integrateLane(thread.id, 'claude');
+
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /test has not been run/);
+    assert.equal(existsSync(join(cwd, 'from-the-lane.txt')), false, 'nothing was applied');
+
+    const evaluated = gateEvents(orch, thread.id)[0];
+    assert.ok(evaluated?.kind === 'gate.evaluated');
+    assert.equal(evaluated.allowed, false);
+    assert.equal(evaluated.requirements[0]?.name, 'test');
+    assert.equal(evaluated.requirements[0]?.state, 'missing');
+    // The record names the content it judged, not just the moment it judged it.
+    assert.match(evaluated.candidate.tree ?? '', /^[0-9a-f]{40}$/);
+  });
+
+  test('a verified lane integrates, all of it', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    const { thread, lane } = await laneWithWork(orch, cwd);
+
+    const check = await orch.runCheck(thread.id, 'claude', 'test');
+    assert.equal(check.passed, true);
+    // The command ran in the lane, which is where the work is.
+    assert.equal(existsSync(join(lane, 'ran-test.txt')), true);
+
+    const result = await orch.integrateLane(thread.id, 'claude');
+
+    assert.equal(result.ok, true, result.detail);
+    assert.equal(readFileSync(join(cwd, 'from-the-lane.txt'), 'utf8'), 'work\n');
+    const evaluated = gateEvents(orch, thread.id).pop();
+    assert.equal(evaluated?.kind === 'gate.evaluated' ? evaluated.allowed : null, true);
+  });
+
+  test('a failing check blocks and says so', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['fail'] });
+    const { thread } = await laneWithWork(orch, cwd);
+
+    const check = await orch.runCheck(thread.id, 'claude', 'fail');
+    assert.equal(check.passed, false);
+
+    const result = await orch.integrateLane(thread.id, 'claude');
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /fail failed/);
+    assert.equal(existsSync(join(cwd, 'from-the-lane.txt')), false);
+  });
+
+  test('a pass goes stale when the lane changes under it', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    const { thread, lane } = await laneWithWork(orch, cwd);
+    await orch.runCheck(thread.id, 'claude', 'test');
+
+    // The agent keeps working after the check. This is the case a prompt instruction
+    // cannot catch: the tests really did pass, just not on this.
+    writeFileSync(join(lane, 'later-edit.txt'), 'after the check\n');
+
+    const result = await orch.integrateLane(thread.id, 'claude');
+
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /passed against different content/);
+    const evaluated = gateEvents(orch, thread.id).pop();
+    assert.ok(evaluated?.kind === 'gate.evaluated');
+    assert.equal(evaluated.requirements[0]?.state, 'stale');
+    assert.notEqual(evaluated.requirements[0]?.evidenceTree, evaluated.candidate.tree);
+  });
+
+  test('running the check again on the new content unblocks it', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    const { thread, lane } = await laneWithWork(orch, cwd);
+    await orch.runCheck(thread.id, 'claude', 'test');
+    writeFileSync(join(lane, 'later-edit.txt'), 'after the check\n');
+    assert.equal((await orch.integrateLane(thread.id, 'claude')).ok, false);
+
+    await orch.runCheck(thread.id, 'claude', 'test');
+    const result = await orch.integrateLane(thread.id, 'claude');
+
+    assert.equal(result.ok, true, result.detail);
+    assert.equal(existsSync(join(cwd, 'later-edit.txt')), true);
+  });
+
+  test('a check result is evidence, bound to the tree it ran against', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    const { thread } = await laneWithWork(orch, cwd);
+
+    await orch.runCheck(thread.id, 'claude', 'test');
+
+    const [item] = foldEvidence(orch.store.events(thread.id));
+    assert.equal(item?.check?.name, 'test');
+    assert.equal(item?.check?.passed, true);
+    assert.equal(item?.kind, 'command');
+    assert.match(item?.ref.label ?? '', /^node -e/);
+    assert.match(item?.state.tree ?? '', /^[0-9a-f]{40}$/);
+    const evaluated = (await orch.gate(thread.id, 'claude')).candidate;
+    assert.equal(item?.state.tree, evaluated.tree, 'the evidence names the candidate itself');
+  });
+
+  test('a project that requires nothing integrates as it always did', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, {});
+    const { thread } = await laneWithWork(orch, cwd);
+
+    const result = await orch.integrateLane(thread.id, 'claude');
+
+    assert.equal(result.ok, true, result.detail);
+    const evaluated = gateEvents(orch, thread.id)[0];
+    assert.equal(evaluated?.kind === 'gate.evaluated' ? evaluated.requirements.length : -1, 0);
+  });
+
+  describe('override', () => {
+    test('is refused outright where the project has not permitted one', async () => {
+      const { orch } = await boot(makeConfig());
+      const cwd = makeRepo();
+      declare(cwd, { requires: ['test'] });
+      const { thread } = await laneWithWork(orch, cwd);
+
+      await assert.rejects(
+        () => orch.integrateLane(thread.id, 'claude', { actor: 'user', reason: 'trust me' }),
+        /does not permit overriding/,
+      );
+      assert.equal(existsSync(join(cwd, 'from-the-lane.txt')), false);
+    });
+
+    test('where permitted, it applies the work and records who said what', async () => {
+      const { orch } = await boot(makeConfig());
+      const cwd = makeRepo();
+      declare(cwd, { requires: ['test'], allowOverride: true });
+      const { thread } = await laneWithWork(orch, cwd);
+
+      const result = await orch.integrateLane(thread.id, 'claude', {
+        actor: 'user',
+        reason: 'the suite is broken on main, verified by hand',
+      });
+
+      assert.equal(result.ok, true, result.detail);
+      assert.equal(readFileSync(join(cwd, 'from-the-lane.txt'), 'utf8'), 'work\n');
+
+      const evaluated = gateEvents(orch, thread.id).pop();
+      assert.ok(evaluated?.kind === 'gate.evaluated');
+      assert.equal(evaluated.allowed, true);
+      assert.equal(evaluated.override?.actor, 'user');
+      assert.match(evaluated.override?.reason ?? '', /broken on main/);
+      // What was bypassed is in the same record as the bypass.
+      assert.equal(evaluated.requirements[0]?.state, 'missing');
+    });
+
+    test('has to say why', async () => {
+      const { orch } = await boot(makeConfig());
+      const cwd = makeRepo();
+      declare(cwd, { requires: ['test'], allowOverride: true });
+      const { thread } = await laneWithWork(orch, cwd);
+
+      await assert.rejects(
+        () => orch.integrateLane(thread.id, 'claude', { actor: 'user', reason: '  ' }),
+        /has to say why/,
+      );
+    });
+  });
+
+  test('refuses to run a check the workspace does not declare', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    const { thread } = await laneWithWork(orch, cwd);
+
+    await assert.rejects(() => orch.runCheck(thread.id, 'claude', 'nope'), /No verification command/);
+  });
+
+  test('the gate reads the same before integrating as it does during', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    const { thread } = await laneWithWork(orch, cwd);
+
+    const before = await orch.gate(thread.id, 'claude');
+    assert.equal(before.allowed, false);
+    assert.equal(before.requirements[0]?.state, 'missing');
+
+    await orch.runCheck(thread.id, 'claude', 'test');
+    const after = await orch.gate(thread.id, 'claude');
+
+    assert.equal(after.allowed, true);
+    assert.equal((await orch.integrateLane(thread.id, 'claude')).ok, true);
+  });
+});

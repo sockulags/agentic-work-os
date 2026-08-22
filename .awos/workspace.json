@@ -15,6 +15,10 @@
     { "name": "test", "command": "npm test" },
     { "name": "build", "command": "npm run build" }
   ],
+  "integration": {
+    "requires": ["typecheck", "test"],
+    "allowOverride": false
+  },
   "context": {
     "references": ["ARCHITECTURE.md", "README.md"],
     "notes": "The harness owns the canonical transcript; an agent's own session is a cache that may be lost. Handoff is full replay pasted ahead of the user's message, never an injection into the other agent's session. Agents publish artifacts by writing files into .awos/artifacts/ — a file convention, not a tool. Adapters speak each CLI's own stdio protocol directly; there is no Agent SDK in the dependency tree, and packages/protocol has no runtime dependencies at all."

@@ -136,6 +136,7 @@ function merge(
     agents: 'default',
     setup: 'default',
     verify: 'default',
+    integration: 'default',
     context: 'default',
   };
 
@@ -146,6 +147,9 @@ function merge(
     agents: [...AGENT_IDS] as AgentId[],
     setup: { command: '', timeoutMs: null },
     verify: [],
+    // Nothing required and no override: a project that has said nothing has not asked for
+    // a gate, and has certainly not asked for a way around one.
+    integration: { requires: [], allowOverride: false },
     context: { references: [], notes: '' },
     origins,
     sources: [shared.file],
@@ -182,6 +186,13 @@ function merge(
     if (d.verify !== undefined) {
       workspace.verify = d.verify;
       origins.verify = origin;
+    }
+    if (d.integration !== undefined) {
+      workspace.integration = {
+        requires: d.integration.requires ?? [],
+        allowOverride: d.integration.allowOverride ?? false,
+      };
+      origins.integration = origin;
     }
     if (d.context !== undefined) {
       workspace.context = {
