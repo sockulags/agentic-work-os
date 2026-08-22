@@ -215,6 +215,11 @@ export class HarnessServer {
         orchestrator.setPinnedContext(msg.threadId, msg.text);
         return { type: 'ok' };
 
+      case 'workspace.get': {
+        const cwd = this.#workspaceCwd(msg);
+        return { type: 'workspace', cwd, resolution: orchestrator.workspace(cwd) };
+      }
+
       case 'agents.probe':
         return { type: 'agents.probe', agents: await this.#probeAgents() };
 
@@ -223,6 +228,24 @@ export class HarnessServer {
         throw new Error(`Unhandled request: ${JSON.stringify(exhaustive)}`);
       }
     }
+  }
+
+  /**
+   * Which directory a `workspace.get` is asking about.
+   *
+   * Naming both a thread and a path is rejected rather than resolved by precedence: the
+   * two can disagree, and a caller that sent both does not know which one it meant.
+   */
+  #workspaceCwd(msg: { threadId?: string; cwd?: string }): string {
+    if (msg.threadId !== undefined && msg.cwd !== undefined) {
+      throw new Error('Ask about a thread or about a path, not both.');
+    }
+    if (msg.cwd !== undefined) return msg.cwd;
+    if (msg.threadId === undefined) throw new Error('workspace.get needs a threadId or a cwd.');
+
+    const thread = this.#orchestrator.store.get(msg.threadId);
+    if (!thread) throw new Error(`Unknown thread ${msg.threadId}`);
+    return thread.cwd;
   }
 
   async #probeAgents(): Promise<AgentAvailability[]> {

@@ -85,10 +85,46 @@ Every setting is an environment variable, read at core startup.
 | `AWOS_TOKEN` | *(random)* | Shared secret; the dev script pins it to `dev-token` |
 | `AWOS_REPLAY_MAX_CHARS` | `24000` | Ceiling on a replay block |
 | `AWOS_REPLAY_MAX_TOOL_OUTPUT` | `800` | Per-tool output truncation inside replay |
-| `AWOS_LANE_SETUP` | *(none)* | Command run once in each new lane, e.g. `npm install` |
-| `AWOS_LANE_SETUP_TIMEOUT_MS` | `600000` | How long that command may run |
+| `AWOS_LANE_SETUP` | *(none)* | Fallback lane setup command for directories with no workspace declaration |
+| `AWOS_LANE_SETUP_TIMEOUT_MS` | `600000` | How long that command may run when the workspace does not say |
 | `AWOS_APPROVAL_TIMEOUT_MS` | `600000` | Unanswered approvals auto-deny after this |
 | `AWOS_LOG_LEVEL` | `info` | `debug` traces every protocol message |
+
+## The project workspace
+
+Those variables describe the machine the harness runs on. What the *project* needs — which
+agents may work in it, how a fresh checkout is made usable, what verifying it means — is
+declared by the repository itself, in `.awos/workspace.json`, committed alongside the code:
+
+```json
+{
+  "version": 1,
+  "name": "agentic-work-os",
+  "repository": { "root": ".", "github": "sockulags/agentic-work-os" },
+  "agents": ["claude", "codex"],
+  "setup": { "command": "npm install" },
+  "verify": [
+    { "name": "typecheck", "command": "npm run typecheck" },
+    { "name": "test", "command": "npm test" }
+  ],
+  "context": {
+    "references": ["ARCHITECTURE.md"],
+    "notes": "Anything an agent should know before its first edit."
+  }
+}
+```
+
+Opening any directory inside the project finds it — resolution walks up to the nearest
+declaration — and the **Workspace** tab in the dock shows the result, where each value came
+from, and anything that failed to validate or points at a file that is not there. Every
+turn carries a summary of it into the prompt, so both agents work to the same rules without
+being told them again.
+
+The schema is closed: a setting it does not know is an error, which is what keeps
+credentials out of a file meant to be committed. Values that are true only on your machine
+go in `.awos/local/workspace.json`, which is not committed and overrides the shared file
+field by field. Named `verify` commands are declared here for later gates to reference;
+nothing runs them for you yet.
 
 ## How the handoff works
 
@@ -153,8 +189,8 @@ with the reason, leaving your files exactly as they were, and can be retried onc
 resolved the collision. Both the integration and the refusal go into the transcript.
 
 Two things to know. A worktree only holds what git tracks, so `node_modules` and build
-output are not in a fresh lane and its agent cannot run the tests until they are — set
-`AWOS_LANE_SETUP` to the command that fixes that for your project. And switching lanes on
+output are not in a fresh lane and its agent cannot run the tests until they are — that is
+what `setup.command` in the workspace declaration is for. And switching lanes on
 or off restarts both agents, which costs a full replay into their new sessions; the harness
 refuses to switch off while a lane still holds work you have not integrated.
 
@@ -202,7 +238,7 @@ in-flight save never appears as an artifact of its own. See
 
 ```bash
 npm run typecheck     # tsc across all packages
-npm test              # 395 tests: core (node:test) + ui (vitest)
+npm test              # 450 tests: core (node:test) + ui (vitest)
 npm run build         # protocol → core → ui
 ```
 

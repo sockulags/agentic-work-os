@@ -79,6 +79,8 @@ function stubHarness(overrides: Partial<Harness>): Harness {
     setPermissionMode: vi.fn(),
     setParallel: vi.fn(),
     integrateLane: vi.fn(),
+    workspace: null,
+    refreshWorkspace: vi.fn(),
     ...overrides,
   } as Harness;
 }

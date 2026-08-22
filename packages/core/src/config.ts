@@ -30,15 +30,17 @@ export interface HarnessConfig {
   replayMaxChars: number;
   replayMaxToolOutput: number;
   /**
-   * Shell command run once in each new lane, or empty to skip it.
+   * Fallback setup command for lanes in a directory that declares no workspace.
    *
    * A lane is a git worktree, so it holds the source but not what git ignores — for most
    * repos that means no `node_modules`, and an agent that cannot run the tests. What makes
-   * a lane usable is project knowledge the harness does not have, so it takes the command
-   * rather than guessing one.
+   * a lane usable is project knowledge, which is why it now belongs in the project's own
+   * `.awos/workspace.json`. This variable predates that file and still works where there
+   * is none, but a project that declares `setup.command` wins over it: the repository is
+   * the authority on how it installs, and a stale export in a shell is not.
    */
   laneSetup: string;
-  /** How long that command may run before the lane is offered without it. */
+  /** How long that command may run when the workspace does not say. */
   laneSetupTimeoutMs: number;
   /** How long to wait for a graceful interrupt before SIGTERM. */
   interruptGraceMs: number;

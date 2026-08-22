@@ -6,8 +6,11 @@ dist-bundle/
 .env.local
 .DS_Store
 
-# harness runtime state
-.awos/
+# The project's own .awos/ is version-controlled: the workspace declaration lives there
+# and is meant to be reviewed in pull requests like any other source file. Only the parts
+# that belong to one machine or one run are ignored.
+.awos/local/
+.awos/artifacts/
 data/
 
 # tauri

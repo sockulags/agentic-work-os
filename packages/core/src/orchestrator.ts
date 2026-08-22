@@ -11,6 +11,7 @@ import type {
   PlanItem,
   ThreadRuntimeState,
   ThreadSummary,
+  WorkspaceResolution,
 } from '@awos/protocol';
 import { PINNED_CONTEXT_MAX_CHARS } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
@@ -20,6 +21,8 @@ import { CodexAdapter } from './adapters/codex.js';
 import { PermissionBridge } from './permission-bridge.js';
 import { ThreadStore } from './store/thread-store.js';
 import { ContextStore, applyPinnedContext, buildPinnedContext } from './store/context-store.js';
+import { resolveWorkspace } from './workspace/resolve.js';
+import { applyWorkspace, buildWorkspaceBlock } from './workspace/prompt.js';
 import { applyReplay, buildReplay, hasReplay, stripReplay } from './store/replay.js';
 import { ArtifactWatcher } from './artifact-watcher.js';
 import { contentHash } from './store/artifact-store.js';
@@ -205,6 +208,17 @@ class Thread {
     const summary = this.#store.get(this.id);
     if (!summary) throw new Error(`Unknown thread ${this.id}`);
 
+    // Before anything is recorded or spawned: a project that lists which agents may work
+    // in it gets to refuse the others. Checked here rather than in the UI because the rule
+    // belongs to the repository, and the UI is one of several ways to reach this method.
+    const workspace = this.#workspace(summary.cwd);
+    if (workspace.status === 'ok' && !workspace.workspace.agents.includes(agent)) {
+      throw new Error(
+        `${workspace.workspace.name} allows ${workspace.workspace.agents.join(' and ')} here, not ${agent}. ` +
+          'Change the agents list in .awos/workspace.json to work with it.',
+      );
+    }
+
     // Provisioning is lazy for the same reason adapters are: a thread that only ever
     // talks to Claude should not pay for a Codex checkout.
     const cwd = this.#parallel ? await this.#lane(agent, summary.cwd) : summary.cwd;
@@ -248,7 +262,10 @@ class Thread {
       log.info('pinning context', { threadId: this.id, agent, chars: pinned.length });
     }
 
-    const payload = applyPinnedContext(pinned, applyReplay(replay.preamble, text));
+    const payload = applyWorkspace(
+      buildWorkspaceBlock(workspace),
+      applyPinnedContext(pinned, applyReplay(replay.preamble, text)),
+    );
     const adapter = this.#adapter(agent, cwd);
 
     // Claim the turn synchronously, before any await, so a second send to the same agent
@@ -390,6 +407,19 @@ class Thread {
 
   // -------------------------------------------------------------------------
 
+  /**
+   * The project settings in force for a directory.
+   *
+   * Resolved per call rather than held on the thread. The declaration is a file in the
+   * repository, so it can change between turns — a pull, a branch switch, an edit the
+   * agent itself made — and a thread that cached it at open would keep working to rules
+   * that are no longer in the repo. Two small synchronous reads, on the same path as the
+   * pinned notes, which are re-read for the same reason.
+   */
+  #workspace(cwd: string): WorkspaceResolution {
+    return resolveWorkspace(cwd, { laneSetup: this.#config.laneSetup });
+  }
+
   /** The agent's lane, provisioned on first use. Its path, ready to be a working directory. */
   async #lane(agent: AgentId, baseCwd: string): Promise<string> {
     const existing = this.#lanes.get(agent);
@@ -402,7 +432,7 @@ class Thread {
     this.#lanes.set(agent, result.lane);
     this.#watch(path, agent);
 
-    const setup = await this.#runLaneSetup(path);
+    const setup = await this.#runLaneSetup(path, baseCwd);
     this.#record(agent, {
       kind: 'lane.updated',
       status: 'provisioned',
@@ -414,22 +444,28 @@ class Thread {
   }
 
   /**
-   * Run the configured setup command in a fresh lane.
+   * Run the project's setup command in a fresh lane.
+   *
+   * The command comes from the workspace the *project* directory resolves to, not the
+   * lane's own — a lane is a checkout of that project and inherits its rules, and asking
+   * the copy would only find the same file anyway.
    *
    * Returns what to tell the user rather than throwing: a lane whose `npm install` failed
    * is still a lane the agent can read and edit in, and stopping the turn over it would be
    * a worse trade than saying so.
    */
-  async #runLaneSetup(cwd: string): Promise<string | null> {
-    const command = this.#config.laneSetup.trim();
+  async #runLaneSetup(cwd: string, projectCwd: string): Promise<string | null> {
+    const workspace = this.#workspace(projectCwd);
+    const setup = workspace.status === 'ok' ? workspace.workspace.setup : null;
+    const command = setup?.command.trim() ?? '';
     if (command === '') {
-      return 'files git ignores were not copied; set AWOS_LANE_SETUP to install dependencies here';
+      return 'files git ignores were not copied; declare setup.command in .awos/workspace.json to install dependencies here';
     }
 
     try {
       await execAsync(command, {
         cwd,
-        timeout: this.#config.laneSetupTimeoutMs,
+        timeout: setup?.timeoutMs ?? this.#config.laneSetupTimeoutMs,
         windowsHide: true,
         maxBuffer: 32 * 1024 * 1024,
       });
@@ -620,6 +656,18 @@ export class Orchestrator extends EventEmitter {
 
   setPermissionMode(threadId: string, mode: PermissionMode): void {
     this.#thread(threadId).setPermissionMode(mode);
+  }
+
+  /**
+   * The workspace a directory resolves to.
+   *
+   * Takes a path, not a thread id, because that is the whole point of the contract: a
+   * repository is a workspace before any conversation about it exists, and the same
+   * answer has to come back whether it is asked for by an open thread, by the new-thread
+   * form, or by a lane.
+   */
+  workspace(cwd: string): WorkspaceResolution {
+    return resolveWorkspace(cwd, { laneSetup: this.#config.laneSetup });
   }
 
   getPinnedContext(threadId: string): string {

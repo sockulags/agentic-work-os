@@ -6,6 +6,7 @@ import type {
   PermissionMode,
   ThreadRuntimeState,
   ThreadSummary,
+  WorkspaceResolution,
 } from '@awos/protocol';
 import { HarnessClient, resolveClientOptions, type ConnectionStatus } from '@/lib/client';
 import { TranscriptFolder } from '@/lib/transcript';
@@ -39,6 +40,18 @@ export interface PinnedContext {
 }
 
 /**
+ * The workspace the open thread's directory resolves to, tagged with that directory.
+ *
+ * Tagged rather than bare because the panel must never show one project's settings under
+ * another project's thread: a reply that arrives after a thread switch is dropped on the
+ * tag, the same way pinned notes are.
+ */
+export interface WorkspaceView {
+  cwd: string;
+  resolution: WorkspaceResolution;
+}
+
+/**
  * All harness state in one hook.
  *
  * The client is created once and kept in a ref; React state holds only what renders.
@@ -60,6 +73,7 @@ export function useHarness() {
   const [availability, setAvailability] = useState<AgentAvailability[]>([]);
   const [notice, setNotice] = useState<{ level: string; message: string } | null>(null);
   const [pinnedContext, setPinnedContext] = useState<PinnedContext | null>(null);
+  const [workspace, setWorkspace] = useState<WorkspaceView | null>(null);
 
   // Read inside the push handler without making it a dependency, which would tear down
   // and rebuild the subscription on every thread switch.
@@ -68,6 +82,9 @@ export function useHarness() {
 
   const pinnedRef = useRef<PinnedContext | null>(null);
   pinnedRef.current = pinnedContext;
+
+  /** The open thread's directory, for telling a stale workspace reply from a wanted one. */
+  const activeCwdRef = useRef<string | null>(null);
 
   /**
    * Write out whatever the notes editor is holding that the core does not have yet.
@@ -143,6 +160,8 @@ export function useHarness() {
             setEvents([]);
             setRuntime(null);
             setPinnedContext(null);
+            setWorkspace(null);
+            activeCwdRef.current = null;
           }
           return;
         case 'notice':
@@ -157,6 +176,25 @@ export function useHarness() {
       offPush();
     };
   }, [client]);
+
+  /**
+   * Re-read the declaration for a directory.
+   *
+   * Explicit rather than pushed, because the file is edited outside this app — in the
+   * repository, by a person or by an agent — and the core does not watch it. Called when a
+   * thread opens, and again whenever the user asks the panel to look now.
+   */
+  const refreshWorkspace = useCallback(
+    async (cwd: string) => {
+      const res = await client.request({ type: 'workspace.get', cwd }).catch(() => null);
+      if (res?.type !== 'workspace') return;
+      // Dropped rather than shown if the user has moved to a thread in another directory:
+      // settings under the wrong project name are worse than a panel that lags a moment.
+      if (activeCwdRef.current !== cwd) return;
+      setWorkspace({ cwd, resolution: res.resolution });
+    },
+    [client],
+  );
 
   const refreshThreads = useCallback(async () => {
     const res = await client.request({ type: 'thread.list' });
@@ -181,6 +219,11 @@ export function useHarness() {
       // Claimed here rather than waiting for the next render, so the pinned-context reply
       // below can tell whether it is still wanted.
       activeThreadRef.current = threadId;
+      activeCwdRef.current = res.thread.cwd;
+      // Blanked on a move to another directory only: reopening the same thread keeps the
+      // panel populated rather than flashing its empty state.
+      setWorkspace((prev) => (prev?.cwd === res.thread.cwd ? prev : null));
+      void refreshWorkspace(res.thread.cwd);
       setEvents(res.events);
       setRuntime(res.state);
       // Reopening the thread already on screen — a reconnect resync, a second click in
@@ -212,7 +255,7 @@ export function useHarness() {
           : { threadId, text: context.text, save: 'saved' },
       );
     },
-    [client, flushPinnedContext],
+    [client, flushPinnedContext, refreshWorkspace],
   );
 
   /**
@@ -238,6 +281,8 @@ export function useHarness() {
       setEvents([]);
       setRuntime(null);
       setPinnedContext(null);
+      setWorkspace(null);
+      activeCwdRef.current = null;
       setNotice({
         level: 'warn',
         message: 'That thread no longer exists on the harness.',
@@ -351,6 +396,8 @@ export function useHarness() {
     notice,
     pinnedContext,
     editPinnedContext,
+    workspace,
+    refreshWorkspace,
     dismissNotice: () => setNotice(null),
     openThread,
     createThread,

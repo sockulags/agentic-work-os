@@ -26,9 +26,9 @@ const log = createLogger('lanes');
  *
  * Files git ignores are not copied, because the snapshot respects `.gitignore`. For most
  * repos that means `node_modules` and build output: a lane can read and edit the source
- * but cannot run the tests until its dependencies exist. `AWOS_LANE_SETUP` names a command
- * to run once per lane for exactly that, and the harness stays out of the question of what
- * that command should be.
+ * but cannot run the tests until its dependencies exist. The project's own workspace
+ * declaration names a command to run once per lane for exactly that, and the harness stays
+ * out of the question of what that command should be.
  */
 
 export interface Lane {
