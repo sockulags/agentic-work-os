@@ -1,4 +1,4 @@
-import type { IssueRef, IssueSnapshot, WorkSourceError } from '@awos/protocol';
+import type { CatalogIssue, IssueRef, IssueSnapshot, WorkSourceError } from '@awos/protocol';
 import { runCapture } from '../util/spawn.js';
 import { createLogger } from '../util/logger.js';
 
@@ -25,8 +25,15 @@ export interface GitHubOptions {
   timeoutMs: number;
 }
 
+export const OPEN_ISSUE_LIMIT = 50;
+export const OPEN_ISSUE_FIELDS = 'number,url,title,state,labels,assignees,updatedAt';
+
 export type IssueResult =
   | { ok: true; ref: IssueRef; snapshot: IssueSnapshot }
+  | { ok: false; error: WorkSourceError };
+
+export type OpenIssueCatalogResult =
+  | { ok: true; issues: CatalogIssue[]; complete: boolean }
   | { ok: false; error: WorkSourceError };
 
 /** The fields we ask for, and therefore the ones the fake has to know about. */
@@ -41,6 +48,84 @@ interface GhIssue {
   author?: { login?: string };
   updatedAt?: string;
   url?: string;
+  isPullRequest?: boolean;
+  assignees?: Array<{ login?: string }>;
+}
+
+/**
+ * Fetch the bounded set used by the workspace issue catalog.
+ *
+ * `issue list` excludes pull requests at the GitHub CLI boundary, while the explicit
+ * field and state checks below keep the adapter honest if a wrapper or fixture returns
+ * mixed data. Bodies are intentionally not requested.
+ */
+export async function fetchOpenIssueCatalog(
+  repo: string,
+  options: GitHubOptions,
+): Promise<OpenIssueCatalogResult> {
+  const args = [
+    ...options.binArgs,
+    'issue',
+    'list',
+    '--repo',
+    repo,
+    '--state',
+    'open',
+    '--limit',
+    String(OPEN_ISSUE_LIMIT),
+    '--json',
+    OPEN_ISSUE_FIELDS,
+  ];
+
+  const result = await runCapture(options.bin, args, options.timeoutMs);
+  if (result.code !== 0) {
+    return { ok: false, error: classifyGitHubFailure(result.code, `${result.stderr}${result.stdout}`, options.bin) };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    return { ok: false, error: invalidGitHubJson(options.bin) };
+  }
+  if (!Array.isArray(parsed)) return { ok: false, error: invalidGitHubJson(options.bin) };
+
+  const issues: CatalogIssue[] = [];
+  for (const raw of parsed) {
+    if (!isRecord(raw)) return { ok: false, error: invalidGitHubJson(options.bin) };
+    if (raw['isPullRequest'] === true) continue;
+    if (typeof raw['state'] !== 'string') return { ok: false, error: invalidGitHubJson(options.bin) };
+    if (raw['state'].toUpperCase() !== 'OPEN') continue;
+
+    const number = raw['number'];
+    if (typeof number !== 'number' || !Number.isInteger(number) || number < 1) {
+      return { ok: false, error: invalidGitHubJson(options.bin) };
+    }
+
+    const title = requiredString(raw['title']);
+    const url = requiredString(raw['url']);
+    const updatedAt = requiredString(raw['updatedAt']);
+    const labels = names(raw['labels'], 'name');
+    const assignees = names(raw['assignees'], 'login');
+    if (title === null || url === null || updatedAt === null || labels === null || assignees === null) {
+      return { ok: false, error: invalidGitHubJson(options.bin) };
+    }
+    issues.push({
+      number,
+      url,
+      title,
+      state: 'OPEN',
+      labels,
+      assignees,
+      updatedAt,
+    });
+  }
+
+  return {
+    ok: true,
+    issues: issues.slice(0, OPEN_ISSUE_LIMIT),
+    complete: parsed.length < OPEN_ISSUE_LIMIT,
+  };
 }
 
 export async function fetchIssue(
@@ -60,7 +145,7 @@ export async function fetchIssue(
 
   const result = await runCapture(options.bin, args, options.timeoutMs);
   if (result.code !== 0) {
-    const error = classify(result.code, `${result.stderr}${result.stdout}`, options.bin);
+    const error = classifyGitHubFailure(result.code, `${result.stderr}${result.stdout}`, options.bin);
     log.warn('issue fetch failed', { repo: ref.repo, number: ref.number, kind: error.kind });
     return { ok: false, error };
   }
@@ -71,11 +156,7 @@ export async function fetchIssue(
   } catch {
     return {
       ok: false,
-      error: {
-        kind: 'unknown',
-        message: `\`${options.bin}\` returned something that is not JSON. Check that it is the GitHub CLI and not another program by that name.`,
-        retryable: false,
-      },
+      error: invalidGitHubJson(options.bin),
     };
   }
 
@@ -108,7 +189,7 @@ export async function fetchIssue(
  * plain "unknown" that still shows what `gh` said, so a wording change downgrades the
  * message rather than breaking the feature.
  */
-function classify(code: number | null, output: string, bin: string): WorkSourceError {
+export function classifyGitHubFailure(code: number | null, output: string, bin: string): WorkSourceError {
   const text = output.toLowerCase();
 
   if (code === null && text.includes('enoent')) {
@@ -170,6 +251,34 @@ function classify(code: number | null, output: string, bin: string): WorkSourceE
     message: firstLine(output) || `\`${bin}\` failed with exit code ${code}.`,
     retryable: true,
   };
+}
+
+function invalidGitHubJson(bin: string): WorkSourceError {
+  return {
+    kind: 'unknown',
+    message: `\`${bin}\` returned something that is not the expected GitHub JSON. Check that it is the GitHub CLI and not another program by that name.`,
+    retryable: false,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function requiredString(value: unknown): string | null {
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+function names(value: unknown, field: 'name' | 'login'): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const result: string[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) return null;
+    const name = requiredString(entry[field]);
+    if (name === null) return null;
+    result.push(name);
+  }
+  return result;
 }
 
 function firstLine(text: string): string {
