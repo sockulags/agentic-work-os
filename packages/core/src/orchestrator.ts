@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { exec } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 import { promisify } from 'node:util';
 import type {
   AdapterEvent,
@@ -29,11 +29,16 @@ import type {
   IssueCatalogSource,
   IssueCatalogOverlay,
   CatalogRunEvidence,
+  CatalogIssue,
+  IssueOpenRefusalCode,
+  IssueOpenResult,
+  IssuePreparation,
+  IssueRouteProjection,
 } from '@awos/protocol';
 import { AGENT_IDS, PINNED_CONTEXT_MAX_CHARS, RETAINED_FILE, RUN_CONTEXT_MAX_CHARS } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
 import type { WorkerAdapter, AdapterContext } from './adapters/agent.js';
-import { createWorkerAdapter } from './adapters/registry.js';
+import { createWorkerAdapter, probeWorkerProfiles } from './adapters/registry.js';
 import { isQwenResumeNotFoundError } from './adapters/qwen-code.js';
 import { PermissionBridge } from './permission-bridge.js';
 import { ThreadStore } from './store/thread-store.js';
@@ -52,6 +57,8 @@ import {
 import { foldEvidence, foldRetained, selectedForContext } from './work/ledger.js';
 import { evaluateGate, explainGate, type GateDecision } from './work/gate.js';
 import { fetchIssue, parseIssueRef } from './work/github.js';
+import { explainIssueRoute } from './work/issue-route-presentation.js';
+import { projectIssueRoute } from './work/issue-route.js';
 import { applyReplay, buildReplay, hasReplay, stripReplay } from './store/replay.js';
 import { ArtifactWatcher } from './artifact-watcher.js';
 import { contentHash } from './store/artifact-store.js';
@@ -98,6 +105,57 @@ function asRetainedKind(value: unknown): RetainedKind | null {
 /** How many files a patch touches, for a one-line report of what an integration moved. */
 function countChangedFiles(patch: string): number {
   return patch.split('\n').filter((line) => line.startsWith('diff --git ')).length;
+}
+
+function issueKey(workspaceRoot: string, repository: string, number: number): string {
+  return `${workspaceRoot}\0${repository}\0${number}`;
+}
+
+function asCatalogIssue(item: WorkItem): CatalogIssue {
+  return {
+    number: item.source.number,
+    url: item.source.url,
+    title: item.snapshot.title,
+    state: 'OPEN',
+    labels: [...item.snapshot.labels],
+    assignees: [],
+    updatedAt: item.snapshot.revision,
+  };
+}
+
+function routeSummary(projection: IssueRouteProjection): IssuePreparation['route'] {
+  return {
+    routeId: projection.route.routeId,
+    stepId: projection.route.stepId,
+    action: projection.action.projectAction,
+    role: projection.action.responsibleRole,
+  };
+}
+
+function instructionInput(item: WorkItem): IssuePreparation['instruction'] {
+  return {
+    kind: 'github-issue',
+    repository: item.source.repo,
+    issueNumber: item.source.number,
+    url: item.source.url,
+    title: item.snapshot.title,
+    revision: item.snapshot.revision,
+  };
+}
+
+function issueRefusal(
+  code: IssueOpenRefusalCode,
+  message: string,
+  route?: IssueRouteProjection,
+  sourceError?: WorkSourceError,
+): IssueOpenResult {
+  return {
+    ok: false,
+    code,
+    message,
+    ...(route === undefined ? {} : { route }),
+    ...(sourceError === undefined ? {} : { sourceError }),
+  };
 }
 
 export interface OrchestratorEvents {
@@ -1142,6 +1200,7 @@ export class Orchestrator extends EventEmitter {
   readonly #config: HarnessConfig;
   readonly #bridge = new PermissionBridge();
   readonly #threads = new Map<string, Thread>();
+  readonly #issueLocks = new Map<string, Promise<void>>();
 
   constructor(config: HarnessConfig) {
     super();
@@ -1163,10 +1222,97 @@ export class Orchestrator extends EventEmitter {
     await this.#bridge.close();
   }
 
-  createThread(options: { cwd: string; title?: string; agent?: AgentId }): ThreadSummary {
+  createThread(options: { cwd: string; title?: string; agent?: AgentId; workItemId?: string | null }): ThreadSummary {
     const summary = this.store.create(options);
     this.emit('thread', summary);
     return summary;
+  }
+
+  /**
+   * Prepare one issue for a worker without starting a turn.
+   *
+   * The stable key is resolved before the lock is acquired. Once inside it, continuation is
+   * deliberately the first read: a linked local thread is enough to answer, even when GitHub,
+   * the catalog, or the machine's worker installation is unavailable.
+   */
+  async prepareIssue(input: {
+    cwd?: string;
+    threadId?: string;
+    number: number;
+  }): Promise<IssueOpenResult> {
+    if ((input.cwd === undefined) === (input.threadId === undefined)) {
+      return issueRefusal('invalid-request', 'Provide exactly one of cwd or threadId.');
+    }
+    if (!Number.isInteger(input.number) || input.number < 1) {
+      return issueRefusal('invalid-request', 'Issue number must be a positive whole number.');
+    }
+
+    let cwd: string;
+    if (input.threadId !== undefined) {
+      const thread = this.store.get(input.threadId);
+      if (!thread) return issueRefusal('thread-not-found', `Unknown thread ${input.threadId}.`);
+      cwd = thread.cwd;
+
+      const item = thread.workItemId === null ? undefined : this.work.get(thread.workItemId);
+      if (item?.source.number === input.number) {
+        const continued = await this.#withIssueLock(
+          issueKey(item.workspaceRoot, item.source.repo, input.number),
+          async () => this.#continueLocalItem(item.id, cwd),
+        );
+        if (continued !== null) return continued;
+      }
+    } else {
+      cwd = input.cwd?.trim() ?? '';
+      if (cwd === '') return issueRefusal('invalid-request', 'cwd must be a non-empty directory path.');
+
+      const normalizedCwd = resolvePath(cwd);
+      const candidates = this.work.list(normalizedCwd)
+        .filter((item) => item.workspaceRoot === normalizedCwd && item.source.number === input.number)
+        .map((item) => ({ item, thread: this.#canonicalLinkedThread(item.id) }))
+        .filter((entry): entry is { item: WorkItem; thread: ThreadSummary } => entry.thread !== undefined)
+        .sort((a, b) => b.thread.updatedAt - a.thread.updatedAt || a.thread.id.localeCompare(b.thread.id));
+      const local = candidates[0];
+      if (local) {
+        const continued = await this.#withIssueLock(
+          issueKey(local.item.workspaceRoot, local.item.source.repo, input.number),
+          async () => this.#continueLocalItem(local.item.id, cwd),
+        );
+        if (continued !== null) return continued;
+      }
+    }
+
+    const resolution = this.workspace(cwd);
+    if (resolution.status === 'none') {
+      return issueRefusal(
+        'workspace-not-found',
+        'This directory is not a declared workspace. Declare .awos/workspace.json first.',
+      );
+    }
+    if (resolution.status === 'invalid') {
+      const routingProblem = resolution.problems.some((problem) => /^(roles|steps|routes)(\.|\[|$)/.test(problem.path));
+      return issueRefusal(
+        routingProblem ? 'route-invalid' : 'workspace-invalid',
+        `The workspace declaration is invalid. Fix it before taking this issue. ${resolution.problems[0]?.message ?? ''}`.trim(),
+      );
+    }
+
+    const repository = resolution.workspace.repository.github;
+    if (repository === null) {
+      return issueRefusal(
+        'repository-not-configured',
+        'This workspace does not declare repository.github, so the issue cannot be resolved.',
+      );
+    }
+
+    const workspaceRoot = resolution.workspace.root;
+    const key = issueKey(workspaceRoot, repository, input.number);
+    return this.#withIssueLock(key, () => this.#prepareIssueLocked({
+      cwd,
+      number: input.number,
+      workspaceRoot,
+      repository,
+      resolution,
+    }));
   }
 
   deleteThread(threadId: string): void {
@@ -1458,6 +1604,350 @@ export class Orchestrator extends EventEmitter {
   retainedFor(threadId: string): RetainedItem[] {
     const item = this.workItem(threadId);
     return item === null ? [] : this.#thread(threadId).retained(item.id);
+  }
+
+  async #withIssueLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.#issueLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.#issueLocks.set(key, current);
+
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.#issueLocks.get(key) === current) this.#issueLocks.delete(key);
+    }
+  }
+
+  async #prepareIssueLocked(input: {
+    cwd: string;
+    number: number;
+    workspaceRoot: string;
+    repository: string;
+    resolution: Extract<WorkspaceResolution, { status: 'ok' }>;
+  }): Promise<IssueOpenResult> {
+    const existing = this.work.find(input.workspaceRoot, input.repository, input.number);
+    if (existing) {
+      const linked = this.#canonicalLinkedThread(existing.id);
+      if (linked) return this.#continuedIssue(linked, existing, input.resolution);
+    }
+
+    return this.#takeIssue(input);
+  }
+
+  #continuedIssue(
+    thread: ThreadSummary,
+    item: WorkItem,
+    resolution: Extract<WorkspaceResolution, { status: 'ok' }> | null,
+  ): IssueOpenResult {
+    const issue = asCatalogIssue(item);
+    const projection = resolution === null ? null : projectIssueRoute({
+      workspace: resolution,
+      issue,
+      source: {
+        workspaceRoot: item.workspaceRoot,
+        repository: item.source.repo,
+        freshness: 'current',
+        complete: true,
+        successfulAt: item.lastRefreshedAt,
+        issues: [issue],
+        error: null,
+      },
+      // Continuation is local and does not require the saved role to remain selectable.
+      roleSelection: { status: 'unconfigured', roleId: null, role: null },
+      availability: [],
+    });
+
+    return {
+      ok: true,
+      preparation: {
+        threadId: thread.id,
+        workItemId: item.id,
+        mode: 'continued',
+        route: projection === null ? null : routeSummary(projection),
+        allowedWorkerProfileIds: projection === null ? [] : [...projection.action.allowedWorkerProfileIds],
+        currentlyAvailableWorkerProfileIds: [],
+        workerAvailability: 'not-checked',
+        instruction: instructionInput(item),
+      },
+    };
+  }
+
+  #canonicalLinkedThread(workItemId: string): ThreadSummary | undefined {
+    return this.store.list()
+      .filter((thread) => thread.workItemId === workItemId)
+      .sort((a, b) => b.updatedAt - a.updatedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0];
+  }
+
+  async #continueLocalItem(workItemId: string, cwd: string): Promise<IssueOpenResult | null> {
+    const item = this.work.get(workItemId);
+    const linked = item === undefined ? undefined : this.#canonicalLinkedThread(item.id);
+    if (!item || !linked) return null;
+
+    const resolution = this.workspace(cwd);
+    const matchingResolution = resolution.status === 'ok' &&
+      resolution.workspace.root === item.workspaceRoot &&
+      resolution.workspace.repository.github === item.source.repo
+      ? resolution
+      : null;
+    return this.#continuedIssue(linked, item, matchingResolution);
+  }
+
+  async #takeIssue(input: {
+    cwd: string;
+    number: number;
+    workspaceRoot: string;
+    repository: string;
+    resolution: Extract<WorkspaceResolution, { status: 'ok' }>;
+  }): Promise<IssueOpenResult> {
+    const source = this.catalog.read({ workspaceRoot: input.workspaceRoot, repository: input.repository });
+    const catalogIssue = source.issues.find((issue) => issue.number === input.number);
+
+    if (source.freshness !== 'current') {
+      const route = catalogIssue
+        ? projectIssueRoute({
+            workspace: input.resolution,
+            issue: catalogIssue,
+            source,
+            roleSelection: { status: 'unconfigured', roleId: null, role: null },
+            availability: [],
+          })
+        : undefined;
+      return issueRefusal(
+        'catalog-not-current',
+        route ? explainIssueRoute(route) : 'Refresh the issue catalog before taking this issue.',
+        route,
+      );
+    }
+
+    if (!catalogIssue) {
+      return issueRefusal(
+        'issue-absent',
+        `Issue #${input.number} is not present in the current open-issue catalog.`,
+      );
+    }
+    if (catalogIssue.state !== 'OPEN') {
+      return issueRefusal('issue-not-open', `Issue #${input.number} is not open.`);
+    }
+
+    const roleSelection = this.workspaceRoleSelection(input.cwd);
+    const initialProjection = projectIssueRoute({
+      workspace: input.resolution,
+      issue: catalogIssue,
+      source,
+      roleSelection,
+      availability: [],
+    });
+    if (initialProjection.action.reason !== 'worker-unavailable') {
+      const refusal = this.#projectionRefusal(initialProjection);
+      if (refusal !== null) return refusal;
+    }
+
+    let availability;
+    try {
+      availability = await probeWorkerProfiles(this.#config, initialProjection.action.allowedWorkerProfileIds);
+    } catch (error) {
+      const detail = error instanceof Error && error.message !== '' ? ` ${error.message}` : '';
+      return issueRefusal('workers-unavailable', `Could not check the allowed worker profiles.${detail}`);
+    }
+
+    const availableProjection = projectIssueRoute({
+      workspace: input.resolution,
+      issue: catalogIssue,
+      source,
+      roleSelection,
+      availability,
+    });
+    if (availableProjection.action.status !== 'available') {
+      return this.#projectionRefusal(availableProjection) ?? issueRefusal(
+        'workers-unavailable',
+        explainIssueRoute(availableProjection),
+        availableProjection,
+      );
+    }
+
+    let fetched;
+    try {
+      fetched = await fetchIssue(
+        { repo: input.repository, number: input.number },
+        this.#github(),
+      );
+    } catch (error) {
+      const detail = error instanceof Error && error.message !== '' ? ` ${error.message}` : '';
+      return issueRefusal('source-fetch-failed', `Could not fetch issue #${input.number}.${detail}`);
+    }
+    if (!fetched.ok) {
+      return issueRefusal(
+        fetched.error.kind === 'not-found' ? 'issue-absent' : 'source-fetch-failed',
+        fetched.error.message,
+        availableProjection,
+        fetched.error,
+      );
+    }
+    if (fetched.ref.number !== input.number) {
+      return issueRefusal(
+        'source-fetch-failed',
+        `GitHub returned issue #${fetched.ref.number} while fetching issue #${input.number}.`,
+        availableProjection,
+      );
+    }
+    if (fetched.snapshot.state.toUpperCase() !== 'OPEN') {
+      return issueRefusal('issue-not-open', `Issue #${input.number} is no longer open.`, availableProjection);
+    }
+
+    const fullIssue: CatalogIssue = {
+      ...catalogIssue,
+      number: fetched.ref.number,
+      url: fetched.ref.url,
+      title: fetched.snapshot.title,
+      state: 'OPEN',
+      labels: [...fetched.snapshot.labels],
+      updatedAt: fetched.snapshot.revision,
+    };
+    const currentResolution = this.workspace(input.cwd);
+    if (currentResolution.status === 'none') {
+      return issueRefusal('workspace-not-found', 'The workspace changed while the issue was being prepared. Retry after restoring its declaration.');
+    }
+    if (currentResolution.status === 'invalid') {
+      const routingProblem = currentResolution.problems.some((problem) => /^(roles|steps|routes)(\.|\[|$)/.test(problem.path));
+      return issueRefusal(
+        routingProblem ? 'route-invalid' : 'workspace-invalid',
+        `The workspace changed and is now invalid. ${currentResolution.problems[0]?.message ?? ''}`.trim(),
+      );
+    }
+    const currentRepository = currentResolution.workspace.repository.github;
+    if (currentRepository === null) {
+      return issueRefusal('repository-not-configured', 'The workspace no longer declares repository.github. Retry after restoring it.');
+    }
+    if (currentResolution.workspace.root !== input.workspaceRoot || currentRepository !== input.repository) {
+      return issueRefusal('route-changed', 'The workspace or repository changed while the issue was being prepared. Retry the command.');
+    }
+
+    const currentRoleSelection = this.workspaceRoleSelection(input.cwd);
+    const sourceProjection = projectIssueRoute({
+      workspace: input.resolution,
+      issue: fullIssue,
+      source: { ...source, issues: [fullIssue], error: null },
+      roleSelection: currentRoleSelection,
+      availability: [],
+    });
+    if (sourceProjection.route.status !== 'routed') {
+      return this.#projectionRefusal(sourceProjection) ?? issueRefusal(
+        'route-invalid',
+        explainIssueRoute(sourceProjection),
+        sourceProjection,
+      );
+    }
+    const policyIdentity = (projection: IssueRouteProjection) => JSON.stringify({
+      routeId: projection.route.routeId,
+      stepId: projection.route.stepId,
+      role: projection.action.responsibleRole,
+      action: projection.action.projectAction,
+      workers: projection.action.allowedWorkerProfileIds,
+    });
+    if (policyIdentity(sourceProjection) !== policyIdentity(availableProjection)) {
+      return issueRefusal(
+        'route-changed',
+        'The issue route changed while it was being prepared. Refresh the catalog and retry the command.',
+        sourceProjection,
+      );
+    }
+    const currentProjection = projectIssueRoute({
+      workspace: currentResolution,
+      issue: fullIssue,
+      source: { ...source, issues: [fullIssue], error: null },
+      roleSelection: currentRoleSelection,
+      availability: [],
+    });
+    if (
+      currentProjection.route.status !== 'routed' ||
+      policyIdentity(currentProjection) !== policyIdentity(sourceProjection)
+    ) {
+      return issueRefusal(
+        'route-changed',
+        'Workspace routing policy changed while the issue was being prepared. Retry the command.',
+        currentProjection,
+      );
+    }
+    const authorizedProjection = projectIssueRoute({
+      workspace: currentResolution,
+      issue: fullIssue,
+      source: { ...source, issues: [fullIssue], error: null },
+      roleSelection: currentRoleSelection,
+      availability,
+    });
+    if (authorizedProjection.action.status !== 'available') {
+      return this.#projectionRefusal(authorizedProjection) ?? issueRefusal(
+        'workers-unavailable',
+        explainIssueRoute(authorizedProjection),
+        authorizedProjection,
+      );
+    }
+
+    let item: WorkItem;
+    try {
+      item = this.work.record({
+        workspaceRoot: input.workspaceRoot,
+        ref: fetched.ref,
+        snapshot: fetched.snapshot,
+      });
+    } catch (error) {
+      const detail = error instanceof Error && error.message !== '' ? ` ${error.message}` : '';
+      return issueRefusal('persistence-failed', `Could not persist the issue work item.${detail}`);
+    }
+
+    let thread: ThreadSummary;
+    try {
+      thread = this.store.create({
+        cwd: input.cwd,
+        title: fetched.snapshot.title,
+        workItemId: item.id,
+      });
+    } catch (error) {
+      const detail = error instanceof Error && error.message !== '' ? ` ${error.message}` : '';
+      return issueRefusal('persistence-failed', `Could not persist the issue thread.${detail}`);
+    }
+    this.emit('thread', thread);
+
+    return {
+      ok: true,
+      preparation: {
+        threadId: thread.id,
+        workItemId: item.id,
+        mode: 'taken',
+        route: routeSummary(authorizedProjection),
+        allowedWorkerProfileIds: [...authorizedProjection.action.allowedWorkerProfileIds],
+        currentlyAvailableWorkerProfileIds: authorizedProjection.action.availability
+          .filter((fact) => fact.available)
+          .map((fact) => fact.profileId),
+        workerAvailability: 'checked',
+        instruction: instructionInput(item),
+      },
+    };
+  }
+
+  #projectionRefusal(projection: IssueRouteProjection): IssueOpenResult | null {
+    const message = explainIssueRoute(projection);
+    switch (projection.action.reason) {
+      case 'invalid-workspace':
+        return issueRefusal('route-invalid', message, projection);
+      case 'not-routed':
+        return issueRefusal('route-unrouted', message, projection);
+      case 'conflicted-route':
+        return issueRefusal('route-conflict', message, projection);
+      case 'refresh-required':
+        return issueRefusal('catalog-not-current', message, projection);
+      case 'role-required':
+        return issueRefusal('role-required', message, projection);
+      case 'role-mismatch':
+        return issueRefusal('role-mismatch', message, projection);
+      case 'worker-unavailable':
+        return issueRefusal('workers-unavailable', message, projection);
+      case 'available':
+        return null;
+    }
   }
 
   #github(): { bin: string; binArgs: string[]; timeoutMs: number } {

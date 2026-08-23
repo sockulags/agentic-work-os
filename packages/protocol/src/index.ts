@@ -8,6 +8,7 @@ export * from './work.js';
 export * from './evidence.js';
 export * from './catalog.js';
 export * from './issue-route.js';
+export * from './issue-open.js';
 export * as ClaudeWire from './claude-wire.js';
 export * as CodexWire from './codex-wire.js';
 export {

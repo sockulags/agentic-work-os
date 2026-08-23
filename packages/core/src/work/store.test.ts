@@ -117,6 +117,43 @@ describe('WorkItemStore', () => {
     assert.equal(revived.list('/repo').length, 1);
   });
 
+  test('a failed overwrite preserves the prior item across restart', () => {
+    const dir = tempDir();
+    const original = new WorkItemStore(dir).record({ workspaceRoot: '/repo', ref, snapshot: snapshot() });
+    const failingWrite = ((path: Parameters<typeof writeFileSync>[0], data: Parameters<typeof writeFileSync>[1]) => {
+      writeFileSync(path, String(data).slice(0, 12), 'utf8');
+      throw new Error('injected write failure');
+    }) as typeof writeFileSync;
+    const store = new WorkItemStore(dir, { writeFile: failingWrite });
+
+    assert.throws(
+      () => store.record({ workspaceRoot: '/repo', ref, snapshot: snapshot({ title: 'Must not persist' }) }),
+      /injected write failure/,
+    );
+
+    const revived = new WorkItemStore(dir);
+    assert.deepEqual(revived.get(original.id), original);
+    assert.deepEqual(readdirSync(join(dir, 'work-items')), [`${original.id}.json`]);
+  });
+
+  test('a failed new write leaves no loadable item or temporary debris', () => {
+    const dir = tempDir();
+    const failingWrite = ((path: Parameters<typeof writeFileSync>[0], data: Parameters<typeof writeFileSync>[1]) => {
+      writeFileSync(path, String(data).slice(0, 12), 'utf8');
+      throw new Error('injected write failure');
+    }) as typeof writeFileSync;
+    const store = new WorkItemStore(dir, { writeFile: failingWrite });
+
+    assert.throws(
+      () => store.record({ workspaceRoot: '/repo', ref, snapshot: snapshot() }),
+      /injected write failure/,
+    );
+
+    const revived = new WorkItemStore(dir);
+    assert.deepEqual(revived.list('/repo'), []);
+    assert.deepEqual(readdirSync(join(dir, 'work-items')), []);
+  });
+
   test('removing an item removes its file', () => {
     const dir = tempDir();
     const store = new WorkItemStore(dir);

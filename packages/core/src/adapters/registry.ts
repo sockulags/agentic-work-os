@@ -1,4 +1,5 @@
-import type { AgentAvailability, AgentId, ModelTarget, WorkerProfile } from '@awos/protocol';
+import type { AgentAvailability, AgentId, ModelTarget, WorkerProfile, WorkerProfileId } from '@awos/protocol';
+import { AGENT_IDS } from '@awos/protocol';
 import type { HarnessConfig } from '../config.js';
 import { runCapture } from '../util/spawn.js';
 import type { AdapterContext, AgentCapabilities, WorkerAdapter } from './agent.js';
@@ -131,8 +132,14 @@ export function createWorkerAdapter(id: AgentId, context: AdapterContext, regist
   return factory.create(context, target);
 }
 
-export async function probeWorkerProfiles(config: HarnessConfig): Promise<AgentAvailability[]> {
-  return Promise.all(WORKER_PROFILE_REGISTRY.map(async (definition) => {
+export async function probeWorkerProfiles(
+  config: HarnessConfig,
+  profileIds: readonly WorkerProfileId[] = AGENT_IDS,
+): Promise<AgentAvailability[]> {
+  const definitions = profileIds
+    .map((profileId) => WORKER_PROFILE_REGISTRY.find((candidate) => candidate.id === profileId))
+    .filter((definition): definition is WorkerProfileDefinition => definition !== undefined);
+  return Promise.all(definitions.map(async (definition) => {
     const profile = workerProfile(definition.id, config);
     const result = await definition.probe(config, profile.target);
     return {

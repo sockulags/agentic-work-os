@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { IssueRef, IssueSnapshot, WorkItem } from '@awos/protocol';
 import { createLogger } from '../util/logger.js';
@@ -24,15 +24,24 @@ const log = createLogger('work');
 export class WorkItemStore {
   readonly #root: string;
   readonly #items = new Map<string, WorkItem>();
+  readonly #writeFile: typeof writeFileSync;
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, options: { writeFile?: typeof writeFileSync } = {}) {
     this.#root = join(dataDir, 'work-items');
+    this.#writeFile = options.writeFile ?? writeFileSync;
     mkdirSync(this.#root, { recursive: true });
     this.#loadAll();
   }
 
   get(id: string): WorkItem | undefined {
     return this.#items.get(id);
+  }
+
+  /** Find the stable workspace/repository/issue identity without contacting the source. */
+  find(workspaceRoot: string, repo: string, number: number): WorkItem | undefined {
+    return [...this.#items.values()].find(
+      (item) => item.workspaceRoot === workspaceRoot && item.source.repo === repo && item.source.number === number,
+    );
   }
 
   /** Everything attached to one workspace, most recently attached first. */
@@ -80,8 +89,8 @@ export class WorkItemStore {
           lastRefreshedAt: now,
         };
 
+    this.#persist(item);
     this.#items.set(item.id, item);
-    writeFileSync(this.#path(item.id), JSON.stringify(item, null, 2), 'utf8');
     return item;
   }
 
@@ -110,9 +119,57 @@ export class WorkItemStore {
     return join(this.#root, `${id}.json`);
   }
 
+  #persist(item: WorkItem): void {
+    const primary = this.#path(item.id);
+    const temporary = `${primary}.tmp`;
+    const backup = `${primary}.bak`;
+
+    rmSync(temporary, { force: true });
+    try {
+      this.#writeFile(temporary, JSON.stringify(item, null, 2), 'utf8');
+      rmSync(backup, { force: true });
+      if (existsSync(primary)) renameSync(primary, backup);
+      try {
+        renameSync(temporary, primary);
+      } catch (error) {
+        if (!existsSync(primary) && existsSync(backup)) renameSync(backup, primary);
+        throw error;
+      }
+      try {
+        rmSync(backup, { force: true });
+      } catch (error) {
+        log.error('could not remove committed work item backup', { id: item.id, message: (error as Error).message });
+      }
+    } catch (error) {
+      rmSync(temporary, { force: true });
+      if (!existsSync(primary) && existsSync(backup)) renameSync(backup, primary);
+      throw error;
+    }
+  }
+
   #loadAll(): void {
     let files: string[];
     try {
+      const entries = readdirSync(this.#root);
+      for (const name of entries.filter((candidate) => candidate.endsWith('.json.tmp'))) {
+        rmSync(join(this.#root, name), { force: true });
+      }
+      for (const name of entries.filter((candidate) => candidate.endsWith('.json.bak'))) {
+        const backup = join(this.#root, name);
+        const primary = backup.slice(0, -4);
+        if (existsSync(primary)) {
+          rmSync(backup, { force: true });
+          continue;
+        }
+        try {
+          const item = JSON.parse(readFileSync(backup, 'utf8')) as WorkItem;
+          if (typeof item.id === 'string' && `${item.id}.json` === name.slice(0, -4)) {
+            renameSync(backup, primary);
+          }
+        } catch (err) {
+          log.error('skipping unreadable work item backup', { name, message: (err as Error).message });
+        }
+      }
       files = readdirSync(this.#root).filter((name) => name.endsWith('.json'));
     } catch {
       return;

@@ -319,6 +319,16 @@ export class HarnessServer {
         return { type: 'catalog', cwd, ...(await orchestrator.refreshIssueCatalog(cwd)) };
       }
 
+      case 'issue.open':
+        return {
+          type: 'issue.open',
+          result: await orchestrator.prepareIssue({
+            ...(msg.cwd === undefined ? {} : { cwd: msg.cwd }),
+            ...(msg.threadId === undefined ? {} : { threadId: msg.threadId }),
+            number: msg.number,
+          }),
+        };
+
       case 'agents.probe':
         return { type: 'agents.probe', agents: await this.#probeAgents() };
 
