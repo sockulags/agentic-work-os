@@ -1,4 +1,3 @@
-import type { AgentId } from '@awos/protocol';
 import { cn } from '@/lib/utils';
 
 type WorkerStyleVars = React.CSSProperties & { '--worker-hue': string };
@@ -27,7 +26,10 @@ const WORKER_HUES = [34, 164, 205, 270, 320, 12, 92, 236] as const;
 export function getAgentStyle(agent: string, label?: string): AgentStyle {
   let hash = 0;
   for (const char of agent) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-  const hue = WORKER_HUES[hash % WORKER_HUES.length] ?? WORKER_HUES[0];
+  // A profile that has not arrived in the server metadata is still readable, but does not
+  // pretend that its generated hue is an established identity. Known profiles keep their
+  // stable generic palette treatment; unknown profiles use the neutral worker hue.
+  const hue = label === undefined ? 220 : WORKER_HUES[hash % WORKER_HUES.length] ?? WORKER_HUES[0];
 
   return {
     label: label ?? humanizeProfileId(agent),
@@ -48,12 +50,12 @@ function humanizeProfileId(profileId: string): string {
     .join(' ');
 }
 
-export function AgentBadge({
+export function WorkerBadge({
   agent,
   label,
   className,
 }: {
-  agent: AgentId;
+  agent: string;
   label?: string;
   className?: string;
 }): React.JSX.Element {
@@ -75,3 +77,6 @@ export function AgentBadge({
     </span>
   );
 }
+
+/** Compatibility name for callers that still use the pre-worker-profile terminology. */
+export const AgentBadge = WorkerBadge;

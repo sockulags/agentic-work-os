@@ -70,12 +70,13 @@ describe('ToolBlock header', () => {
 });
 
 describe('ToolBlock status pill', () => {
-  test('a running tool shows a spinner and no text', () => {
+  test('a running tool shows a spinner and its operational state', () => {
     const { container } = renderWithDisplaySettings(
       <ToolBlock item={tool({ status: 'running', exitCode: null })} />,
     );
 
     expect(container.querySelector('.animate-spin')).not.toBeNull();
+    expect(screen.getByText('Running')).toBeInTheDocument();
   });
 
   test('a clean success shows no exit code', () => {
@@ -87,13 +88,13 @@ describe('ToolBlock status pill', () => {
   test('a success carrying a non-zero exit code still surfaces it', () => {
     renderWithDisplaySettings(<ToolBlock item={tool({ status: 'ok', exitCode: 3 })} />);
 
-    expect(screen.getByText('3')).toBeInTheDocument();
+    expect(screen.getByText('exit 3')).toBeInTheDocument();
   });
 
   test('a denied tool is labelled', () => {
     renderWithDisplaySettings(<ToolBlock item={tool({ status: 'denied', exitCode: null })} />);
 
-    expect(screen.getByText('denied')).toBeInTheDocument();
+    expect(screen.getByText('Denied')).toBeInTheDocument();
   });
 
   test('an error with an exit code reads as exit N', () => {
@@ -107,7 +108,7 @@ describe('ToolBlock status pill', () => {
   test('an error without an exit code falls back to the status name', () => {
     renderWithDisplaySettings(<ToolBlock item={tool({ status: 'aborted', exitCode: null })} />);
 
-    expect(screen.getByText('aborted')).toBeInTheDocument();
+    expect(screen.getByText('Interrupted')).toBeInTheDocument();
   });
 });
 

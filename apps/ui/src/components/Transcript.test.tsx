@@ -15,11 +15,11 @@ const user = (text: string): TranscriptItem => ({
   ts: seq,
 });
 
-const message = (text: string, streaming = false): TranscriptItem => ({
+const message = (text: string, streaming = false, agent: 'claude' | 'codex' | 'future-profile' = 'claude'): TranscriptItem => ({
   kind: 'message',
   id: `m${next()}`,
   seq,
-  agent: 'claude',
+  agent: agent as Extract<TranscriptItem, { kind: 'message' }>['agent'],
   text,
   streaming,
   ts: seq,
@@ -82,11 +82,12 @@ describe('Transcript empty state', () => {
 });
 
 describe('Transcript item kinds', () => {
-  test('a user message renders right-aligned in its own bubble', () => {
+  test('a user message renders as a quiet operator record row', () => {
     const { container } = renderWithHarness(<Transcript items={[user('deploy it')]} />, { runtime: idleRuntime() });
 
     expect(screen.getByText('deploy it')).toBeInTheDocument();
-    expect(container.querySelector('.justify-end')).not.toBeNull();
+    expect(screen.getByText('You')).toBeInTheDocument();
+    expect(container.querySelector('.justify-end')).toBeNull();
   });
 
   test('a divider names the agent taking the floor', () => {
@@ -97,8 +98,8 @@ describe('Transcript item kinds', () => {
     // this row has to get right: it is the only marker of who is speaking.
     expect(screen.getByText('Codex')).toHaveClass('awos-worker-text');
     expect(screen.getByText('Claude')).toHaveClass('awos-worker-text');
-    expect(screen.getByText('Codex').parentElement).toHaveClass('awos-worker');
-    expect(screen.getByText('Claude').parentElement).toHaveClass('awos-worker');
+    expect(screen.getByText('Codex').closest('.awos-worker')).not.toBeNull();
+    expect(screen.getByText('Claude').closest('.awos-worker')).not.toBeNull();
   });
 
   test('an agent message renders as markdown, with a caret only while streaming', () => {
@@ -116,6 +117,34 @@ describe('Transcript item kinds', () => {
     expect(container.querySelectorAll('.awos-markdown-streaming')).toHaveLength(1);
     expect(screen.getByText('still going').closest('.awos-markdown-streaming')).not.toBeNull();
     expect(screen.getByText('settled').closest('.awos-markdown-streaming')).toBeNull();
+  });
+
+  test('a streamed message keeps its identity while changing to completed', () => {
+    const item = message('still going', true) as Extract<TranscriptItem, { kind: 'message' }>;
+    const { container, rerender } = renderWithHarness(<Transcript items={[item]} />, { runtime: idleRuntime() });
+
+    expect(screen.getByText('Streaming')).toBeInTheDocument();
+    const row = container.querySelector('article');
+    rerender(
+      <Transcript
+        items={[{ ...item, text: 'finished', streaming: false }]}
+      />,
+    );
+
+    expect(screen.getByText('Completed')).toBeInTheDocument();
+    expect(screen.getByText('finished').closest('article')).toBe(row);
+    expect(screen.queryByText('still going')).not.toBeInTheDocument();
+  });
+
+  test('uses server profile metadata and stays readable for an unknown profile', () => {
+    const known = message('server-labelled', false, 'claude');
+    const unknown = message('future output', false, 'future-profile');
+    renderWithHarness(<Transcript items={[known, unknown]} profiles={[{ agent: 'claude', profileId: 'claude', label: 'Claude Code' }]} />, {
+      runtime: idleRuntime(),
+    });
+
+    expect(screen.getByText('Claude Code')).toBeInTheDocument();
+    expect(screen.getByText('Future Profile')).toBeInTheDocument();
   });
 
   test('settled reasoning is collapsed behind its duration label', () => {

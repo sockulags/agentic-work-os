@@ -20,11 +20,16 @@ export function renderWithHarness(
   ui: React.ReactElement,
   harness: Partial<Harness> = {},
 ): RenderResult {
-  return render(
-    <HarnessValueProvider value={stubHarness(harness)}>
-      <DisplaySettingsProvider>{ui}</DisplaySettingsProvider>
-    </HarnessValueProvider>,
-  );
+  const value = stubHarness(harness);
+  function TestProviders({ children }: { children: React.ReactNode }): React.JSX.Element {
+    return (
+      <HarnessValueProvider value={value}>
+        <DisplaySettingsProvider>{children}</DisplaySettingsProvider>
+      </HarnessValueProvider>
+    );
+  }
+
+  return render(ui, { wrapper: TestProviders });
 }
 
 /**

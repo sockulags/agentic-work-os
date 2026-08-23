@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from 'vitest';
+import { act } from 'react';
 import { fireEvent, screen } from '@testing-library/react';
 import type { ApprovalRequestedBody } from '@awos/protocol';
 import { ApprovalDialog } from './ApprovalDialog';
@@ -37,6 +38,10 @@ describe('ApprovalDialog', () => {
     expect(screen.getByText('Run a shell command')).toBeInTheDocument();
     expect(screen.getByText('Bash')).toBeInTheDocument();
     expect(screen.getByText('rm -rf ./build')).toBeInTheDocument();
+    expect(screen.getByText('Requested action')).toBeInTheDocument();
+    expect(screen.getByText('Command or patch')).toBeInTheDocument();
+    expect(screen.getByText('Risk and status')).toBeInTheDocument();
+    expect(screen.getByText('Decisions')).toBeInTheDocument();
   });
 
   test('renders one button per option, in the order given', () => {
@@ -83,5 +88,49 @@ describe('ApprovalDialog', () => {
 
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     expect(onResolve).not.toHaveBeenCalled();
+  });
+
+  test('keyboard focus enters the first decision', () => {
+    renderWithHarness(<ApprovalDialog />, {
+      runtime: idleRuntime({ pendingApprovals: [approval()] }),
+    });
+
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Allow' }));
+  });
+
+  test('returns focus to the initiating control after resolving and unmounting', async () => {
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.textContent = 'Open approval';
+    document.body.append(trigger);
+    trigger.focus();
+
+    const pendingApprovals = [approval()];
+    let rerender: ReturnType<typeof renderWithHarness>['rerender'];
+    const onResolve = vi.fn(async () => {
+      pendingApprovals.splice(0);
+      rerender(<ApprovalDialog />);
+    });
+    const view = renderWithHarness(<ApprovalDialog />, {
+      runtime: idleRuntime({ pendingApprovals }),
+      resolveApproval: onResolve,
+    });
+    rerender = view.rerender;
+
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Allow' }));
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
+      await act(async () => {
+        await Promise.resolve();
+        vi.runOnlyPendingTimers();
+      });
+      expect(document.activeElement).toBe(trigger);
+    } finally {
+      vi.useRealTimers();
+      view.unmount();
+      trigger.remove();
+    }
   });
 });

@@ -8,7 +8,9 @@ import { cn } from '@/lib/utils';
  * be read — and tested — without a DOM.
  */
 export function reasoningVisibility(density: Density): 'hidden' | 'collapsed' | 'expanded' {
-  if (density === 'compact') return 'hidden';
+  // Density changes spacing and default disclosure, not the recorded content. Compact
+  // keeps the reasoning row available behind the same disclosure control as normal.
+  if (density === 'compact') return 'collapsed';
   return density === 'verbose' ? 'expanded' : 'collapsed';
 }
 
@@ -79,12 +81,12 @@ export function ReasoningBlock({
   if (visibility === 'hidden') return null;
 
   return (
-    <div className="text-xs">
+    <section aria-label="Reasoning" className="min-w-0 border-l-2 border-border pl-3 text-xs">
       <button
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="group flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
+        className="awos-focus-ring group flex items-center gap-1.5 rounded-sm text-muted-foreground hover:text-foreground"
       >
         <Brain className="h-3 w-3 shrink-0" />
         <span>{thinking ? 'Thinking…' : formatThinkingLabel(durationMs)}</span>
@@ -96,10 +98,10 @@ export function ReasoningBlock({
         />
       </button>
       {open && (
-        <pre className="awos-scroll mt-1.5 max-h-80 overflow-auto whitespace-pre-wrap break-words border-l border-border pl-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
+        <pre className="awos-scroll mt-1.5 max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-muted-foreground">
           {text}
         </pre>
       )}
-    </div>
+    </section>
   );
 }

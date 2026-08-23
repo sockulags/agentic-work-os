@@ -80,7 +80,7 @@ export default function App(): React.JSX.Element {
           <EmptyState connected={h.status === 'open'} profiles={h.availability} />
         ) : (
           <>
-            <Transcript items={h.transcript.items} />
+            <Transcript items={h.transcript.items} profiles={h.availability} />
             <Composer />
           </>
         )}

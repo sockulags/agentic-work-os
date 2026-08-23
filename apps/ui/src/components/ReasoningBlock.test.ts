@@ -1,5 +1,8 @@
-import { describe, test, expect } from 'vitest';
-import { formatThinkingLabel, reasoningVisibility } from './ReasoningBlock';
+import { describe, test, expect, afterEach } from 'vitest';
+import { createElement } from 'react';
+import { fireEvent, screen } from '@testing-library/react';
+import { formatThinkingLabel, reasoningVisibility, ReasoningBlock } from './ReasoningBlock';
+import { renderWithDisplaySettings } from '@/test-harness';
 
 /**
  * The two decisions the reasoning line makes — whether to show at all, and what to call
@@ -8,8 +11,8 @@ import { formatThinkingLabel, reasoningVisibility } from './ReasoningBlock';
  */
 
 describe('reasoningVisibility', () => {
-  test('compact drops reasoning entirely', () => {
-    expect(reasoningVisibility('compact')).toBe('hidden');
+  test('compact keeps reasoning available behind the disclosure control', () => {
+    expect(reasoningVisibility('compact')).toBe('collapsed');
   });
 
   test('normal keeps it, folded away', () => {
@@ -42,5 +45,26 @@ describe('formatThinkingLabel', () => {
   test('breaks into minutes above that', () => {
     expect(formatThinkingLabel(60_000)).toBe('Thought for 1m 0s');
     expect(formatThinkingLabel(95_400)).toBe('Thought for 1m 35s');
+  });
+});
+
+describe('ReasoningBlock density presentation', () => {
+  afterEach(() => window.localStorage.removeItem('awos:density'));
+
+  test('compact and comfortable modes keep the same reasoning content available', () => {
+    window.localStorage.setItem('awos:density', 'compact');
+    const compact = renderWithDisplaySettings(
+      createElement(ReasoningBlock, { text: 'recorded reasoning', streaming: false, startedAt: 1, settled: true }),
+    );
+    expect(screen.queryByText('recorded reasoning')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Thought/ }));
+    expect(screen.getByText('recorded reasoning')).toBeInTheDocument();
+    compact.unmount();
+
+    window.localStorage.setItem('awos:density', 'verbose');
+    renderWithDisplaySettings(
+      createElement(ReasoningBlock, { text: 'recorded reasoning', streaming: false, startedAt: 1, settled: true }),
+    );
+    expect(screen.getByText('recorded reasoning')).toBeInTheDocument();
   });
 });
