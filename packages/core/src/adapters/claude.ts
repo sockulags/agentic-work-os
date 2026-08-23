@@ -8,7 +8,7 @@ import {
   type PlanItem,
   type ToolKind,
 } from '@awos/protocol';
-import type { AgentAdapter, AgentCapabilities, AdapterContext } from './agent.js';
+import type { WorkerAdapter, AgentCapabilities, AdapterContext } from './agent.js';
 import { spawnCli, type StdioChild } from '../util/spawn.js';
 import { readJsonLines, encodeJsonLine } from '../util/jsonl.js';
 import { createLogger } from '../util/logger.js';
@@ -45,8 +45,8 @@ export const CLAUDE_CAPABILITIES: AgentCapabilities = {
   resumableSessions: true,
 };
 
-export class ClaudeAdapter implements AgentAdapter {
-  readonly id = 'claude' as const;
+export class ClaudeAdapter implements WorkerAdapter {
+  readonly id = 'claude-code-cli' as const;
 
   readonly capabilities: AgentCapabilities = CLAUDE_CAPABILITIES;
 

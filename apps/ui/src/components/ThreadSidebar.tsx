@@ -1,13 +1,14 @@
 import { useState } from 'react';
 import { Plus, Trash2, FolderOpen } from 'lucide-react';
 import { Button } from './ui/button';
-import { AGENT_STYLE } from './AgentBadge';
+import { getAgentStyle } from './AgentBadge';
 import { useHarnessContext } from '@/state/HarnessContext';
 import { cn, formatRelative } from '@/lib/utils';
 import { chooseProjectFolder, supportsNativeFolderPicker } from '@/lib/project-folder';
 
 export function ThreadSidebar(): React.JSX.Element {
-  const { threads, activeThreadId, openThread, createThread, deleteThread } = useHarnessContext();
+  const { threads, activeThreadId, openThread, createThread, deleteThread, availability } = useHarnessContext();
+  const defaultAgent = availability[0]?.profileId ?? 'claude';
   const [creating, setCreating] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -39,7 +40,7 @@ export function ThreadSidebar(): React.JSX.Element {
             setCreateError(null);
             setSubmitting(true);
             try {
-              await createThread(trimmed, 'claude');
+              await createThread(trimmed, defaultAgent);
               setCreating(false);
             } catch (error) {
               setCreateError(errorMessage(error));
@@ -113,7 +114,7 @@ export function ThreadSidebar(): React.JSX.Element {
         ) : (
           threads.map((thread) => {
             const active = thread.id === activeThreadId;
-            const style = AGENT_STYLE[thread.activeAgent];
+            const style = getAgentStyle(thread.activeAgent);
             return (
               <div
                 key={thread.id}

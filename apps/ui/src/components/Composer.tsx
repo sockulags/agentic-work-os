@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowUp, Square } from 'lucide-react';
-import { AGENT_STYLE } from './AgentBadge';
+import { getAgentStyle } from './AgentBadge';
 import { Button } from './ui/button';
 import { Textarea } from './ui/textarea';
 import { useHarnessContext } from '@/state/HarnessContext';
@@ -15,11 +15,18 @@ import { cn } from '@/lib/utils';
  */
 export function Composer(): React.JSX.Element {
   const h = useHarnessContext();
-  const agent = h.activeThread?.activeAgent ?? 'claude';
+  const activeAgent = h.activeThread?.activeAgent ?? 'claude';
   const busy = h.runtime?.busy ?? [];
   const parallel = h.activeThread?.parallel ?? false;
-  const availability = h.availability;
-  const disabled = h.status !== 'open';
+  const workspaceAgents = h.workspace?.resolution.status === 'ok'
+    ? new Set(h.workspace.resolution.workspace.agents)
+    : null;
+  const profiles = workspaceAgents === null
+    ? h.availability
+    : h.availability.filter((profile) => workspaceAgents.has(profile.profileId));
+  const selectedProfile = profiles.find((profile) => profile.profileId === activeAgent) ?? profiles[0];
+  const agent = selectedProfile?.profileId ?? activeAgent;
+  const disabled = h.status !== 'open' || (workspaceAgents !== null && selectedProfile === undefined);
 
   // With lanes, only the agent you are writing to has to be free. Sharing one directory,
   // any working agent blocks the composer, because the second turn would race the first.
@@ -59,9 +66,9 @@ export function Composer(): React.JSX.Element {
     <div className="border-t border-border bg-background px-6 py-3">
       <div className="mx-auto max-w-3xl space-y-2">
         <div className="flex items-center gap-1.5">
-          {(['claude', 'codex'] as const).map((id) => {
-            const style = AGENT_STYLE[id];
-            const probe = availability.find((a) => a.agent === id);
+          {profiles.map((probe) => {
+            const id = probe.profileId;
+            const style = getAgentStyle(id, probe.label);
             const missing = probe !== undefined && !probe.available;
             const selected = agent === id;
 
@@ -80,7 +87,7 @@ export function Composer(): React.JSX.Element {
                 )}
               >
                 <span className={cn('h-1.5 w-1.5 rounded-full', style.dot)} />
-                {style.label}
+                {probe.label}
                 {busy.includes(id) && <span className="text-[10px] opacity-70">working</span>}
                 {missing && <span className="text-[10px]">not found</span>}
               </button>
@@ -112,8 +119,8 @@ export function Composer(): React.JSX.Element {
             disabled={disabled}
             placeholder={
               blockedBy !== null
-                ? `${AGENT_STYLE[blockedBy].label} is working — stop it to send`
-                : `Message ${AGENT_STYLE[agent].label}…`
+                ? `${getAgentStyle(blockedBy).label} is working — stop it to send`
+                : `Message ${getAgentStyle(agent, selectedProfile?.label).label}…`
             }
             className="max-h-60 min-h-[44px] py-3 pr-12"
           />

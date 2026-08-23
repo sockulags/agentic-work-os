@@ -3,14 +3,15 @@ import type { HarnessConfig } from '../config.js';
 import type { PermissionBridge } from '../permission-bridge.js';
 
 /**
- * The contract both agents satisfy.
+ * The contract every worker adapter satisfies.
  *
  * Kept intentionally narrow. Anything an agent can do that the other cannot is
  * expressed as a capability flag, not as an extra method — the orchestrator branches on
  * data, never on `instanceof`.
  */
-export interface AgentAdapter {
-  readonly id: AgentId;
+export interface WorkerAdapter {
+  /** Stable implementation id; distinct from the persisted WorkerProfile/AgentId. */
+  readonly id: string;
 
   /** Static description of what this agent's protocol supports. */
   readonly capabilities: AgentCapabilities;
@@ -39,6 +40,9 @@ export interface AgentAdapter {
   /** Terminate the process. Safe to call when not running. */
   stop(): Promise<void>;
 }
+
+/** Compatibility name for callers that still use the pre-WorkerProfile contract. */
+export type AgentAdapter = WorkerAdapter;
 
 // The capability shape now lives in @awos/protocol, because the UI branches on it too.
 export type { AgentCapabilities };

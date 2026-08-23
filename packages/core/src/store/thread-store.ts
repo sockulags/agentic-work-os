@@ -102,7 +102,7 @@ export class ThreadStore {
       updatedAt: now,
       activeAgent: options.agent ?? 'claude',
       nativeSessions: {},
-      watermarks: { claude: 0, codex: 0 },
+      watermarks: Object.fromEntries(AGENT_IDS.map((agent) => [agent, 0])) as Record<AgentId, number>,
       eventCount: 0,
       workItemId: null,
       parallel: false,
@@ -159,6 +159,18 @@ export class ThreadStore {
     if (summary.nativeSessions[agent] === sessionId) return;
     this.update(threadId, {
       nativeSessions: { ...summary.nativeSessions, [agent]: sessionId },
+    });
+  }
+
+  /** Drop a proven-stale native session and make the next turn replay from the log head. */
+  clearNativeSession(threadId: string, agent: AgentId): void {
+    const summary = this.#summaries.get(threadId);
+    if (!summary) return;
+    const nativeSessions = { ...summary.nativeSessions };
+    delete nativeSessions[agent];
+    this.update(threadId, {
+      nativeSessions,
+      watermarks: { ...summary.watermarks, [agent]: 0 },
     });
   }
 
@@ -221,7 +233,7 @@ export class ThreadStore {
 
     const summary = JSON.parse(readFileSync(metaPath, 'utf8')) as ThreadSummary;
     // Defend against meta written by an older build.
-    summary.watermarks ??= { claude: 0, codex: 0 };
+    summary.watermarks ??= Object.fromEntries(AGENT_IDS.map((agent) => [agent, 0])) as Record<AgentId, number>;
     for (const agent of AGENT_IDS) summary.watermarks[agent] ??= 0;
     summary.nativeSessions ??= {};
     // Written by a build that had no work items. Null is the same answer as "this thread

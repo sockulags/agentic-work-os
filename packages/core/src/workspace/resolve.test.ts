@@ -58,7 +58,7 @@ describe('resolveWorkspace', () => {
 
     const workspace = ok(resolveWorkspace(root));
     assert.equal(workspace.name, 'awos');
-    assert.deepEqual(workspace.agents, ['claude', 'codex']);
+    assert.deepEqual(workspace.agents, ['claude', 'codex', 'qwen-local']);
     assert.deepEqual(workspace.repository, { root: '.', github: null });
     assert.equal(workspace.setup.command, '');
     assert.deepEqual(workspace.verify, []);

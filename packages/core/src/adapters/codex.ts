@@ -7,7 +7,7 @@ import {
   type PlanItemStatus,
   type ToolKind,
 } from '@awos/protocol';
-import type { AgentAdapter, AgentCapabilities, AdapterContext } from './agent.js';
+import type { WorkerAdapter, AgentCapabilities, AdapterContext } from './agent.js';
 import { spawnCli, type StdioChild } from '../util/spawn.js';
 import { readJsonLines, encodeJsonLine } from '../util/jsonl.js';
 import { createLogger } from '../util/logger.js';
@@ -33,8 +33,8 @@ export const CODEX_CAPABILITIES: AgentCapabilities = {
   resumableSessions: true,
 };
 
-export class CodexAdapter implements AgentAdapter {
-  readonly id = 'codex' as const;
+export class CodexAdapter implements WorkerAdapter {
+  readonly id = 'codex-app-server' as const;
 
   readonly capabilities: AgentCapabilities = CODEX_CAPABILITIES;
 

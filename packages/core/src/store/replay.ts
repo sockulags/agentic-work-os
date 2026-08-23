@@ -15,12 +15,14 @@ import type { AgentId, HarnessEvent } from '@awos/protocol';
 export interface ReplayOptions {
   maxChars: number;
   maxToolOutput: number;
+  /** Recovery may need to replay the incoming agent's own stale native history. */
+  includeSameAgentHistory?: boolean;
 }
 
 export interface ReplayResult {
   /** The block to prepend, or null when the agent is already current. */
   preamble: string | null;
-  /** How many foreign turns the block covers, in either tier. */
+  /** How many turns the block covers, in either tier. */
   turnCount: number;
   /** How many of those carry only their brief form because the budget was tight. */
   digestTurns: number;
@@ -65,10 +67,12 @@ export function buildReplay(
 ): ReplayResult {
   const empty: ReplayResult = { preamble: null, turnCount: 0, digestTurns: 0, elidedTurns: 0 };
 
-  const foreign = events.filter((event) => event.agent !== forAgent);
-  if (foreign.length === 0) return empty;
+  const replayable = events.filter(
+    (event) => options.includeSameAgentHistory === true || event.agent !== forAgent,
+  );
+  if (replayable.length === 0) return empty;
 
-  const turns = groupIntoTurns(foreign);
+  const turns = groupIntoTurns(replayable);
   const rows: Array<{ full: string; digest: string }> = [];
   for (const turn of turns) {
     const full = renderTurn(turn, options);

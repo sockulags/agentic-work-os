@@ -21,7 +21,7 @@ import type {
   WorkSourceError,
 } from '@awos/protocol';
 import { useHarnessContext } from '@/state/HarnessContext';
-import { AGENT_STYLE } from '@/components/AgentBadge';
+import { getAgentStyle } from '@/components/AgentBadge';
 import { Button } from '@/components/ui/button';
 import type { RunView } from '@/lib/runs';
 import { cn, formatRelative } from '@/lib/utils';
@@ -200,6 +200,7 @@ function Runs({ item }: { item: WorkItem }): React.JSX.Element {
 
 function Run({ run, currentRevision }: { run: RunView; currentRevision: string }): React.JSX.Element {
   const [showContext, setShowContext] = useState(false);
+  const agentStyle = run.agent ? getAgentStyle(run.agent) : null;
   // The comparison the whole revision-freezing exists for: what this run read against what
   // the issue says now.
   const sourceMoved = run.revision !== '' && run.revision !== currentRevision;
@@ -207,9 +208,9 @@ function Run({ run, currentRevision }: { run: RunView; currentRevision: string }
   return (
     <li className="space-y-1">
       <div className="flex items-center gap-1.5">
-        {run.agent && (
-          <span className={cn('rounded px-1 py-px text-[9px]', AGENT_STYLE[run.agent].bg, AGENT_STYLE[run.agent].text)}>
-            {AGENT_STYLE[run.agent].label}
+        {agentStyle && (
+          <span className={cn('rounded px-1 py-px text-[9px]', agentStyle.bg, agentStyle.text)}>
+            {agentStyle.label}
           </span>
         )}
         <span className={cn('text-[10px]', STATE_STYLE[run.state])}>{STATE_LABEL[run.state]}</span>

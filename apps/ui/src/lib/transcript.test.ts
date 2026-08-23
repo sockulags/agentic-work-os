@@ -106,6 +106,31 @@ describe('foldTranscript — tools', () => {
     expect(tools[0]).toMatchObject({ title: 'npm test', status: 'ok', output: 'passed' });
   });
 
+  test('a final tool start updates the existing row rather than adding another', () => {
+    const { items } = foldTranscript([
+      ev('qwen-local', 't', {
+        kind: 'tool.started',
+        itemId: 'tool1',
+        name: 'run_shell_command',
+        toolKind: 'command',
+        title: 'run_shell_command',
+        input: {},
+      }),
+      ev('qwen-local', 't', {
+        kind: 'tool.started',
+        itemId: 'tool1',
+        name: 'run_shell_command',
+        toolKind: 'command',
+        title: 'npm test',
+        input: { command: 'npm test' },
+      }),
+    ]);
+
+    const tools = items.filter((i) => i.kind === 'tool');
+    expect(tools).toHaveLength(1);
+    expect(tools[0]).toMatchObject({ title: 'npm test', input: { command: 'npm test' } });
+  });
+
   test('streamed output accumulates in order', () => {
     const { items } = foldTranscript([
       ev('codex', 't', {

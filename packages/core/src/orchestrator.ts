@@ -25,11 +25,11 @@ import type {
   WorkSourceError,
   WorkspaceResolution,
 } from '@awos/protocol';
-import { PINNED_CONTEXT_MAX_CHARS, RETAINED_FILE, RUN_CONTEXT_MAX_CHARS } from '@awos/protocol';
+import { AGENT_IDS, PINNED_CONTEXT_MAX_CHARS, RETAINED_FILE, RUN_CONTEXT_MAX_CHARS } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
-import type { AgentAdapter, AdapterContext } from './adapters/agent.js';
-import { ClaudeAdapter } from './adapters/claude.js';
-import { CodexAdapter } from './adapters/codex.js';
+import type { WorkerAdapter, AdapterContext } from './adapters/agent.js';
+import { createWorkerAdapter } from './adapters/registry.js';
+import { isQwenResumeNotFoundError } from './adapters/qwen-code.js';
 import { PermissionBridge } from './permission-bridge.js';
 import { ThreadStore } from './store/thread-store.js';
 import { ContextStore, applyPinnedContext, buildPinnedContext } from './store/context-store.js';
@@ -55,6 +55,10 @@ import { createLogger } from './util/logger.js';
 
 const log = createLogger('orchestrator');
 const execAsync = promisify(exec);
+
+function emptyAgentRecord<T>(factory: () => T): Record<AgentId, T> {
+  return Object.fromEntries(AGENT_IDS.map((agent) => [agent, factory()])) as Record<AgentId, T>;
+}
 
 /**
  * Keep a recorded context within its budget.
@@ -111,7 +115,7 @@ class Thread {
   readonly #emit: (event: HarnessEvent) => void;
   readonly #onState: () => void;
 
-  readonly #adapters = new Map<AgentId, AgentAdapter>();
+  readonly #adapters = new Map<AgentId, WorkerAdapter>();
   #permissionMode: PermissionMode = 'default';
   /**
    * Agents with a turn in flight, each mapped to the turn it is running.
@@ -223,10 +227,11 @@ class Thread {
   }
 
   state(): ThreadRuntimeState {
-    const agents = {
-      claude: this.#agentStatus.get('claude') ?? { status: 'idle', model: null },
-      codex: this.#agentStatus.get('codex') ?? { status: 'idle', model: null },
-    };
+    const agents = emptyAgentRecord(() => ({ status: 'idle', model: null as string | null }));
+    for (const agent of AGENT_IDS) {
+      const status = this.#agentStatus.get(agent);
+      if (status) agents[agent] = status;
+    }
     const lanes: Partial<Record<AgentId, string>> = {};
     for (const [agent, lane] of this.#lanes) lanes[agent] = lane.path;
 
@@ -302,6 +307,7 @@ class Thread {
       text,
       hadReplay: replay.preamble !== null,
     });
+    const userMessageSeq = this.#store.head(this.id);
 
     if (replay.preamble) {
       log.info('replaying context', {
@@ -326,17 +332,18 @@ class Thread {
 
     const item = this.workItem();
     const retained = item === null ? [] : this.retained(item.id);
-    const payload = applyWorkspace(
+    const buildPayload = (currentReplay: typeof replay): string => applyWorkspace(
       buildWorkspaceBlock(workspace),
       applyWorkItem(
         buildWorkItemBlock(item),
         applyRetained(
           buildRetainedBlock(selectedForContext(retained)),
-          applyPinnedContext(pinned, applyReplay(replay.preamble, text)),
+          applyPinnedContext(pinned, applyReplay(currentReplay.preamble, text)),
         ),
       ),
     );
-    const adapter = this.#adapter(agent, cwd);
+    let payload = buildPayload(replay);
+    let adapter = this.#adapter(agent, cwd);
 
     // Recorded before dispatch, and before the run can fail, so a run that dies on the
     // first token still leaves behind what it was asked to do and what it was given.
@@ -366,7 +373,36 @@ class Thread {
 
     let failure: string | null = null;
     try {
-      await adapter.sendTurn(payload);
+      let retriedStaleResume = false;
+      for (;;) {
+        try {
+          await adapter.sendTurn(payload);
+          break;
+        } catch (err) {
+          if (!retriedStaleResume && isQwenResumeNotFoundError(err)) {
+            retriedStaleResume = true;
+            await this.#resetStaleNativeSession(agent);
+
+            // Resetting the watermark makes the retry a full canonical replay. Exclude
+            // this turn's already-recorded user event: the user prompt remains the one
+            // direct payload argument, so it is not sent twice and is not recorded again.
+            const retryReplay = buildReplay(
+              this.#store.eventsSince(this.id, 0).filter((event) => event.seq < userMessageSeq),
+              agent,
+              {
+                maxChars: this.#config.replayMaxChars,
+                maxToolOutput: this.#config.replayMaxToolOutput,
+                includeSameAgentHistory: true,
+              },
+            );
+            payload = buildPayload(retryReplay);
+            adapter = this.#adapter(agent, cwd);
+            continue;
+          }
+          failure = err instanceof Error ? err.message : String(err);
+          throw err;
+        }
+      }
     } catch (err) {
       failure = (err as Error).message;
       throw err;
@@ -437,7 +473,7 @@ class Thread {
 
     await Promise.all([...this.#adapters.values()].map((adapter) => adapter.stop()));
     this.#adapters.clear();
-    this.#store.update(this.id, { parallel: on, nativeSessions: {}, watermarks: { claude: 0, codex: 0 } });
+    this.#store.update(this.id, { parallel: on, nativeSessions: {}, watermarks: emptyAgentRecord(() => 0) });
     this.#parallel = on;
 
     if (!on) await this.#dropLanes();
@@ -1002,7 +1038,7 @@ class Thread {
     }
   }
 
-  #adapter(agent: AgentId, cwd: string): AgentAdapter {
+  #adapter(agent: AgentId, cwd: string): WorkerAdapter {
     const existing = this.#adapters.get(agent);
     if (existing) return existing;
 
@@ -1020,9 +1056,15 @@ class Thread {
       onSessionId: (sessionId) => this.#store.setNativeSession(this.id, agent, sessionId),
     };
 
-    const adapter = agent === 'claude' ? new ClaudeAdapter(ctx) : new CodexAdapter(ctx);
+    const adapter = createWorkerAdapter(agent, ctx);
     this.#adapters.set(agent, adapter);
     return adapter;
+  }
+
+  async #resetStaleNativeSession(agent: AgentId): Promise<void> {
+    await this.#adapters.get(agent)?.stop();
+    this.#adapters.delete(agent);
+    this.#store.clearNativeSession(this.id, agent);
   }
 
   /** Persist, update derived state, broadcast. The single write path for events. */

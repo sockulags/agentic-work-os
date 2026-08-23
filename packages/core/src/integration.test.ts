@@ -23,6 +23,7 @@ import type { HarnessConfig } from './config.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const FAKE_CLAUDE = join(here, 'testing', 'fake-claude.js');
 const FAKE_CODEX = join(here, 'testing', 'fake-codex.js');
+const FAKE_QWEN = join(here, 'testing', 'fake-qwen.js');
 const FAKE_GH = join(here, 'testing', 'fake-gh.js');
 
 let dataDir: string;
@@ -700,6 +701,68 @@ describe('workspace contract', () => {
     assert.doesNotMatch(JSON.stringify(written), /internal-only-note/);
     const message = written.find((e) => e.kind === 'user.message');
     assert.equal(message?.kind === 'user.message' ? message.text : null, 'just this');
+  });
+
+  test('recovers a stale Qwen session with full replay and one run', async () => {
+    const { orch, events } = await boot(makeConfig({ qwenBin: FAKE_QWEN }));
+    const thread = orch.createThread({ cwd: workDir });
+    await orch.send(thread.id, 'qwen-local', 'prior-qwen-context');
+    await orch.stop();
+    await orch.start();
+    declare(workDir, { repository: { github: 'sockulags/agentic-work-os' } });
+    const { item } = await orch.attachWorkItem(thread.id, '#14');
+    assert.ok(item);
+    orch.store.setNativeSession(thread.id, 'qwen-local', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+
+    await orch.send(thread.id, 'qwen-local', 'current-qwen-message-once', true);
+
+    const log = readFileSync(join(workDir, '.awos-qwen-invocations.log'), 'utf8').trim().split('\n');
+    assert.equal(log.length, 3, 'prior turn, stale resume, then one fresh session');
+    const reply = events
+      .filter((event) => event.kind === 'message.completed' && event.agent === 'qwen-local')
+      .at(-1);
+    const received = reply?.kind === 'message.completed' ? reply.text : '';
+    assert.match(received, /<harness-replay>/);
+    assert.match(received, /prior-qwen-answer/);
+    assert.match(received, /prior-qwen-tool-result/);
+    assert.equal((received.match(/current-qwen-message-once/g) ?? []).length, 1);
+
+    const currentMessages = orch.store.events(thread.id).filter(
+      (event) => event.kind === 'user.message' && event.text === 'current-qwen-message-once',
+    );
+    assert.equal(currentMessages.length, 1);
+    assert.notEqual(orch.store.get(thread.id)?.nativeSessions['qwen-local'], 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    assert.equal(events.filter((event) => event.kind === 'error' && event.agent === 'qwen-local').length, 0);
+    assert.equal(
+      events.filter((event) => event.kind === 'turn.completed' && event.agent === 'qwen-local').length,
+      2,
+      'one prior completion and one recovered completion, not a stale error completion',
+    );
+    assert.equal(orch.store.events(thread.id).filter((event) => event.kind === 'run.started').length, 1);
+    assert.equal(orch.store.events(thread.id).filter((event) => event.kind === 'run.completed').length, 1);
+  });
+
+  test('retries stale Qwen once and preserves a permanent retry failure', async () => {
+    const { orch } = await boot(makeConfig({ qwenBin: FAKE_QWEN }));
+    const thread = orch.createThread({ cwd: workDir });
+    orch.store.setNativeSession(thread.id, 'qwen-local', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+
+    await assert.rejects(() => orch.send(thread.id, 'qwen-local', 'retry-but-fail'));
+
+    const log = readFileSync(join(workDir, '.awos-qwen-invocations.log'), 'utf8').trim().split('\n');
+    assert.equal(log.length, 2, 'stale resume is retried once, but the permanent failure is not retried');
+    assert.equal(orch.store.events(thread.id).filter((event) => event.kind === 'error' && event.agent === 'qwen-local').length, 1);
+    assert.equal(
+      orch.store.events(thread.id).filter((event) => event.kind === 'turn.completed' && event.agent === 'qwen-local').length,
+      1,
+      'only the permanent retry failure is terminal',
+    );
+    assert.equal(
+      orch.store.events(thread.id).filter(
+        (event) => event.kind === 'user.message' && event.text === 'retry-but-fail',
+      ).length,
+      1,
+    );
   });
 
   test('provisions a lane with the setup command the project declares', async () => {

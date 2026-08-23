@@ -56,6 +56,19 @@ describe('ThreadStore', () => {
     assert.equal(second.head(thread.id), 1);
   });
 
+  test('clears a stale native session and its replay watermark together', () => {
+    const store = new ThreadStore(dir);
+    const thread = store.create({ cwd: '/repo' });
+    store.setNativeSession(thread.id, 'qwen-local', 'stale-session');
+    store.setWatermark(thread.id, 'qwen-local', 12);
+
+    store.clearNativeSession(thread.id, 'qwen-local');
+
+    const summary = store.get(thread.id);
+    assert.equal(summary?.nativeSessions['qwen-local'], undefined);
+    assert.equal(summary?.watermarks['qwen-local'], 0);
+  });
+
   test('survives a transcript torn by a crash mid-append', () => {
     const first = new ThreadStore(dir);
     const thread = first.create({ cwd: '/repo' });

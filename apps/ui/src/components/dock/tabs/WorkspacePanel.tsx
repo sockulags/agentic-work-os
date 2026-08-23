@@ -223,7 +223,7 @@ function Undeclared(): React.JSX.Element {
           {
             version: WORKSPACE_SCHEMA_VERSION,
             name: 'my-project',
-            agents: ['claude', 'codex'],
+            agents: ['claude', 'codex', 'qwen-local'],
             setup: { command: 'npm install' },
             verify: [{ name: 'test', command: 'npm test' }],
           },

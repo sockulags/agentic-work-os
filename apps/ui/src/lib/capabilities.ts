@@ -9,5 +9,5 @@ export function capabilitiesForTurn(
   turnAgent: AgentId | null,
 ): AgentCapabilities | undefined {
   if (turnAgent === null) return undefined;
-  return availability.find((entry) => entry.agent === turnAgent)?.capabilities;
+  return availability.find((entry) => entry.profileId === turnAgent)?.capabilities;
 }
