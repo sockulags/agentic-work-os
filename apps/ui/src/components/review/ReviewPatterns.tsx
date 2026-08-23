@@ -139,8 +139,24 @@ export function WorkItemHeader({
 export function RunSummary({ run, currentRevision }: { run: RunView; currentRevision: string }): React.JSX.Element {
   const agentStyle = run.agent ? getAgentStyle(run.agent) : null;
   const sourceMoved = run.revision !== '' && run.revision !== currentRevision;
-  const state = run.state === 'running' ? 'busy' : run.state === 'completed' ? 'passed' : run.state === 'interrupted' ? 'interrupted' : 'failed';
-  const label = run.state === 'running' ? 'Running' : run.state === 'completed' ? 'Finished' : run.state === 'interrupted' ? 'Interrupted' : 'Failed';
+  const state = run.interruptedByRestart
+    ? 'interrupted'
+    : run.state === 'running'
+      ? 'busy'
+      : run.state === 'completed'
+        ? 'passed'
+        : run.state === 'interrupted'
+          ? 'interrupted'
+          : 'failed';
+  const label = run.interruptedByRestart
+    ? 'Interrupted by restart'
+    : run.state === 'running'
+      ? 'Running'
+      : run.state === 'completed'
+        ? 'Finished'
+        : run.state === 'interrupted'
+          ? 'Interrupted'
+          : 'Failed';
 
   return (
     <div className="space-y-1.5">

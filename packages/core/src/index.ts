@@ -35,6 +35,7 @@ export {
   applyRetained,
 } from './work/prompt.js';
 export { foldEvidence, foldOutcomes, foldRetained, selectedForContext } from './work/ledger.js';
+export { projectRunEvidence } from './work/runs.js';
 export { evaluateGate, explainGate, type GateInput, type GateDecision } from './work/gate.js';
 export { PermissionBridge } from './permission-bridge.js';
 export { ClaudeAdapter } from './adapters/claude.js';

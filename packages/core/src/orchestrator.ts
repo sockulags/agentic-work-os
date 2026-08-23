@@ -28,7 +28,6 @@ import type {
   WorkspaceIssueCatalog,
   IssueCatalogSource,
   IssueCatalogOverlay,
-  CatalogRunEvidence,
   CatalogIssue,
   IssueOpenRefusalCode,
   IssueOpenResult,
@@ -55,6 +54,7 @@ import {
   buildWorkItemBlock,
 } from './work/prompt.js';
 import { foldEvidence, foldRetained, selectedForContext } from './work/ledger.js';
+import { projectRunEvidence } from './work/runs.js';
 import { evaluateGate, explainGate, type GateDecision } from './work/gate.js';
 import { fetchIssue, parseIssueRef } from './work/github.js';
 import { explainIssueRoute } from './work/issue-route-presentation.js';
@@ -310,6 +310,7 @@ class Thread {
       threadId: this.id,
       busyWith: this.busyWith,
       busy: this.#busy,
+      runStates: projectRunEvidence(this.#store.events(this.id), (runId) => this.isRunActive(runId)),
       lanes,
       currentTurnId: this.#currentTurnId,
       lastTurnAgent: this.#lastTurnAgent,
@@ -2013,32 +2014,14 @@ export class Orchestrator extends EventEmitter {
 
       for (const thread of linked) {
         const events = this.store.events(thread.id);
-        const runs = new Map<string, CatalogRunEvidence>();
-        for (const event of events) {
-          if (event.kind === 'run.started' && event.workItemId === item.id) {
-            const runtime = this.#threads.get(thread.id);
-            const live = runtime?.isRunActive(event.runId) === true;
-            runs.set(event.runId, {
-              runId: event.runId,
-              threadId: thread.id,
-              agent: event.agent,
-              startedAt: event.ts,
-              state: live ? 'running' : 'unknown',
-              live,
-              evidenceCount: 0,
-            });
-          } else if (event.kind === 'run.completed') {
-            const run = runs.get(event.runId);
-            if (run) {
-              run.state = event.state;
-              run.live = false;
-            }
-          } else if (event.kind === 'evidence.recorded' && event.runId !== null) {
-            const run = runs.get(event.runId);
-            if (run) run.evidenceCount += 1;
-          }
-        }
-        entry.runs.push(...runs.values());
+        const runtime = this.#threads.get(thread.id);
+        entry.runs.push(
+          ...projectRunEvidence(
+            events,
+            (runId) => runtime?.isRunActive(runId) === true,
+            item.id,
+          ),
+        );
       }
     }
 

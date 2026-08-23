@@ -188,7 +188,13 @@ export function useHarness() {
   }, []);
 
   useEffect(() => {
-    const offStatus = client.onStatus(setStatus);
+    const offStatus = client.onStatus((next) => {
+      setStatus(next);
+      // A status notification marks a new connection boundary. Until thread.open returns,
+      // the previous runtime is not evidence about this core process, including when a
+      // socket has just reopened and resync is still in flight.
+      setRuntime(null);
+    });
 
     const offPush = client.onPush((push) => {
       switch (push.type) {
@@ -649,16 +655,17 @@ export function useHarness() {
     [client],
   );
 
-  // The folder keeps the fold's state between renders so a streaming delta costs one
-  // event rather than the whole log. It works out for itself when the array was appended
-  // to and when it was replaced, so switching threads and resyncing need nothing here.
+  // The folder keeps the transcript fold's state between renders so a streaming delta
+  // costs one event rather than the whole log. Run status is projected by the core from
+  // the same log plus its exact live-runtime overlay, so an unfinished start does not
+  // become a live worker merely because the UI reloaded it.
   const folderRef = useRef<TranscriptFolder | null>(null);
   if (folderRef.current === null) folderRef.current = new TranscriptFolder();
   const folder = folderRef.current;
 
   const transcript = useMemo(() => folder.fold(events), [folder, events]);
   const artifacts = useMemo(() => foldArtifacts(events), [events]);
-  const runs = useMemo(() => foldRuns(events), [events]);
+  const runs = useMemo(() => foldRuns(events, runtime?.runStates ?? []), [events, runtime?.runStates]);
   const activeThread = useMemo(
     () => threads.find((t) => t.id === activeThreadId) ?? null,
     [threads, activeThreadId],

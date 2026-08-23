@@ -1,6 +1,7 @@
 import type {
   AgentId,
   ClaimSource,
+  CatalogRunEvidence,
   EvidenceItem,
   EvidenceKind,
   HarnessEvent,
@@ -12,10 +13,10 @@ import type {
  * Folds the log into the runs a thread has made, with what each one claimed, what
  * supports it, and what it could point at.
  *
- * One pass, one shape. The core never sends a list of runs, for the same reason it never
- * sends a list of artifacts: the log is the record and everything else is derived from
- * it. Deriving here makes a run survive a reload and a restart without anything storing
- * it twice — replaying `events.jsonl` produces exactly what the live socket did.
+ * One pass, one shape. The core sends only the run-status projection needed to distinguish
+ * a live runtime from a stale start; the rich run details remain derived here from the
+ * event log. That keeps evidence and context in the canonical log without storing a
+ * second run ledger.
  *
  * The correction rule matches the core's: a later record with an id already seen replaces
  * the earlier one, and every version stays in the log behind it.
@@ -41,6 +42,8 @@ export interface RunView {
   /** The source revision this run read, frozen when it started. */
   revision: string;
   state: RunState | 'running';
+  /** True only when core found an unfinished start with no live runtime after restart. */
+  interruptedByRestart: boolean;
   detail: string | null;
   ts: number;
   /** What the run claims to have achieved, once somebody has said. */
@@ -50,8 +53,12 @@ export interface RunView {
   candidates: EvidenceCandidate[];
 }
 
-export function foldRuns(events: readonly HarnessEvent[]): RunView[] {
+export function foldRuns(
+  events: readonly HarnessEvent[],
+  runStates: readonly CatalogRunEvidence[] = [],
+): RunView[] {
   const runs = new Map<string, RunView>();
+  const projectedStates = new Map(runStates.map((run) => [run.runId, run]));
   const evidence = new Map<string, EvidenceItem>();
   /** Titles arrive on `tool.started`; the result arrives later on `tool.completed`. */
   const toolTitles = new Map<string, string>();
@@ -67,27 +74,51 @@ export function foldRuns(events: readonly HarnessEvent[]): RunView[] {
   for (const event of events) {
     switch (event.kind) {
       case 'run.started':
-        runs.set(event.runId, {
-          runId: event.runId,
-          agent: event.agent,
-          instruction: event.instruction,
-          context: event.context,
-          revision: event.revision,
-          // A run with no completion is still in flight — or was, when the core stopped.
-          // Both read the same way, and neither is a reason to hide what was recorded.
-          state: 'running',
-          detail: null,
-          ts: event.ts,
-          outcome: null,
-          evidence: [],
-          candidates: [],
-        });
-        openRun = event.runId;
+        {
+          const projected = projectedStates.get(event.runId);
+          let state: RunView['state'] = 'interrupted';
+          let interruptedByRestart = true;
+          if (projected?.state === 'running' && projected.live) {
+            state = 'running';
+            interruptedByRestart = false;
+          } else if (
+            projected?.state === 'completed' ||
+            projected?.state === 'interrupted' ||
+            projected?.state === 'error'
+          ) {
+            state = projected.state;
+            interruptedByRestart = projected.interruptedByRestart;
+          }
+          runs.set(event.runId, {
+            runId: event.runId,
+            agent: event.agent,
+            instruction: event.instruction,
+            context: event.context,
+            revision: event.revision,
+            // The event log preserves what was recorded. Core supplies the live-runtime
+            // overlay so an unfinished start after restart is not presented as running.
+            state,
+            interruptedByRestart,
+            detail: null,
+            ts: event.ts,
+            outcome: null,
+            evidence: [],
+            candidates: [],
+          });
+          openRun = event.runId;
+        }
         break;
 
       case 'run.completed': {
         const run = runs.get(event.runId);
-        if (run) runs.set(event.runId, { ...run, state: event.state, detail: event.detail });
+        if (run) {
+          runs.set(event.runId, {
+            ...run,
+            state: event.state,
+            interruptedByRestart: false,
+            detail: event.detail,
+          });
+        }
         if (openRun === event.runId) openRun = null;
         break;
       }
