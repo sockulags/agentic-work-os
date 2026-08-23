@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ChevronRight,
   Terminal,
@@ -10,16 +10,13 @@ import {
   ListChecks,
   Plug,
   Wrench,
-  Loader2,
-  Check,
-  X,
-  Ban,
 } from 'lucide-react';
 import type { ToolKind } from '@awos/protocol';
 import { looksLikeUnifiedDiff } from '@/lib/diff';
 import { summarizeTool, shouldExpandTool, type ToolItem } from '@/lib/tool-summary';
 import { useDisplaySettings } from '@/state/DisplaySettingsContext';
 import { DiffView } from './DiffView';
+import { RunStatus } from './RunStatus';
 import { cn } from '@/lib/utils';
 
 const ICONS: Record<ToolKind, typeof Terminal> = {
@@ -41,15 +38,13 @@ export function ToolBlock({ item }: { item: ToolItem }): React.JSX.Element {
   const { density } = useDisplaySettings();
   const auto = shouldExpandTool(item, density);
   const [override, setOverride] = useState<boolean | null>(null);
-  const [densityAtOverride, setDensityAtOverride] = useState(density);
   const [showAll, setShowAll] = useState(false);
 
   // Changing density is a statement about the whole transcript, so it outranks whatever
   // the reader opened or shut earlier under the previous setting.
-  if (density !== densityAtOverride) {
-    setDensityAtOverride(density);
+  useEffect(() => {
     setOverride(null);
-  }
+  }, [density]);
 
   const expanded = override ?? auto;
   const Icon = ICONS[item.toolKind];
@@ -69,8 +64,14 @@ export function ToolBlock({ item }: { item: ToolItem }): React.JSX.Element {
   return (
     <div
       className={cn(
-        'rounded-md border bg-card/50 text-sm',
-        item.status === 'error' ? 'border-state-failed-border' : 'border-border',
+        'min-w-0 rounded-md border bg-card/50 text-sm',
+        item.status === 'error'
+          ? 'border-state-failed-border'
+          : item.status === 'denied'
+            ? 'border-state-blocked-border'
+            : item.status === 'aborted'
+              ? 'border-state-interrupted-border'
+              : 'border-border',
       )}
     >
       <button
@@ -79,7 +80,7 @@ export function ToolBlock({ item }: { item: ToolItem }): React.JSX.Element {
         aria-expanded={expanded}
         // The raw title is the exact call; the summary is the readable one. Keep both.
         title={item.title}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent/40"
+        className="flex w-full min-w-0 items-center gap-2 px-3 py-[var(--density-tool-padding)] text-left hover:bg-accent/40"
       >
         <ChevronRight
           className={cn(
@@ -96,11 +97,30 @@ export function ToolBlock({ item }: { item: ToolItem }): React.JSX.Element {
             {summary.facts.join(' · ')}
           </span>
         )}
-        <StatusPill status={item.status} exitCode={item.exitCode} />
+        <RunStatus
+          state={
+            item.status === 'running'
+              ? 'running'
+              : item.status === 'ok'
+                ? 'completed'
+                : item.status === 'error'
+                  ? 'failed'
+                  : item.status === 'denied'
+                    ? 'denied'
+                    : 'interrupted'
+          }
+          detail={
+            item.status === 'ok' && item.exitCode !== null && item.exitCode !== 0
+              ? `exit ${item.exitCode}`
+              : item.status !== 'running' && item.status !== 'ok' && item.exitCode !== null
+                ? `exit ${item.exitCode}`
+                : null
+          }
+        />
       </button>
 
       {expanded && (
-        <div className="border-t border-border px-3 py-2">
+        <div className="border-t border-border px-3 py-[var(--density-tool-padding)]">
           {item.input !== null && item.input !== undefined && (
             <details className="mb-2">
               <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
@@ -139,44 +159,5 @@ export function ToolBlock({ item }: { item: ToolItem }): React.JSX.Element {
         </div>
       )}
     </div>
-  );
-}
-
-function StatusPill({
-  status,
-  exitCode,
-}: {
-  status: ToolItem['status'];
-  exitCode: number | null;
-}): React.JSX.Element {
-  if (status === 'running') {
-    return (
-      <span className="flex shrink-0 items-center gap-1 text-xs text-state-busy">
-        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-        <span>Running</span>
-      </span>
-    );
-  }
-  if (status === 'ok') {
-    return (
-      <span className="flex shrink-0 items-center gap-1 text-xs text-state-passed">
-        <Check className="h-3.5 w-3.5" />
-        {exitCode !== null && exitCode !== 0 ? exitCode : null}
-      </span>
-    );
-  }
-  if (status === 'denied') {
-    return (
-      <span className="flex shrink-0 items-center gap-1 text-xs text-state-blocked">
-        <Ban className="h-3.5 w-3.5" />
-        denied
-      </span>
-    );
-  }
-  return (
-    <span className="flex shrink-0 items-center gap-1 text-xs text-state-failed">
-      <X className="h-3.5 w-3.5" />
-      {exitCode !== null ? `exit ${exitCode}` : status}
-    </span>
   );
 }

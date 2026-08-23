@@ -1,33 +1,38 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ChevronRight, Layers, Loader2 } from 'lucide-react';
 import { shouldExpandGroup, summarizeToolGroup } from '@/lib/group-items';
 import type { ToolItem } from '@/lib/tool-summary';
 import { useDisplaySettings } from '@/state/DisplaySettingsContext';
 import { ToolBlock } from './ToolBlock';
+import { WorkerBadge } from './AgentBadge';
 import { cn, formatDuration } from '@/lib/utils';
 
 /** One row for a run of tool calls, standing in for the stack of blocks inside it. */
-export function ToolGroup({ items }: { items: ToolItem[] }): React.JSX.Element {
+export function ToolGroup({
+  items,
+  profileLabel,
+}: {
+  items: ToolItem[];
+  profileLabel?: string;
+}): React.JSX.Element {
   const { density } = useDisplaySettings();
   const auto = shouldExpandGroup(items, density);
   const [override, setOverride] = useState<boolean | null>(null);
-  const [densityAtOverride, setDensityAtOverride] = useState(density);
 
-  if (density !== densityAtOverride) {
-    setDensityAtOverride(density);
+  useEffect(() => {
     setOverride(null);
-  }
+  }, [density]);
 
   const open = override ?? auto;
   const summary = summarizeToolGroup(items);
 
   return (
-    <div className={cn('rounded-md border', summary.failed > 0 ? 'border-state-failed-border' : 'border-border')}>
+    <div className={cn('min-w-0 rounded-md border', summary.failed > 0 ? 'border-state-failed-border' : 'border-border')}>
       <button
         type="button"
         onClick={() => setOverride(!open)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent/40"
+        className="flex w-full min-w-0 items-center gap-2 px-3 py-[var(--density-tool-padding)] text-left text-sm hover:bg-accent/40"
       >
         <ChevronRight
           className={cn(
@@ -36,6 +41,7 @@ export function ToolGroup({ items }: { items: ToolItem[] }): React.JSX.Element {
           )}
         />
         <Layers className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <WorkerBadge agent={items[0]?.agent ?? 'unknown'} label={profileLabel} className="shrink-0" />
         <span className="min-w-0 flex-1 truncate text-xs text-foreground/90">
           {summary.steps} steps
           {summary.durationMs !== null && (
@@ -53,7 +59,7 @@ export function ToolGroup({ items }: { items: ToolItem[] }): React.JSX.Element {
       </button>
 
       {open && (
-        <div className="flex flex-col gap-2 border-t border-border p-2">
+        <div className="flex min-w-0 flex-col gap-2 border-t border-border p-[var(--density-tool-padding)]">
           {items.map((item) => (
             <ToolBlock key={item.id} item={item} />
           ))}

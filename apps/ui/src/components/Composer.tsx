@@ -63,7 +63,7 @@ export function Composer(): React.JSX.Element {
   };
 
   return (
-    <div className="border-t border-border bg-surface-sunken px-[var(--density-shell-gutter)] py-3">
+    <div className="border-t border-border bg-surface-sunken px-[var(--density-shell-gutter)] py-[var(--density-composer-padding)]">
       <div className="mx-auto flex max-w-3xl flex-col gap-2">
         <div className="awos-scroll flex min-w-0 items-center gap-1.5 overflow-x-auto pb-px">
           {profiles.map((probe) => {
@@ -124,7 +124,7 @@ export function Composer(): React.JSX.Element {
                 ? `${getAgentStyle(blockedBy).label} is working — stop it to send`
                 : `Message ${getAgentStyle(agent, selectedProfile?.label).label}…`
             }
-            className="max-h-60 py-3 pr-12"
+            className="max-h-60 py-[var(--density-composer-padding)] pr-12"
           />
           <Button
             size="icon"
