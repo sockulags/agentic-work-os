@@ -49,6 +49,7 @@ export function idleRuntime(overrides: Partial<ThreadRuntimeState> = {}): Thread
     threadId: 't1',
     busyWith: null,
     busy: [],
+    runStates: [],
     lanes: {},
     currentTurnId: null,
     lastTurnAgent: null,

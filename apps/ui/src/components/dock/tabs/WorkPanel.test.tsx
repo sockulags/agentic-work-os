@@ -39,6 +39,7 @@ function run(overrides: Partial<RunView> = {}): RunView {
     context: '<work-item>the issue as it was</work-item>',
     revision: REVISION,
     state: 'completed',
+    interruptedByRestart: false,
     detail: null,
     ts: 1,
     outcome: null,
@@ -158,6 +159,13 @@ describe('WorkPanel', () => {
       expect(screen.getByText('start on this')).toBeTruthy();
       expect(screen.getByText('Failed')).toBeTruthy();
       expect(screen.getByText('the CLI died')).toBeTruthy();
+    });
+
+    test('distinguishes an interrupted restart from a live worker', () => {
+      render({ runs: [run({ state: 'interrupted', interruptedByRestart: true })] });
+
+      expect(screen.getByText('Interrupted by restart')).toBeTruthy();
+      expect(screen.queryByText('Running')).toBeNull();
     });
 
     test('the context sent is inspectable, which is the point of recording it', () => {

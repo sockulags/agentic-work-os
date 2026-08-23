@@ -32,8 +32,8 @@ import { cn } from '@/lib/utils';
  * The panel exists to make three things checkable that the transcript cannot answer on
  * its own: what authorized the work, exactly what the agent was handed, and whether the
  * source has moved since. Everything here is read from the harness — the item from the
- * core, the runs from the event log the transcript already has — so nothing on screen is
- * a second copy that can disagree with the record.
+ * core, the run details from the event log, and live/restart status from the core
+ * projection — so nothing on screen is a second copy that can disagree with the record.
  */
 export function WorkPanel(): React.JSX.Element {
   const { activeThreadId, work, attachWorkItem, refreshWorkItem, detachWorkItem } =

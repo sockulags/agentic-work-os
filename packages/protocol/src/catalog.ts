@@ -51,6 +51,8 @@ export interface CatalogRunEvidence {
   state: CatalogRunState;
   /** True only when the matching run is backed by a currently busy in-memory runtime. */
   live: boolean;
+  /** True when a persisted start has no terminal event and no matching live runtime. */
+  interruptedByRestart: boolean;
   evidenceCount: number;
 }
 

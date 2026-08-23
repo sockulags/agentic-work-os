@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import type { HarnessEvent } from '@awos/protocol';
+import type { CatalogRunEvidence, HarnessEvent } from '@awos/protocol';
 import { foldRuns } from './runs';
 
 let seq = 0;
@@ -51,16 +51,62 @@ describe('foldRuns', () => {
     expect(runs[0]?.agent).toBe('claude');
   });
 
-  test('a run with no completion is still in flight rather than missing', () => {
-    expect(foldRuns([started('r1')])[0]?.state).toBe('running');
+  test('fails closed when core has not supplied a run projection', () => {
+    const [run] = foldRuns([started('r1')]);
+
+    expect(run?.state).toBe('interrupted');
+    expect(run?.interruptedByRestart).toBe(true);
+  });
+
+  test('a run remains running when core confirms its exact live runtime', () => {
+    const status: CatalogRunEvidence = {
+      runId: 'r1',
+      threadId: 't1',
+      agent: 'claude',
+      startedAt: 1_001,
+      state: 'running',
+      live: true,
+      interruptedByRestart: false,
+      evidenceCount: 0,
+    };
+
+    expect(foldRuns([started('r1')], [status])[0]?.state).toBe('running');
+  });
+
+  test('uses the core projection to mark an unfinished run interrupted by restart', () => {
+    const status: CatalogRunEvidence = {
+      runId: 'r1',
+      threadId: 't1',
+      agent: 'claude',
+      startedAt: 1_001,
+      state: 'interrupted',
+      live: false,
+      interruptedByRestart: true,
+      evidenceCount: 0,
+    };
+
+    const [run] = foldRuns([started('r1')], [status]);
+
+    expect(run?.state).toBe('interrupted');
+    expect(run?.interruptedByRestart).toBe(true);
   });
 
   test('pairs a completion with the run it belongs to', () => {
+    const liveR2: CatalogRunEvidence = {
+      runId: 'r2',
+      threadId: 't1',
+      agent: 'claude',
+      startedAt: 1_002,
+      state: 'running',
+      live: true,
+      interruptedByRestart: false,
+      evidenceCount: 0,
+    };
     const runs = foldRuns([
       started('r1'),
       started('r2'),
       event({ kind: 'run.completed', runId: 'r1', state: 'error', detail: 'the CLI died' }),
-    ]);
+    ], [liveR2]);
 
     const byId = new Map(runs.map((run) => [run.runId, run]));
     expect(byId.get('r1')?.state).toBe('error');

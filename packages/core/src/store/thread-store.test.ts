@@ -56,6 +56,26 @@ describe('ThreadStore', () => {
     assert.equal(second.head(thread.id), 1);
   });
 
+  test('does not revive persisted lane mode while keeping session and lane history', () => {
+    const first = new ThreadStore(dir);
+    const thread = first.create({ cwd: '/repo' });
+    first.update(thread.id, { parallel: true });
+    first.setNativeSession(thread.id, 'claude', 'sess-abc');
+    first.append(thread.id, 'claude', {
+      kind: 'lane.updated',
+      status: 'provisioned',
+      path: '/data/threads/t1/lanes/claude',
+      detail: null,
+    });
+
+    const second = new ThreadStore(dir);
+    const reloaded = second.get(thread.id);
+
+    assert.equal(reloaded?.parallel, false);
+    assert.equal(reloaded?.nativeSessions.claude, 'sess-abc');
+    assert.equal(second.events(thread.id).some((event) => event.kind === 'lane.updated'), true);
+  });
+
   test('clears a stale native session and its replay watermark together', () => {
     const store = new ThreadStore(dir);
     const thread = store.create({ cwd: '/repo' });

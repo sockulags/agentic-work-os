@@ -993,6 +993,14 @@ describe('work items', () => {
     const started = runs(revived, thread.id)[0];
     assert.ok(started?.kind === 'run.started');
     assert.match(started.context, /<work-item>/);
+    const projected = revived.state(thread.id).runStates.find((run) => run.runId === started.runId);
+    assert.equal(projected?.state, 'completed');
+    assert.equal(projected?.interruptedByRestart, false);
+    assert.equal(
+      revived.store.events(thread.id).filter((event) => event.kind === 'run.completed').length,
+      1,
+      'a clean restart does not add another completion',
+    );
   });
 
   describe('refreshing', () => {

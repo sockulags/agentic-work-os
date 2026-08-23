@@ -66,7 +66,7 @@ function request(socket: WebSocket, type: string, payload: Record<string, unknow
   });
 }
 
-test('catalog overlays linked threads and does not call a persisted unfinished run live after restart', async () => {
+test('catalog overlays linked threads and presents an unfinished run as interrupted after restart', async () => {
   const dataDir = tempDir();
   const cwd = workspaceRoot;
   const orch = new Orchestrator(config(dataDir));
@@ -101,7 +101,13 @@ test('catalog overlays linked threads and does not call a persisted unfinished r
   assert.equal(overlay?.linkedThreads[0]?.title, 'Linked thread');
   assert.equal(overlay?.runs[0]?.runId, 'historical-run');
   assert.equal(overlay?.runs[0]?.live, false);
-  assert.equal(overlay?.runs[0]?.state, 'unknown');
+  assert.equal(overlay?.runs[0]?.state, 'interrupted');
+  assert.equal(overlay?.runs[0]?.interruptedByRestart, true);
+  assert.equal(
+    orch.store.events(thread.id).filter((event) => event.kind === 'run.completed').length,
+    0,
+    'restart projection does not append a synthetic completion',
+  );
 });
 
 test('keeps linked overlay without a source snapshot and matches live state by exact run id', async () => {
@@ -138,6 +144,10 @@ test('keeps linked overlay without a source snapshot and matches live state by e
     assert.equal(overlay?.linkedThreads[0]?.threadId, thread.id);
     assert.equal(overlay?.runs[0]?.runId, 'unfinished-old-run');
     assert.equal(overlay?.runs[0]?.live, false);
+    assert.equal(overlay?.runs[0]?.state, 'interrupted');
+    assert.equal(overlay?.runs[0]?.interruptedByRestart, true);
+    assert.equal(orch.state(thread.id).runStates[0]?.state, 'interrupted');
+    assert.equal(orch.state(thread.id).runStates[0]?.interruptedByRestart, true);
     assert.equal(orch.state(thread.id).busyWith, 'claude', 'the unrelated turn was actually busy');
     await ordinaryTurn;
   } finally {

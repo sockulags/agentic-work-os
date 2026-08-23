@@ -8,6 +8,7 @@
 
 import type { AgentId, ApprovalRequestedBody, HarnessEvent, PlanItem } from './events.js';
 import type { AgentCapabilities } from './capabilities.js';
+import type { CatalogRunEvidence } from './catalog.js';
 import type { WorkerProfileId } from './events.js';
 import type { WorkspaceResolution } from './workspace.js';
 import type { WorkspaceRoleSelection } from './role-selection.js';
@@ -71,6 +72,8 @@ export interface ThreadRuntimeState {
   busyWith: AgentId | null;
   /** Every agent with a turn in flight right now. */
   busy: AgentId[];
+  /** Run history projected from the ledger with the exact live-runtime overlay. */
+  runStates: CatalogRunEvidence[];
   /** Where each agent's working copy is, for the agents that have a lane. */
   lanes: Partial<Record<AgentId, string>>;
   currentTurnId: string | null;
