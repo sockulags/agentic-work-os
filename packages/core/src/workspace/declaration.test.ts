@@ -45,6 +45,197 @@ describe('parseDeclaration', () => {
     assert.deepEqual(result.declaration?.verify?.map((entry) => entry.name), ['typecheck', 'test']);
   });
 
+  test('keeps version 1 declarations compatible and projects no routing', () => {
+    const result = parse({ version: 1, name: 'legacy' });
+
+    assert.deepEqual(result.problems, []);
+    assert.equal(result.declaration?.version, 1);
+    assert.equal(result.declaration?.roles, undefined);
+    assert.equal(result.declaration?.steps, undefined);
+    assert.equal(result.declaration?.routes, undefined);
+  });
+
+  test('accepts the closed version 2 routing contract', () => {
+    const result = parse({
+      version: 2,
+      name: 'awos',
+      agents: ['codex'],
+      roles: [{ id: 'maintainer', label: 'Maintainer' }],
+      steps: [{ id: 'implement', action: 'Implement the issue', role: 'maintainer', workers: ['codex'] }],
+      routes: [{
+        id: 'implement-issues',
+        match: { allLabels: ['implement'], noneLabels: ['blocked'] },
+        step: 'implement',
+      }],
+    });
+
+    assert.deepEqual(result.problems, []);
+    assert.deepEqual(result.declaration?.roles, [{ id: 'maintainer', label: 'Maintainer' }]);
+    assert.deepEqual(result.declaration?.steps, [{
+      id: 'implement', action: 'Implement the issue', role: 'maintainer', workers: ['codex'],
+    }]);
+    assert.deepEqual(result.declaration?.routes, [{
+      id: 'implement-issues',
+      match: { allLabels: ['implement'], noneLabels: ['blocked'] },
+      step: 'implement',
+    }]);
+  });
+
+  test('rejects unknown routing fields at every nested level', () => {
+    const result = parse({
+      version: 2,
+      name: 'awos',
+      roles: [{ id: 'maintainer', label: 'Maintainer', color: 'blue' }],
+      steps: [{ id: 'implement', action: 'Implement', role: 'maintainer', workers: ['codex'], guard: true }],
+      routes: [{ id: 'issues', match: { allLabels: ['implement'], labels: ['other'] }, step: 'implement', priority: 1 }],
+    });
+
+    assert.deepEqual(paths(result), ['roles[0].color', 'steps[0].guard', 'routes[0].priority', 'routes[0].match.labels']);
+  });
+
+  test('uses the existing lowercase hyphenated rule for routing ids and text', () => {
+    const result = parse({
+      version: 2,
+      name: 'awos',
+      roles: [{ id: 'Not_Stable', label: '   ' }],
+    });
+
+    assert.deepEqual(paths(result), ['roles[0].id', 'roles[0].label']);
+  });
+
+  test('reports invalid routing value types at their declaration paths', () => {
+    const result = parse({ version: 2, name: 'awos', roles: 'maintainer', steps: {}, routes: null });
+
+    assert.deepEqual(paths(result), ['roles', 'steps', 'routes']);
+    assert.match(result.problems[0]?.message ?? '', /array of role objects/);
+  });
+
+  test('rejects duplicate ids and unknown routing references', () => {
+    const result = parse({
+      version: 2,
+      name: 'awos',
+      roles: [{ id: 'maintainer', label: 'Maintainer' }, { id: 'maintainer', label: 'Another' }],
+      steps: [
+        { id: 'implement', action: 'Implement', role: 'maintainer', workers: ['codex'] },
+        { id: 'implement', action: 'Implement again', role: 'maintainer', workers: ['codex'] },
+      ],
+      routes: [
+        { id: 'issues', match: { anyLabels: ['implement'] }, step: 'missing-step' },
+        { id: 'issues', match: { anyLabels: ['other'] }, step: 'implement' },
+      ],
+    });
+
+    assert.deepEqual(paths(result), [
+      'roles[1].id',
+      'steps[1].id',
+      'routes[0].step',
+      'routes[1].id',
+    ]);
+  });
+
+  test('requires known workers that are allowed by the agents list', () => {
+    const result = parse({
+      version: 2,
+      name: 'awos',
+      agents: ['claude'],
+      roles: [{ id: 'maintainer', label: 'Maintainer' }],
+      steps: [{ id: 'implement', action: 'Implement', role: 'maintainer', workers: ['codex', 'not-a-profile'] }],
+    });
+
+    assert.deepEqual(paths(result), ['steps[0].workers[0]', 'steps[0].workers[1]']);
+    assert.match(result.problems[0]?.message ?? '', /not allowed/);
+    assert.match(result.problems[1]?.message ?? '', /Known profiles/);
+  });
+
+  test('rejects a duplicate worker id at its exact step path', () => {
+    const result = parse({
+      version: 2,
+      name: 'awos',
+      roles: [{ id: 'maintainer', label: 'Maintainer' }],
+      steps: [{ id: 'implement', action: 'Implement', role: 'maintainer', workers: ['codex', 'codex'] }],
+    });
+
+    assert.deepEqual(paths(result), ['steps[0].workers[1]']);
+    assert.match(result.problems[0]?.message ?? '', /listed more than once/);
+  });
+
+  test('rejects an unknown role reference at its exact step path', () => {
+    const result = parse({
+      version: 2,
+      name: 'awos',
+      roles: [{ id: 'maintainer', label: 'Maintainer' }],
+      steps: [{ id: 'review', action: 'Review', role: 'reviewer', workers: ['codex'] }],
+    });
+
+    assert.deepEqual(paths(result), ['steps[0].role']);
+    assert.match(result.problems[0]?.message ?? '', /Unknown role "reviewer"/);
+  });
+
+  test('rejects empty, duplicate, and contradictory route matchers', () => {
+    const result = parse({
+      version: 2,
+      name: 'awos',
+      roles: [{ id: 'maintainer', label: 'Maintainer' }],
+      steps: [{ id: 'implement', action: 'Implement', role: 'maintainer', workers: ['codex'] }],
+      routes: [
+        { id: 'empty', match: {}, step: 'implement' },
+        { id: 'duplicate', match: { allLabels: ['bug', 'bug'] }, step: 'implement' },
+        { id: 'contradiction', match: { allLabels: ['bug'], noneLabels: ['bug'] }, step: 'implement' },
+      ],
+    });
+
+    assert.deepEqual(paths(result), [
+      'routes[0].match',
+      'routes[1].match.allLabels[1]',
+      'routes[2].match.noneLabels',
+    ]);
+  });
+
+  test('allows satisfiable overlap between matcher lists', () => {
+    const result = parse({
+      version: 2,
+      name: 'awos',
+      roles: [{ id: 'maintainer', label: 'Maintainer' }],
+      steps: [{ id: 'implement', action: 'Implement', role: 'maintainer', workers: ['codex'] }],
+      routes: [{
+        id: 'issues',
+        match: { allLabels: ['bug'], anyLabels: ['bug', 'ready'], noneLabels: ['ready'] },
+        step: 'implement',
+      }],
+    });
+
+    assert.deepEqual(result.problems, []);
+  });
+
+  test('rejects an any-label requirement when every option is forbidden', () => {
+    const result = parse({
+      version: 2,
+      name: 'awos',
+      roles: [{ id: 'maintainer', label: 'Maintainer' }],
+      steps: [{ id: 'implement', action: 'Implement', role: 'maintainer', workers: ['codex'] }],
+      routes: [{
+        id: 'impossible',
+        match: { anyLabels: ['bug', 'blocked'], noneLabels: ['bug', 'blocked'] },
+        step: 'implement',
+      }],
+    });
+
+    assert.deepEqual(paths(result), ['routes[0].match.anyLabels']);
+    assert.match(result.problems[0]?.message ?? '', /cannot match/);
+  });
+
+  test('does not allow a local override to define shared routing', () => {
+    const result = parseDeclaration(JSON.stringify({
+      version: 2,
+      roles: [],
+      steps: [],
+      routes: [],
+    }), { file: 'local', standalone: false });
+
+    assert.deepEqual(paths(result), ['roles', 'steps', 'routes']);
+    assert.match(result.problems[0]?.message ?? '', /shared workspace declaration/);
+  });
+
   test('reports every problem at once, so one edit can fix the file', () => {
     const result = parse({
       version: WORKSPACE_SCHEMA_VERSION,
@@ -66,7 +257,7 @@ describe('parseDeclaration', () => {
       const result = parse({ version: WORKSPACE_SCHEMA_VERSION + 1, name: 'awos' });
 
       assert.equal(result.declaration, null);
-      assert.match(result.problems[0]?.message ?? '', /understands version 1/);
+      assert.match(result.problems[0]?.message ?? '', /understands version 1 and 2/);
     });
   });
 

@@ -16,7 +16,7 @@
  * the shape both ends agree on.
  */
 
-import type { AgentId } from './events.js';
+import type { AgentId, WorkerProfileId } from './events.js';
 
 /**
  * The version this build understands.
@@ -26,7 +26,7 @@ import type { AgentId } from './events.js';
  * valid to an older validator, and silently running with half a contract is worse than
  * saying which build you need.
  */
-export const WORKSPACE_SCHEMA_VERSION = 1;
+export const WORKSPACE_SCHEMA_VERSION = 2;
 
 /** Path of the shared declaration, relative to the workspace root. */
 export const WORKSPACE_FILE = '.awos/workspace.json';
@@ -81,6 +81,34 @@ export interface WorkspaceContext {
   notes: string;
 }
 
+/** A named role in the shared workspace routing contract. */
+export interface WorkspaceRole {
+  id: string;
+  label: string;
+}
+
+/** A routing step that assigns work to a role and its allowed worker profiles. */
+export interface WorkspaceStep {
+  id: string;
+  action: string;
+  role: string;
+  workers: WorkerProfileId[];
+}
+
+/** Label predicates supported by a workspace route. */
+export interface WorkspaceRouteMatch {
+  allLabels?: string[];
+  anyLabels?: string[];
+  noneLabels?: string[];
+}
+
+/** A declaration-order route from issue labels to a routing step. */
+export interface WorkspaceRoute {
+  id: string;
+  match: WorkspaceRouteMatch;
+  step: string;
+}
+
 /**
  * Something wrong with a declaration, addressed to whoever has to fix it.
  *
@@ -112,7 +140,10 @@ export type WorkspaceField =
   | 'setup'
   | 'verify'
   | 'integration'
-  | 'context';
+  | 'context'
+  | 'roles'
+  | 'steps'
+  | 'routes';
 
 /** A declaration resolved through every layer, with the provenance of each field. */
 export interface EffectiveWorkspace {
@@ -126,6 +157,9 @@ export interface EffectiveWorkspace {
   verify: VerifyCommand[];
   integration: WorkspaceIntegration;
   context: WorkspaceContext;
+  roles: WorkspaceRole[];
+  steps: WorkspaceStep[];
+  routes: WorkspaceRoute[];
   origins: Record<WorkspaceField, WorkspaceOrigin>;
   /** Files that contributed, in the order they were applied. */
   sources: string[];

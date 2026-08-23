@@ -1,5 +1,12 @@
 import { AGENT_IDS, WORKSPACE_SCHEMA_VERSION } from '@awos/protocol';
-import type { AgentId, VerifyCommand, WorkspaceProblem } from '@awos/protocol';
+import type {
+  AgentId,
+  VerifyCommand,
+  WorkspaceProblem,
+  WorkspaceRole,
+  WorkspaceRoute,
+  WorkspaceStep,
+} from '@awos/protocol';
 
 /**
  * Reading and checking one workspace file.
@@ -24,6 +31,9 @@ export interface WorkspaceDeclaration {
   verify?: VerifyCommand[];
   integration?: { requires?: string[]; allowOverride?: boolean };
   context?: { references?: string[]; notes?: string };
+  roles?: WorkspaceRole[];
+  steps?: WorkspaceStep[];
+  routes?: WorkspaceRoute[];
 }
 
 export interface ParsedDeclaration {
@@ -55,14 +65,19 @@ const TOP_LEVEL_KEYS = [
   'verify',
   'integration',
   'context',
+  'roles',
+  'steps',
+  'routes',
 ] as const;
 
 const MAX_NAME_CHARS = 80;
 const MAX_REFERENCES = 20;
 
 /** Lowercase and hyphenated, because later gates will name these on a command line. */
-const VERIFY_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+const STABLE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
+const VERIFY_NAME_RE = STABLE_ID_RE;
 const GITHUB_REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+const SUPPORTED_SCHEMA_VERSIONS = [1, WORKSPACE_SCHEMA_VERSION] as const;
 
 export function parseDeclaration(raw: string, options: ParseOptions): ParsedDeclaration {
   const problems: WorkspaceProblem[] = [];
@@ -102,12 +117,14 @@ export function parseDeclaration(raw: string, options: ParseOptions): ParsedDecl
     fail('version', `Missing "version". This build writes and reads version ${WORKSPACE_SCHEMA_VERSION}.`);
   } else if (typeof version !== 'number' || !Number.isInteger(version)) {
     fail('version', '"version" must be a whole number.');
-  } else if (version !== WORKSPACE_SCHEMA_VERSION) {
+  } else if (!(SUPPORTED_SCHEMA_VERSIONS as readonly number[]).includes(version)) {
     fail(
       'version',
       `Schema version ${version} is not supported. This build understands version ` +
-        `${WORKSPACE_SCHEMA_VERSION}; upgrade Agentic Work OS or lower the version.`,
+        `${SUPPORTED_SCHEMA_VERSIONS.join(' and ')}; upgrade Agentic Work OS or lower the version.`,
     );
+  } else {
+    declaration.version = version;
   }
 
   const name = parsed['name'];
@@ -320,6 +337,8 @@ export function parseDeclaration(raw: string, options: ParseOptions): ParsedDecl
     }
   }
 
+  parseRouting(parsed, declaration, version === WORKSPACE_SCHEMA_VERSION, options, fail);
+
   return {
     declaration: problems.some((problem) => problem.severity === 'error') ? null : declaration,
     problems,
@@ -327,6 +346,279 @@ export function parseDeclaration(raw: string, options: ParseOptions): ParsedDecl
 }
 
 // ---------------------------------------------------------------------------
+
+function parseRouting(
+  parsed: Record<string, unknown>,
+  declaration: WorkspaceDeclaration,
+  version2: boolean,
+  options: ParseOptions,
+  fail: (path: string, message: string) => void,
+): void {
+  const routingKeys = ['roles', 'steps', 'routes'] as const;
+  const hasRouting = routingKeys.some((key) => parsed[key] !== undefined);
+  if (!hasRouting) return;
+
+  if (!version2) {
+    for (const key of routingKeys) {
+      if (parsed[key] !== undefined) {
+        fail(key, `"${key}" is only supported by schema version ${WORKSPACE_SCHEMA_VERSION}.`);
+      }
+    }
+    return;
+  }
+
+  if (!options.standalone) {
+    for (const key of routingKeys) {
+      if (parsed[key] !== undefined) {
+        fail(key, `Local overrides cannot define "${key}"; routing belongs to the shared workspace declaration.`);
+      }
+    }
+    return;
+  }
+
+  if (parsed.roles !== undefined) {
+    const roles = parseRoles(parsed.roles, fail);
+    if (roles !== undefined) declaration.roles = roles;
+  }
+
+  const roleIds = new Set((declaration.roles ?? []).map((role) => role.id));
+  const allowedAgents = new Set(declaration.agents ?? AGENT_IDS);
+  if (parsed.steps !== undefined) {
+    const steps = parseSteps(parsed.steps, roleIds, allowedAgents, fail);
+    if (steps !== undefined) declaration.steps = steps;
+  }
+
+  const stepIds = new Set((declaration.steps ?? []).map((step) => step.id));
+  if (parsed.routes !== undefined) {
+    const routes = parseRoutes(parsed.routes, stepIds, fail);
+    if (routes !== undefined) declaration.routes = routes;
+  }
+}
+
+function parseRoles(
+  raw: unknown,
+  fail: (path: string, message: string) => void,
+): WorkspaceRole[] | undefined {
+  if (!Array.isArray(raw)) {
+    fail('roles', '"roles" must be an array of role objects.');
+    return undefined;
+  }
+
+  const seen = new Set<string>();
+  const roles: WorkspaceRole[] = [];
+  raw.forEach((entry, index) => {
+    const at = `roles[${index}]`;
+    if (!isRecord(entry)) {
+      fail(at, 'Each role must be an object with "id" and "label".');
+      return;
+    }
+    rejectUnknown(entry, ['id', 'label'], at, fail);
+    const id = parseStableId(entry.id, `${at}.id`, 'role', fail);
+    const duplicateId = id !== null && seen.has(id);
+    if (duplicateId) fail(`${at}.id`, `Two roles are both called "${id}".`);
+    else if (id !== null) seen.add(id);
+    const label = parseHumanText(entry.label, `${at}.label`, 'role label', fail);
+    if (id === null || label === null) return;
+    if (duplicateId) return;
+    roles.push({ id, label });
+  });
+  return roles;
+}
+
+function parseSteps(
+  raw: unknown,
+  roleIds: Set<string>,
+  allowedAgents: Set<AgentId>,
+  fail: (path: string, message: string) => void,
+): WorkspaceStep[] | undefined {
+  if (!Array.isArray(raw)) {
+    fail('steps', '"steps" must be an array of step objects.');
+    return undefined;
+  }
+
+  const seen = new Set<string>();
+  const steps: WorkspaceStep[] = [];
+  raw.forEach((entry, index) => {
+    const at = `steps[${index}]`;
+    if (!isRecord(entry)) {
+      fail(at, 'Each step must be an object with "id", "action", "role" and "workers".');
+      return;
+    }
+    rejectUnknown(entry, ['id', 'action', 'role', 'workers'], at, fail);
+    const id = parseStableId(entry.id, `${at}.id`, 'step', fail);
+    const duplicateId = id !== null && seen.has(id);
+    if (duplicateId) fail(`${at}.id`, `Two steps are both called "${id}".`);
+    else if (id !== null) seen.add(id);
+    const action = parseHumanText(entry.action, `${at}.action`, 'step action', fail);
+    const role = parseStableId(entry.role, `${at}.role`, 'step role', fail);
+    if (role !== null && !roleIds.has(role)) {
+      fail(`${at}.role`, `Unknown role "${role}". Declare it under "roles" first.`);
+    }
+
+    const workers = entry.workers;
+    const workerIds: AgentId[] = [];
+    const seenWorkers = new Set<AgentId>();
+    if (!Array.isArray(workers) || workers.length === 0) {
+      fail(`${at}.workers`, '"workers" must be a non-empty array of WorkerProfile ids.');
+    } else {
+      workers.forEach((worker, workerIndex) => {
+        if (typeof worker !== 'string' || !(AGENT_IDS as readonly string[]).includes(worker)) {
+          fail(
+            `${at}.workers[${workerIndex}]`,
+            `Unknown WorkerProfile "${String(worker)}". Known profiles: ${AGENT_IDS.join(', ')}.`,
+          );
+          return;
+        }
+        if (!allowedAgents.has(worker as AgentId)) {
+          fail(
+            `${at}.workers[${workerIndex}]`,
+            `WorkerProfile "${worker}" is not allowed by this workspace's "agents" list.`,
+          );
+          return;
+        }
+        const workerId = worker as AgentId;
+        if (seenWorkers.has(workerId)) {
+          fail(`${at}.workers[${workerIndex}]`, `WorkerProfile "${workerId}" is listed more than once in this step.`);
+          return;
+        }
+        seenWorkers.add(workerId);
+        workerIds.push(workerId);
+      });
+    }
+
+    if (id === null || action === null || role === null || !roleIds.has(role) || workerIds.length !== (Array.isArray(workers) ? workers.length : -1)) {
+      return;
+    }
+    if (duplicateId) return;
+    steps.push({ id, action, role, workers: workerIds });
+  });
+  return steps;
+}
+
+function parseRoutes(
+  raw: unknown,
+  stepIds: Set<string>,
+  fail: (path: string, message: string) => void,
+): WorkspaceRoute[] | undefined {
+  if (!Array.isArray(raw)) {
+    fail('routes', '"routes" must be an array of route objects.');
+    return undefined;
+  }
+
+  const seen = new Set<string>();
+  const routes: WorkspaceRoute[] = [];
+  raw.forEach((entry, index) => {
+    const at = `routes[${index}]`;
+    if (!isRecord(entry)) {
+      fail(at, 'Each route must be an object with "id", "match" and "step".');
+      return;
+    }
+    rejectUnknown(entry, ['id', 'match', 'step'], at, fail);
+    const id = parseStableId(entry.id, `${at}.id`, 'route', fail);
+    const duplicateId = id !== null && seen.has(id);
+    if (duplicateId) fail(`${at}.id`, `Two routes are both called "${id}".`);
+    else if (id !== null) seen.add(id);
+    const step = parseStableId(entry.step, `${at}.step`, 'route step', fail);
+    if (step !== null && !stepIds.has(step)) {
+      fail(`${at}.step`, `Unknown step "${step}". Declare it under "steps" first.`);
+    }
+
+    const match = parseRouteMatch(entry.match, `${at}.match`, fail);
+    if (id === null || step === null || !stepIds.has(step) || match === null) return;
+    if (duplicateId) return;
+    routes.push({ id, match, step });
+  });
+  return routes;
+}
+
+function parseRouteMatch(
+  raw: unknown,
+  at: string,
+  fail: (path: string, message: string) => void,
+): WorkspaceRoute['match'] | null {
+  if (!isRecord(raw)) {
+    fail(at, 'A route matcher must be an object with label lists.');
+    return null;
+  }
+  rejectUnknown(raw, ['allLabels', 'anyLabels', 'noneLabels'], at, fail);
+
+  const match: WorkspaceRoute['match'] = {};
+  let hasNonEmptyList = false;
+  let valid = true;
+  for (const key of ['allLabels', 'anyLabels', 'noneLabels'] as const) {
+    const rawLabels = raw[key];
+    if (rawLabels === undefined) continue;
+    if (!Array.isArray(rawLabels)) {
+      fail(`${at}.${key}`, `"${key}" must be an array of non-empty labels.`);
+      valid = false;
+      continue;
+    }
+    if (rawLabels.length > 0) hasNonEmptyList = true;
+    const labels: string[] = [];
+    const seenLabels = new Set<string>();
+    rawLabels.forEach((label, index) => {
+      if (typeof label !== 'string' || label.trim() === '') {
+        fail(`${at}.${key}[${index}]`, 'Labels must be non-empty strings.');
+        valid = false;
+        return;
+      }
+      const normalized = label.trim();
+      if (seenLabels.has(normalized)) {
+        fail(`${at}.${key}[${index}]`, `Label "${normalized}" appears more than once in "${key}".`);
+        valid = false;
+        return;
+      }
+      seenLabels.add(normalized);
+      labels.push(normalized);
+    });
+    match[key] = labels;
+  }
+
+  if (!hasNonEmptyList) {
+    fail(at, 'A route matcher must contain at least one non-empty label list.');
+    valid = false;
+  }
+  const required = new Set(match.allLabels ?? []);
+  const forbidden = new Set(match.noneLabels ?? []);
+  for (const label of required) {
+    if (forbidden.has(label)) {
+      fail(`${at}.noneLabels`, `Label "${label}" cannot be both required by "allLabels" and forbidden by "noneLabels".`);
+      valid = false;
+    }
+  }
+  const anyLabels = match.anyLabels ?? [];
+  if (anyLabels.length > 0 && anyLabels.every((label) => forbidden.has(label))) {
+    fail(`${at}.anyLabels`, 'Every label in "anyLabels" is forbidden by "noneLabels", so this matcher cannot match.');
+    valid = false;
+  }
+  return valid ? match : null;
+}
+
+function parseStableId(
+  value: unknown,
+  path: string,
+  kind: string,
+  fail: (path: string, message: string) => void,
+): string | null {
+  if (typeof value !== 'string' || !STABLE_ID_RE.test(value)) {
+    fail(path, `A ${kind} id must use lowercase letters, digits and hyphens, starting with a letter or digit.`);
+    return null;
+  }
+  return value;
+}
+
+function parseHumanText(
+  value: unknown,
+  path: string,
+  kind: string,
+  fail: (path: string, message: string) => void,
+): string | null {
+  if (typeof value !== 'string' || value.trim() === '') {
+    fail(path, `A ${kind} must be a non-empty string.`);
+    return null;
+  }
+  return value.trim();
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

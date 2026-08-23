@@ -138,6 +138,9 @@ function merge(
     verify: 'default',
     integration: 'default',
     context: 'default',
+    roles: 'default',
+    steps: 'default',
+    routes: 'default',
   };
 
   const workspace: EffectiveWorkspace = {
@@ -151,6 +154,9 @@ function merge(
     // a gate, and has certainly not asked for a way around one.
     integration: { requires: [], allowOverride: false },
     context: { references: [], notes: '' },
+    roles: [],
+    steps: [],
+    routes: [],
     origins,
     sources: [shared.file],
   };
@@ -200,6 +206,21 @@ function merge(
         notes: d.context.notes ?? '',
       };
       origins.context = origin;
+    }
+    // Routing is owned by the shared declaration. The parser rejects these fields in a
+    // local override, so keeping this in the same whole-field precedence loop preserves
+    // provenance without allowing machine-local routing to replace project policy.
+    if (origin === 'shared' && d.roles !== undefined) {
+      workspace.roles = d.roles;
+      origins.roles = origin;
+    }
+    if (origin === 'shared' && d.steps !== undefined) {
+      workspace.steps = d.steps;
+      origins.steps = origin;
+    }
+    if (origin === 'shared' && d.routes !== undefined) {
+      workspace.routes = d.routes;
+      origins.routes = origin;
     }
   }
 

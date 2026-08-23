@@ -67,6 +67,39 @@ describe('resolveWorkspace', () => {
     assert.deepEqual(workspace.sources, [WORKSPACE_FILE]);
   });
 
+  test('resolves a version 1 declaration with empty routing projections', () => {
+    const root = tempDir();
+    write(root, WORKSPACE_FILE, { version: 1, name: 'legacy' });
+
+    const workspace = ok(resolveWorkspace(root));
+    assert.deepEqual(workspace.roles, []);
+    assert.deepEqual(workspace.steps, []);
+    assert.deepEqual(workspace.routes, []);
+    assert.equal(workspace.origins.roles, 'default');
+    assert.deepEqual(workspace.sources, [WORKSPACE_FILE]);
+  });
+
+  test('resolves shared routing in declaration order with shared provenance', () => {
+    const root = tempDir();
+    shared(root, {
+      agents: ['codex'],
+      roles: [{ id: 'maintainer', label: 'Maintainer' }],
+      steps: [{ id: 'implement', action: 'Implement', role: 'maintainer', workers: ['codex'] }],
+      routes: [
+        { id: 'first', match: { anyLabels: ['bug'] }, step: 'implement' },
+        { id: 'second', match: { noneLabels: ['blocked'] }, step: 'implement' },
+      ],
+    });
+
+    const workspace = ok(resolveWorkspace(root));
+    assert.deepEqual(workspace.roles, [{ id: 'maintainer', label: 'Maintainer' }]);
+    assert.deepEqual(workspace.steps, [{ id: 'implement', action: 'Implement', role: 'maintainer', workers: ['codex'] }]);
+    assert.deepEqual(workspace.routes.map((route) => route.id), ['first', 'second']);
+    assert.equal(workspace.origins.roles, 'shared');
+    assert.equal(workspace.origins.steps, 'shared');
+    assert.equal(workspace.origins.routes, 'shared');
+  });
+
   test('resolves from a subdirectory, so a thread anywhere in the repo finds it', () => {
     const root = tempDir();
     shared(root);
@@ -156,6 +189,24 @@ describe('resolveWorkspace', () => {
       assert.equal(
         resolution.status === 'invalid' && resolution.problems[0]?.file,
         WORKSPACE_LOCAL_FILE,
+      );
+    });
+
+    test('a local override cannot replace shared routing', () => {
+      const root = tempDir();
+      shared(root, {
+        roles: [{ id: 'maintainer', label: 'Maintainer' }],
+      });
+      write(root, WORKSPACE_LOCAL_FILE, {
+        version: WORKSPACE_SCHEMA_VERSION,
+        roles: [],
+      });
+
+      const resolution = resolveWorkspace(root);
+      assert.equal(resolution.status, 'invalid');
+      assert.equal(
+        resolution.status === 'invalid' && resolution.problems[0]?.path,
+        'roles',
       );
     });
 
