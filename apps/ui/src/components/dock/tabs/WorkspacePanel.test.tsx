@@ -55,6 +55,76 @@ describe('WorkspacePanel', () => {
     expect(screen.getByText(/Read from/)).toBeTruthy();
   });
 
+  test('omits the role selector when the shared workspace declares no roles', () => {
+    render({ status: 'ok', problems: [], workspace: effective() });
+
+    expect(screen.queryByLabelText('Project role')).toBeNull();
+  });
+
+  test('shows a semantic role selector for the shared roles and persists changes', () => {
+    const setWorkspaceRole = vi.fn();
+    render(
+      {
+        status: 'ok',
+        problems: [],
+        workspace: effective({
+          roles: [
+            { id: 'maintainer', label: 'Maintainer' },
+            { id: 'reviewer', label: 'Reviewer' },
+          ],
+        }),
+      },
+      {
+        roleSelection: { status: 'needs-selection', roleId: null, role: null },
+        setWorkspaceRole,
+      },
+    );
+
+    const select = screen.getByLabelText('Project role');
+    expect(select).toHaveValue('');
+    expect(screen.getByText(/No role selected yet/)).toBeTruthy();
+    fireEvent.change(select, { target: { value: 'reviewer' } });
+    expect(setWorkspaceRole).toHaveBeenCalledWith('reviewer');
+  });
+
+  test('shows a role load error without inventing an interactive selection', () => {
+    render(
+      {
+        status: 'ok',
+        problems: [],
+        workspace: effective({ roles: [{ id: 'maintainer', label: 'Maintainer' }] }),
+      },
+      {
+        roleSelection: null,
+        roleSelectionError: 'Could not load the local role preference. Re-read the workspace to try again.',
+      },
+    );
+
+    expect(screen.queryByLabelText('Project role')).toBeNull();
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not load the local role preference.');
+    expect(screen.getByTitle('Read the declaration again')).toBeTruthy();
+  });
+
+  test('explains stale selections and exposes saving errors', () => {
+    render(
+      {
+        status: 'ok',
+        problems: [],
+        workspace: effective({ roles: [{ id: 'reviewer', label: 'Reviewer' }] }),
+      },
+      {
+        roleSelection: { status: 'stale', roleId: 'maintainer', role: null },
+        roleSelectionSave: 'failed',
+        roleSelectionError: 'Could not save the role preference.',
+      },
+    );
+
+    expect(screen.getByLabelText('Project role')).toHaveValue('');
+    expect(screen.getByText(/saved role.*stale/i)).toBeTruthy();
+    expect(screen.getByText(/no longer declared/i)).toBeTruthy();
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not save the role preference.');
+  });
+
   test('says where each value came from', () => {
     render({ status: 'ok', problems: [], workspace: effective() });
 
