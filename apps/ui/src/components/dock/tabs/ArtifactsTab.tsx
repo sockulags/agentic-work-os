@@ -14,6 +14,7 @@ import {
 import type { ArtifactKind } from '@awos/protocol';
 import type { Artifact } from '@/lib/artifacts';
 import { ArtifactView } from '@/components/artifact/ArtifactView';
+import { ReviewState } from '@/components/review/ReviewPatterns';
 import { useHarnessContext } from '@/state/HarnessContext';
 import { cn, formatRelative } from '@/lib/utils';
 
@@ -60,11 +61,14 @@ export function ArtifactsTab(): React.JSX.Element {
 
   if (selected === null) {
     return (
-      <p className="px-4 py-3 text-xs text-muted-foreground">
-        Nothing published yet. Anything an agent writes into{' '}
-        <code className="font-mono">.awos/artifacts/</code> in this thread&rsquo;s working
-        directory shows up here &mdash; markdown, Mermaid diagrams, JSON, CSV, images and HTML.
-      </p>
+      <div className="space-y-1 px-4 py-3 text-xs">
+        <ReviewState state="idle" label="No artifacts" />
+        <p className="text-muted-foreground">
+          Nothing published yet. Anything an agent writes into{' '}
+          <code className="font-mono">.awos/artifacts/</code> in this thread&rsquo;s working
+          directory shows up here &mdash; markdown, Mermaid diagrams, JSON, CSV, images and HTML.
+        </p>
+      </div>
     );
   }
 
@@ -120,7 +124,7 @@ function ArtifactRow({
         aria-current={selected}
         className={cn(
           'flex w-full items-start gap-2 px-3 py-1.5 text-left text-xs transition-colors',
-          'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring',
+          'awos-focus-ring',
           selected ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-accent/50',
         )}
       >

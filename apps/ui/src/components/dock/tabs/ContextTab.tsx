@@ -3,6 +3,7 @@ import { useHarnessContext } from '@/state/HarnessContext';
 import type { PinnedContextSave } from '@/hooks/useHarness';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
+import { ReviewState } from '@/components/review/ReviewPatterns';
 
 /** Where "you have room" turns into "you are about to run out". */
 const WARN_FRACTION = 0.9;
@@ -20,16 +21,22 @@ export function ContextTab(): React.JSX.Element {
 
   if (activeThreadId === null) {
     return (
-      <p className="px-4 py-3 text-xs text-muted-foreground">
-        Open a thread to pin context to it.
-      </p>
+      <div className="space-y-1 px-4 py-3 text-xs">
+        <ReviewState state="idle" label="No thread selected" />
+        <p className="text-muted-foreground">Open a thread to pin context to it.</p>
+      </div>
     );
   }
 
   // A thread is open but its notes have not arrived. Editing now would mean typing over
   // text we have not seen yet, so the box waits.
   if (pinnedContext === null || pinnedContext.threadId !== activeThreadId) {
-    return <p className="px-4 py-3 text-xs text-muted-foreground">Loading notes…</p>;
+    return (
+      <div className="space-y-1 px-4 py-3 text-xs">
+        <ReviewState state="busy" />
+        <p className="text-muted-foreground">Loading notes…</p>
+      </div>
+    );
   }
 
   const used = pinnedContext.text.length;

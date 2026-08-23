@@ -132,7 +132,7 @@ function DirectoryRow({
         type="button"
         onClick={() => onToggle(node.path)}
         style={{ paddingLeft: BASE_PADDING_PX + depth * INDENT_PX }}
-        className="flex w-full items-center gap-1 py-0.5 pr-2 text-left text-xs text-muted-foreground hover:bg-surface-interactive focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+        className="awos-focus-ring flex w-full items-center gap-1 py-0.5 pr-2 text-left text-xs text-muted-foreground hover:bg-surface-interactive"
       >
         <ChevronRight
           className={cn('h-3 w-3 shrink-0 transition-transform', open && 'rotate-90')}
@@ -196,8 +196,9 @@ function FileRow({
         onClick={() => onSelect(node.index)}
         title={title}
         style={{ paddingLeft: BASE_PADDING_PX + depth * INDENT_PX }}
+        aria-current={active ? 'true' : undefined}
         className={cn(
-          'flex w-full items-center gap-1.5 py-0.5 pr-2 text-left text-xs hover:bg-surface-interactive focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring',
+          'awos-focus-ring flex w-full items-center gap-1.5 py-0.5 pr-2 text-left text-xs hover:bg-surface-interactive',
           active && 'bg-surface-selected text-foreground',
         )}
       >

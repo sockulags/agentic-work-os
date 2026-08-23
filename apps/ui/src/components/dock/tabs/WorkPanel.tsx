@@ -1,19 +1,11 @@
 import { useEffect, useState } from 'react';
 import {
-  AlertTriangle,
-  CheckCircle2,
-  CircleSlash,
-  ExternalLink,
   GitMerge,
   Play,
   Plus,
-  RefreshCw,
-  Unlink,
 } from 'lucide-react';
 import type {
   AgentId,
-  EvidenceItem,
-  RequirementResult,
   RetainedItem,
   RetainedKind,
   RunClaim,
@@ -21,10 +13,18 @@ import type {
   WorkSourceError,
 } from '@awos/protocol';
 import { useHarnessContext } from '@/state/HarnessContext';
-import { getAgentStyle } from '@/components/AgentBadge';
 import { Button } from '@/components/ui/button';
+import {
+  CandidateSummary,
+  EvidenceItem as EvidenceItemView,
+  GateResult,
+  RetainedContextItem,
+  RunSummary,
+  ReviewState,
+  WorkItemHeader,
+} from '@/components/review/ReviewPatterns';
 import type { RunView } from '@/lib/runs';
-import { cn, formatRelative } from '@/lib/utils';
+import { cn } from '@/lib/utils';
 
 /**
  * The issue this thread is answering, and what has been run against it.
@@ -41,14 +41,20 @@ export function WorkPanel(): React.JSX.Element {
 
   if (activeThreadId === null) {
     return (
-      <p className="px-4 py-3 text-xs text-muted-foreground">
-        Open a thread to give it a work item.
-      </p>
+      <div className="space-y-1 px-4 py-3 text-xs">
+        <ReviewState state="idle" label="No thread selected" />
+        <p className="text-muted-foreground">Open a thread to give it a work item.</p>
+      </div>
     );
   }
 
   if (work === null || work.threadId !== activeThreadId) {
-    return <p className="px-4 py-3 text-xs text-muted-foreground">Loading the work item…</p>;
+    return (
+      <div className="space-y-1 px-4 py-3 text-xs">
+        <ReviewState state="busy" />
+        <p className="text-muted-foreground">Loading the work item…</p>
+      </div>
+    );
   }
 
   return (
@@ -57,7 +63,7 @@ export function WorkPanel(): React.JSX.Element {
         <AttachForm busy={work.busy} error={work.error} onAttach={attachWorkItem} />
       ) : (
         <>
-          <Issue
+          <WorkItemHeader
             item={work.item}
             busy={work.busy}
             onRefresh={() => void refreshWorkItem()}
@@ -73,7 +79,6 @@ export function WorkPanel(): React.JSX.Element {
     </div>
   );
 }
-
 function AttachForm({
   busy,
   error,
@@ -113,65 +118,6 @@ function AttachForm({
   );
 }
 
-function Issue({
-  item,
-  busy,
-  onRefresh,
-  onDetach,
-}: {
-  item: WorkItem;
-  busy: boolean;
-  onRefresh: () => void;
-  onDetach: () => void;
-}): React.JSX.Element {
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-start gap-2">
-        <span className="min-w-0 flex-1 font-mono text-[11px] text-muted-foreground">
-          {item.source.repo}#{item.source.number} · {item.snapshot.state}
-        </span>
-        <a
-          href={item.source.url}
-          target="_blank"
-          rel="noreferrer"
-          title="Open on GitHub"
-          className="shrink-0 rounded-md border border-input px-1.5 py-0.5 text-muted-foreground transition-colors hover:bg-accent"
-        >
-          <ExternalLink className="h-3 w-3" />
-        </a>
-        <button
-          type="button"
-          onClick={onRefresh}
-          disabled={busy}
-          title="Ask GitHub again"
-          className="shrink-0 rounded-md border border-input px-1.5 py-0.5 text-muted-foreground transition-colors hover:bg-accent disabled:opacity-40"
-        >
-          <RefreshCw className={cn('h-3 w-3', busy && 'animate-spin')} />
-        </button>
-        <button
-          type="button"
-          onClick={onDetach}
-          title="Unlink this issue from the thread"
-          className="shrink-0 rounded-md border border-input px-1.5 py-0.5 text-muted-foreground transition-colors hover:bg-accent"
-        >
-          <Unlink className="h-3 w-3" />
-        </button>
-      </div>
-
-      <p className="font-medium">{item.snapshot.title}</p>
-
-      {item.snapshot.labels.length > 0 && (
-        <p className="text-[10px] text-muted-foreground">{item.snapshot.labels.join(' · ')}</p>
-      )}
-
-      <p className="text-[10px] text-muted-foreground">
-        Read {formatRelative(item.fetchedAt)}
-        {item.lastRefreshedAt > item.fetchedAt && `, checked ${formatRelative(item.lastRefreshedAt)}`}
-      </p>
-    </div>
-  );
-}
-
 /**
  * The runs this thread has made, newest first.
  *
@@ -200,36 +146,10 @@ function Runs({ item }: { item: WorkItem }): React.JSX.Element {
 
 function Run({ run, currentRevision }: { run: RunView; currentRevision: string }): React.JSX.Element {
   const [showContext, setShowContext] = useState(false);
-  const agentStyle = run.agent ? getAgentStyle(run.agent) : null;
-  // The comparison the whole revision-freezing exists for: what this run read against what
-  // the issue says now.
-  const sourceMoved = run.revision !== '' && run.revision !== currentRevision;
 
   return (
     <li className="space-y-1">
-      <div className="flex items-center gap-1.5">
-        {agentStyle && (
-          <span
-            style={agentStyle.cssVars}
-            className={cn(agentStyle.root, 'rounded px-1 py-px text-[9px]', agentStyle.bg, agentStyle.text)}
-          >
-            {agentStyle.label}
-          </span>
-        )}
-        <span className={cn('text-[10px]', STATE_STYLE[run.state])}>{STATE_LABEL[run.state]}</span>
-        <span className="text-[10px] text-muted-foreground">{formatRelative(run.ts)}</span>
-      </div>
-
-      <p className="break-words">{run.instruction}</p>
-
-      {run.detail && <p className="text-[10px] text-muted-foreground">{run.detail}</p>}
-
-      {sourceMoved && (
-        <p className="flex items-start gap-1 text-[10px] text-state-stale">
-          <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
-          The issue has changed since this run. Its context is kept as it was.
-        </p>
-      )}
+      <RunSummary run={run} currentRevision={currentRevision} />
 
       <Outcome run={run} />
       <Evidence run={run} />
@@ -357,10 +277,11 @@ function Outcome({ run }: { run: RunView }): React.JSX.Element {
  * the point here is to be able to check it.
  */
 function Evidence({ run }: { run: RunView }): React.JSX.Element {
-  const { recordEvidence } = useHarnessContext();
+  const { recordEvidence, gates } = useHarnessContext();
   const [adding, setAdding] = useState(false);
   const [url, setUrl] = useState('');
   const [summary, setSummary] = useState('');
+  const candidateTree = run.agent === null ? undefined : gates[run.agent]?.candidate.tree;
 
   const attached = new Set(run.evidence.map((item) => item.ref.eventId));
   const unattached = run.candidates.filter((candidate) => !attached.has(candidate.eventId));
@@ -368,9 +289,9 @@ function Evidence({ run }: { run: RunView }): React.JSX.Element {
   return (
     <div className="space-y-1">
       {run.evidence.length > 0 && (
-        <ul className="space-y-1">
+          <ul className="space-y-1">
           {run.evidence.map((item) => (
-            <EvidenceRow key={item.id} item={item} />
+            <EvidenceItemView key={item.id} item={item} candidateTree={candidateTree} />
           ))}
         </ul>
       )}
@@ -453,34 +374,6 @@ function Evidence({ run }: { run: RunView }): React.JSX.Element {
   );
 }
 
-function EvidenceRow({ item }: { item: EvidenceItem }): React.JSX.Element {
-  return (
-    <li className="rounded-md bg-muted/40 px-2 py-1">
-      <p className="flex items-baseline gap-1">
-        <span className="text-[9px] uppercase tracking-wide text-muted-foreground">{item.kind}</span>
-        <span className="min-w-0 break-words">{item.summary}</span>
-      </p>
-      {item.ref.url === null ? (
-        <p className="truncate font-mono text-[10px] text-muted-foreground">{item.ref.label}</p>
-      ) : (
-        <a
-          href={item.ref.url}
-          target="_blank"
-          rel="noreferrer"
-          className="block truncate font-mono text-[10px] text-muted-foreground underline-offset-2 hover:underline"
-        >
-          {item.ref.label}
-        </a>
-      )}
-      <p className="text-[10px] text-muted-foreground">
-        {item.source}
-        {item.state.commit !== null && ` · ${item.state.commit.slice(0, 7)}`}
-        {item.state.dirty && ', with uncommitted changes'}
-      </p>
-    </li>
-  );
-}
-
 const RETAINED_KINDS: Array<{ value: RetainedKind; label: string }> = [
   { value: 'discovery', label: 'Found out' },
   { value: 'decision', label: 'Decided' },
@@ -519,30 +412,13 @@ function Retained({ items }: { items: RetainedItem[] }): React.JSX.Element {
 
       <ul className="space-y-1">
         {standing.map((item) => (
-          <li key={item.id} className="flex items-start gap-1.5">
-            <input
-              type="checkbox"
-              checked={item.selected}
-              onChange={(e) => void amendRetained(item.id, { selected: e.target.checked })}
-              aria-label={`Carry forward: ${item.text}`}
-              className="mt-0.5 shrink-0"
+            <RetainedContextItem
+              key={item.id}
+              item={item}
+              kindLabel={RETAINED_KINDS.find((entry) => entry.value === item.kind)?.label ?? item.kind}
+              onSelect={(selected) => void amendRetained(item.id, { selected })}
+              onRetire={() => void amendRetained(item.id, { retired: true, selected: false })}
             />
-            <span className="min-w-0 flex-1">
-              <span className="text-[9px] uppercase tracking-wide text-muted-foreground">
-                {RETAINED_KINDS.find((entry) => entry.value === item.kind)?.label}
-              </span>{' '}
-              <span className="break-words">{item.text}</span>
-              <span className="text-[10px] text-muted-foreground"> · {item.source}</span>
-            </span>
-            <button
-              type="button"
-              onClick={() => void amendRetained(item.id, { retired: true, selected: false })}
-              title="No longer true — keep it, stop carrying it"
-              className="shrink-0 text-[10px] text-muted-foreground underline-offset-2 hover:underline"
-            >
-              Retire
-            </button>
-          </li>
         ))}
       </ul>
 
@@ -630,25 +506,15 @@ function Gates(): React.JSX.Element | null {
   );
 }
 
-const REQUIREMENT_ICON: Record<RequirementResult['state'], React.JSX.Element> = {
-  satisfied: <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-state-passed" />,
-  missing: <CircleSlash className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />,
-  failed: <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-state-failed" />,
-  stale: <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-state-stale" />,
-};
-
-const REQUIREMENT_TEXT: Record<RequirementResult['state'], string> = {
-  satisfied: 'passed against this content',
-  missing: 'has not been run',
-  failed: 'failed',
-  stale: 'passed against different content',
-};
-
 function Gate({ agent }: { agent: AgentId }): React.JSX.Element | null {
-  const { gates, readGate, runCheck, integrateLane, runs } = useHarnessContext();
+  const { gates, readGate, runCheck, integrateLane, runs, workspace } = useHarnessContext();
   const gate = gates[agent];
   const [overriding, setOverriding] = useState(false);
   const [reason, setReason] = useState('');
+  const overrideAllowed =
+    workspace !== null &&
+    workspace.resolution.status === 'ok' &&
+    workspace.resolution.workspace.integration.allowOverride;
 
   // Read on open, and again whenever the log grows a run or a result — the two ways the
   // verdict changes without the user having pressed anything here.
@@ -670,35 +536,21 @@ function Gate({ agent }: { agent: AgentId }): React.JSX.Element | null {
     <div className="space-y-1">
       <p className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
         Before integrating {agent}
-        {gate.allowed && <CheckCircle2 className="h-3 w-3 text-state-passed" />}
+        {gate.allowed && <span className="text-state-passed">satisfied</span>}
       </p>
 
       <ul className="space-y-1">
         {gate.requirements.map((requirement) => (
-          <li key={requirement.name} className="flex items-start gap-1.5">
-            {REQUIREMENT_ICON[requirement.state]}
-            <span className="min-w-0 flex-1">
-              <span className="font-medium">{requirement.name}</span>{' '}
-              <span className="text-muted-foreground">{REQUIREMENT_TEXT[requirement.state]}</span>
-              <br />
-              <span className="font-mono text-[10px] text-muted-foreground">{requirement.command}</span>
-            </span>
-            <button
-              type="button"
-              onClick={() => void runCheck(agent, requirement.name)}
-              title={`Run ${requirement.name} in ${agent}'s lane`}
-              className="shrink-0 rounded-md border border-input px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-accent"
-            >
-              Run
-            </button>
-          </li>
+          <GateResult
+            key={requirement.name}
+            requirement={requirement}
+            candidateTree={gate.candidate.tree}
+            onRun={() => void runCheck(agent, requirement.name)}
+          />
         ))}
       </ul>
 
-      <p className="font-mono text-[10px] text-muted-foreground">
-        candidate {gate.candidate.tree?.slice(0, 7) ?? 'unknown'}
-        {gate.candidate.dirty && ' · uncommitted'}
-      </p>
+      <CandidateSummary candidate={gate.candidate} />
 
       {gate.allowed ? (
         <Button
@@ -735,13 +587,30 @@ function Gate({ agent }: { agent: AgentId }): React.JSX.Element | null {
       ) : (
         // Offered whatever the workspace says, and refused by the core when it says no.
         // A button that quietly disappears teaches nobody that the rule exists.
-        <button
-          type="button"
-          onClick={() => setOverriding(true)}
-          className="text-[10px] text-muted-foreground underline-offset-2 hover:underline"
-        >
-          Integrate anyway
-        </button>
+        <div className="space-y-1.5">
+          <p className="text-[10px] text-state-blocked">Integration is disabled until every required check passes against this candidate.</p>
+          {overrideAllowed ? (
+            <button
+              type="button"
+              onClick={() => setOverriding(true)}
+              className="awos-focus-ring text-[10px] text-muted-foreground underline-offset-2 hover:underline"
+            >
+              Integrate anyway
+            </button>
+          ) : (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled
+              title="This workspace does not permit an integration override."
+              className="h-auto px-2 py-1 text-[10px]"
+            >
+              Integrate anyway
+            </Button>
+          )}
+          {!overrideAllowed && <p className="text-[10px] text-muted-foreground">This workspace does not permit an override.</p>}
+        </div>
       )}
     </div>
   );
@@ -780,32 +649,11 @@ function StartWork(): React.JSX.Element {
 }
 
 function Problem({ error }: { error: WorkSourceError }): React.JSX.Element {
+  const state = error.retryable ? 'waiting' : 'failed';
   return (
-    <p
-      role="status"
-      className={cn(
-        'flex items-start gap-1.5',
-        error.retryable ? 'text-state-waiting' : 'text-state-failed',
-      )}
-    >
-      <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-      <span>{error.message}</span>
-    </p>
+    <div className={cn('space-y-0.5 border-l-2 px-2 py-1', state === 'waiting' ? 'border-state-waiting-border bg-state-waiting-surface' : 'border-state-failed-border bg-state-failed-surface')}>
+      <ReviewState state={state} label={error.retryable ? 'Waiting to retry' : 'Source error'} />
+      <p className="break-words text-[10px] text-muted-foreground">{error.message}</p>
+    </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-
-const STATE_LABEL: Record<RunView['state'], string> = {
-  running: 'Running',
-  completed: 'Finished',
-  interrupted: 'Interrupted',
-  error: 'Failed',
-};
-
-const STATE_STYLE: Record<RunView['state'], string> = {
-  running: 'text-state-busy',
-  completed: 'text-state-passed',
-  interrupted: 'text-state-interrupted',
-  error: 'text-state-failed',
-};
