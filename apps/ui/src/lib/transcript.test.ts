@@ -79,6 +79,54 @@ describe('foldTranscript — streaming text', () => {
     ]);
     expect(items.filter((i) => i.kind === 'message')).toHaveLength(2);
   });
+
+  test('folds a legacy Claude index mismatch when the assembled text matches', () => {
+    const { items } = foldTranscript([
+      ev('claude', 't', { kind: 'message.delta', itemId: 'msg_native#1', text: 'Hello' }),
+      ev('claude', 't', { kind: 'message.completed', itemId: 'msg_native#0', text: 'Hello' }),
+    ]);
+
+    const messages = items.filter((item) => item.kind === 'message');
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ id: 'msg_native#0', text: 'Hello', streaming: false });
+  });
+
+  test('does not fold legacy ids across agent, turn, native message, or text', () => {
+    const cases: Array<{ agent: AgentId; turnId: string; completedId: string; text: string }> = [
+      { agent: 'codex', turnId: 't', completedId: 'msg_native#0', text: 'Hello' },
+      { agent: 'claude', turnId: 'other-turn', completedId: 'msg_native#0', text: 'Hello' },
+      { agent: 'claude', turnId: 't', completedId: 'msg_other#0', text: 'Hello' },
+      { agent: 'claude', turnId: 't', completedId: 'msg_native#0', text: 'Different' },
+    ];
+
+    for (const testCase of cases) {
+      const { items } = foldTranscript([
+        ev('claude', 't', { kind: 'message.delta', itemId: 'msg_native#1', text: 'Hello' }),
+        ev(testCase.agent, testCase.turnId, {
+          kind: 'message.completed',
+          itemId: testCase.completedId,
+          text: testCase.text,
+        }),
+      ]);
+      expect(items.filter((item) => item.kind === 'message')).toHaveLength(2);
+    }
+  });
+
+  test('does not let a reconciled raw id consume a later final-only block', () => {
+    const { items } = foldTranscript([
+      ev('claude', 't', { kind: 'message.delta', itemId: 'msg_native#1', text: 'First' }),
+      ev('claude', 't', { kind: 'message.completed', itemId: 'msg_native#0', text: 'First' }),
+      ev('claude', 't', { kind: 'message.completed', itemId: 'msg_native#1', text: 'Second' }),
+    ]);
+
+    expect(items.filter((item) => item.kind === 'message')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: 'First', streaming: false }),
+        expect.objectContaining({ text: 'Second', streaming: false }),
+      ]),
+    );
+    expect(items.filter((item) => item.kind === 'message')).toHaveLength(2);
+  });
 });
 
 describe('foldTranscript — tools', () => {
