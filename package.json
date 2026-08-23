@@ -10,7 +10,7 @@
     "apps/desktop"
   ],
   "engines": {
-    "node": ">=20.10"
+    "node": ">=22"
   },
   "scripts": {
     "build": "npm run build --workspace @awos/protocol && npm run build --workspace @awos/core && npm run build --workspace @awos/ui",

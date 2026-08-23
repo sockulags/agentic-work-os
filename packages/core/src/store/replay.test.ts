@@ -30,6 +30,22 @@ describe('buildReplay', () => {
     assert.equal(result.turnCount, 0);
   });
 
+  test('includes same-agent history only when recovery opts in', () => {
+    const events = [
+      ev('qwen-local', 'q1', { kind: 'message.completed', itemId: 'm', text: 'prior Qwen answer' }),
+      ev('qwen-local', 'q1', { kind: 'tool.started', itemId: 'tool', name: 'read_file', toolKind: 'file_read', title: 'notes.md', input: {} }),
+      ev('qwen-local', 'q1', { kind: 'tool.completed', itemId: 'tool', status: 'ok', output: 'prior Qwen tool result', exitCode: null }),
+    ];
+
+    assert.equal(buildReplay(events, 'qwen-local', OPTIONS).preamble, null);
+    const recovery = buildReplay(events, 'qwen-local', {
+      ...OPTIONS,
+      includeSameAgentHistory: true,
+    });
+    assert.match(recovery.preamble ?? '', /prior Qwen answer/);
+    assert.match(recovery.preamble ?? '', /prior Qwen tool result/);
+  });
+
   test('renders foreign turns for the incoming agent', () => {
     const events = [
       ev(null, null, { kind: 'user.message', text: 'refactor auth', hadReplay: false }),

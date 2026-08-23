@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { GitMerge, X } from 'lucide-react';
-import type { AgentId, PermissionMode } from '@awos/protocol';
+import type { AgentAvailability, AgentId, PermissionMode } from '@awos/protocol';
 import { useHarnessContext } from '@/state/HarnessContext';
 import { ThreadSidebar } from '@/components/ThreadSidebar';
 import { Transcript } from '@/components/Transcript';
@@ -8,7 +8,7 @@ import { Composer } from '@/components/Composer';
 import { Dock } from '@/components/dock/Dock';
 import { ApprovalDialog } from '@/components/ApprovalDialog';
 import { DensityToggle } from '@/components/DensityToggle';
-import { AGENT_STYLE } from '@/components/AgentBadge';
+import { getAgentStyle } from '@/components/AgentBadge';
 import { cn, formatTokens } from '@/lib/utils';
 
 const PERMISSION_MODES: Array<{ value: PermissionMode; label: string }> = [
@@ -64,7 +64,7 @@ export default function App(): React.JSX.Element {
         )}
 
         {h.activeThread === null ? (
-          <EmptyState connected={h.status === 'open'} />
+          <EmptyState connected={h.status === 'open'} profiles={h.availability} />
         ) : (
           <>
             <Transcript items={h.transcript.items} />
@@ -194,24 +194,22 @@ function Header({
   );
 }
 
-function EmptyState({ connected }: { connected: boolean }): React.JSX.Element {
+function EmptyState({ connected, profiles }: { connected: boolean; profiles: AgentAvailability[] }): React.JSX.Element {
   return (
     <div className="flex flex-1 items-center justify-center p-8">
       <div className="max-w-sm space-y-3 text-center">
         <div className="flex justify-center gap-2">
-          {(['claude', 'codex'] as const).map((agent) => (
-            <span
-              key={agent}
-              className={cn(
-                'rounded-md border px-2.5 py-1 text-xs font-medium',
-                AGENT_STYLE[agent].bg,
-                AGENT_STYLE[agent].border,
-                AGENT_STYLE[agent].text,
-              )}
-            >
-              {AGENT_STYLE[agent].label}
-            </span>
-          ))}
+          {profiles.map((profile) => {
+            const style = getAgentStyle(profile.profileId, profile.label);
+            return (
+              <span
+                key={profile.profileId}
+                className={cn('rounded-md border px-2.5 py-1 text-xs font-medium', style.bg, style.border, style.text)}
+              >
+                {style.label}
+              </span>
+            );
+          })}
         </div>
         <p className="text-sm text-muted-foreground">
           {connected

@@ -1,8 +1,10 @@
 import { describe, expect, test, vi } from 'vitest';
 import { fireEvent, screen } from '@testing-library/react';
-import type { ThreadSummary } from '@awos/protocol';
+import type { AgentAvailability, ThreadSummary } from '@awos/protocol';
 import { Composer } from './Composer';
+import { getAgentStyle } from './AgentBadge';
 import { idleRuntime, renderWithHarness } from '@/test-harness';
+import type { Harness } from '@/hooks/useHarness';
 
 /**
  * The composer decides who may be sent to while someone is already working, which is the
@@ -20,7 +22,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     updatedAt: 0,
     activeAgent: 'codex',
     nativeSessions: {},
-    watermarks: { claude: 0, codex: 0 },
+    watermarks: { claude: 0, codex: 0, 'qwen-local': 0 },
     eventCount: 0,
     workItemId: null,
     parallel: false,
@@ -38,6 +40,48 @@ function type(text: string): void {
 }
 
 describe('Composer — who can be sent to', () => {
+  test('renders the server-provided profile list, including Qwen', () => {
+    const profile: AgentAvailability = {
+      agent: 'qwen-local', profileId: 'qwen-local', label: 'Qwen Code · Qwen3.8 local',
+      adapterId: 'qwen-code-sdk', model: 'qwen3.8-27b-local', available: true, detail: 'reachable',
+      capabilities: { streamingToolOutput: false, streamingText: true, reasoning: true, plans: false, turnDiff: false, approvals: true, resumableSessions: true },
+    };
+    renderWithHarness(<Composer />, { activeThread: thread({ activeAgent: 'qwen-local' }), availability: [profile] });
+    expect(screen.getByRole('button', { name: /Qwen Code/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^Claude$/ })).toBeNull();
+  });
+
+  test('only offers profiles allowed by the resolved workspace', () => {
+    const availability: AgentAvailability[] = [
+      {
+        agent: 'claude', profileId: 'claude', label: 'Claude', adapterId: 'claude-code-cli', model: 'default', available: true, detail: 'ok',
+        capabilities: { streamingToolOutput: true, streamingText: true, reasoning: true, plans: true, turnDiff: true, approvals: true, resumableSessions: true },
+      },
+      {
+        agent: 'qwen-local', profileId: 'qwen-local', label: 'Qwen Code · Qwen3.8 local', adapterId: 'qwen-code-sdk', model: 'local', available: true, detail: 'ok',
+        capabilities: { streamingToolOutput: false, streamingText: true, reasoning: true, plans: false, turnDiff: false, approvals: true, resumableSessions: true },
+      },
+    ];
+    const workspace = {
+      cwd: '/repo', resolution: { status: 'ok', workspace: { agents: ['claude'] }, problems: [] },
+    } as unknown as NonNullable<Harness['workspace']>;
+    renderWithHarness(<Composer />, { activeThread: thread({ activeAgent: 'qwen-local' }), availability, workspace });
+    expect(screen.getByRole('button', { name: /^Claude$/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Qwen Code/ })).toBeNull();
+    expect(input().placeholder).toContain('Claude');
+  });
+
+  test('uses the server label and a safe fallback for an unknown profile style', () => {
+    const profile = {
+      agent: 'claude', profileId: 'future-profile', label: 'Future Worker', adapterId: 'future', model: 'future',
+      available: true, detail: 'ok', capabilities: { streamingToolOutput: false, streamingText: true, reasoning: false, plans: false, turnDiff: false, approvals: false, resumableSessions: false },
+    } as unknown as AgentAvailability;
+    renderWithHarness(<Composer />, { activeThread: thread(), availability: [profile] });
+    expect(screen.getByRole('button', { name: 'Future Worker' })).toBeTruthy();
+    expect(input().placeholder).toContain('Future Worker');
+    expect(getAgentStyle('future-profile', 'Future Worker')).toEqual(getAgentStyle('future-profile', 'Future Worker'));
+  });
+
   test('sharing one directory, any working agent blocks sending', () => {
     renderWithHarness(<Composer />, {
       activeThread: thread({ parallel: false }),

@@ -37,5 +37,27 @@ export { evaluateGate, explainGate, type GateInput, type GateDecision } from './
 export { PermissionBridge } from './permission-bridge.js';
 export { ClaudeAdapter } from './adapters/claude.js';
 export { CodexAdapter } from './adapters/codex.js';
-export type { AgentAdapter, AgentCapabilities, AdapterContext } from './adapters/agent.js';
+export {
+  QwenCodeAdapter,
+  QWEN_CAPABILITIES,
+  QWEN_CORE_TOOLS,
+  QwenResumeNotFoundError,
+  isQwenResumeNotFoundError,
+} from './adapters/qwen-code.js';
+export {
+  ADAPTER_FACTORY_REGISTRY,
+  MODEL_TARGET_REGISTRY,
+  WORKER_PROFILE_REGISTRY,
+  createWorkerAdapter,
+  workerProfile,
+  registeredWorkerProfiles,
+  probeWorkerProfiles,
+} from './adapters/registry.js';
+export type {
+  AdapterFactory,
+  ModelTargetDefinition,
+  WorkerProfileDefinition,
+  WorkerRegistries,
+} from './adapters/registry.js';
+export type { AgentAdapter, WorkerAdapter, AgentCapabilities, AdapterContext } from './adapters/agent.js';
 export { LineDecoder, readJsonLines, encodeJsonLine } from './util/jsonl.js';

@@ -1,10 +1,11 @@
 # Agentic Work OS
 
-One conversation, two agents. Claude Code and OpenAI Codex share a single thread — either
-can take the next turn, and the one picking up gets the full transcript replayed into its
-own session, so it knows what the other just did.
+One conversation, three worker profiles. Claude Code, OpenAI Codex, and Qwen Code share a
+single thread — any profile can take the next turn, and the one picking up gets the full
+transcript replayed into its own session.
 
-Both agents keep their native sessions on disk (`~/.claude/projects`, Codex's own store).
+Claude and Codex keep their native sessions on disk; Qwen sessions are resumed through the
+Qwen Code SDK. The harness keeps the canonical transcript.
 The harness keeps the canonical transcript. Either half can be lost without losing the
 conversation.
 
@@ -15,22 +16,24 @@ conversation.
                    │ WebSocket (loopback + token)
 ┌──────────────────▼──────────────────────────┐
 │ Node core: orchestrator, store, replay      │
-│  ├── claude -p --input-format stream-json   │
-│  └── codex app-server  (JSON-RPC/stdio)     │
+│  ├── claude-code-cli → claude -p            │
+│  ├── codex-app-server → codex app-server    │
+│  └── qwen-code-sdk → local OpenAI-compatible │
 └─────────────────────────────────────────────┘
 ```
 
-No Agent SDK: both adapters drive the CLIs directly over stdio, which is what makes them
-symmetric. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the protocol details and the
-reasoning behind each design decision.
+Claude and Codex use their CLIs directly; Qwen Code uses the pinned SDK. Qwen detects an
+existing local llama.cpp endpoint but never manages its lifecycle.
 
 ---
 
 ## Requirements
 
-- **Node 20.10+**
+- **Node 22+**
 - **Claude Code CLI** — `claude` on PATH (or set `AWOS_CLAUDE_BIN`)
 - **Codex CLI** — `codex` on PATH (or set `AWOS_CODEX_BIN`)
+- **Qwen Code SDK** — installed with `@awos/core`; local inference is detected at
+  `http://127.0.0.1:1234/v1` by default
 - **Rust toolchain** — only for the desktop shell. The browser dev loop needs nothing
   beyond Node. Install from [rustup.rs](https://rustup.rs); the Tauri CLI itself comes
   in as a devDependency, so there is nothing to install globally.
@@ -81,6 +84,11 @@ Every setting is an environment variable, read at core startup.
 | `AWOS_CODEX_BIN_ARGS` | `[]` | Same, for Codex |
 | `AWOS_CLAUDE_MODEL` | *(CLI default)* | Passed as `--model` |
 | `AWOS_CODEX_MODEL` | *(CLI default)* | Passed to `thread/start` |
+| `AWOS_QWEN_BASE_URL` | `http://127.0.0.1:1234/v1` | Existing OpenAI-compatible endpoint; never started or stopped by AWOS |
+| `AWOS_QWEN_MODEL` | `qwen3.8-27b-local` | Qwen model id |
+| `AWOS_QWEN_API_KEY` | `local-placeholder` | OpenAI-compatible auth value passed to Qwen Code |
+| `AWOS_QWEN_BIN` | *(SDK default)* | Optional Qwen Code executable override |
+| `AWOS_QWEN_TURN_TIMEOUT_MS` | `600000` | Hard timeout for one Qwen turn |
 | `AWOS_PORT` | `4319` | WebSocket port |
 | `AWOS_TOKEN` | *(random)* | Shared secret; the dev script pins it to `dev-token` |
 | `AWOS_REPLAY_MAX_CHARS` | `24000` | Ceiling on a replay block |
@@ -104,7 +112,7 @@ declared by the repository itself, in `.awos/workspace.json`, committed alongsid
   "version": 1,
   "name": "agentic-work-os",
   "repository": { "root": ".", "github": "sockulags/agentic-work-os" },
-  "agents": ["claude", "codex"],
+  "agents": ["claude", "codex", "qwen-local"],
   "setup": { "command": "npm install" },
   "verify": [
     { "name": "typecheck", "command": "npm run typecheck" },

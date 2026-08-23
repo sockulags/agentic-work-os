@@ -9,13 +9,10 @@ import type {
   WorkItem,
   WorkSourceError,
 } from '@awos/protocol';
-import { AGENT_IDS } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
 import type { Orchestrator } from './orchestrator.js';
-import { runCapture } from './util/spawn.js';
 import { createLogger } from './util/logger.js';
-import { CLAUDE_CAPABILITIES } from './adapters/claude.js';
-import { CODEX_CAPABILITIES } from './adapters/codex.js';
+import { probeWorkerProfiles } from './adapters/registry.js';
 
 const log = createLogger('server');
 
@@ -350,29 +347,6 @@ export class HarnessServer {
   }
 
   async #probeAgents(): Promise<AgentAvailability[]> {
-    return Promise.all(
-      AGENT_IDS.map(async (agent): Promise<AgentAvailability> => {
-        const bin = agent === 'claude' ? this.#config.claudeBin : this.#config.codexBin;
-        // Capabilities describe the adapter, not the installation, so they are reported
-        // even when the binary is missing.
-        const capabilities = agent === 'claude' ? CLAUDE_CAPABILITIES : CODEX_CAPABILITIES;
-        const result = await runCapture(bin, ['--version']);
-        const output = `${result.stdout}${result.stderr}`.trim();
-        if (result.code === 0 && output) {
-          return {
-            agent,
-            available: true,
-            detail: output.split('\n')[0] ?? output,
-            capabilities,
-          };
-        }
-        return {
-          agent,
-          available: false,
-          detail: output || `\`${bin}\` not found on PATH`,
-          capabilities,
-        };
-      }),
-    );
+    return probeWorkerProfiles(this.#config);
   }
 }

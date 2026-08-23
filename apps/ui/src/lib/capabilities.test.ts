@@ -13,8 +13,8 @@ const capabilities = (turnDiff: boolean): AgentCapabilities => ({
 });
 
 const availability: AgentAvailability[] = [
-  { agent: 'claude', available: true, detail: 'test', capabilities: capabilities(false) },
-  { agent: 'codex', available: true, detail: 'test', capabilities: capabilities(true) },
+  { agent: 'claude', profileId: 'claude', label: 'Claude', adapterId: 'claude-code-cli', model: 'CLI default', available: true, detail: 'test', capabilities: capabilities(false) },
+  { agent: 'codex', profileId: 'codex', label: 'Codex', adapterId: 'codex-app-server', model: 'CLI default', available: true, detail: 'test', capabilities: capabilities(true) },
 ];
 
 describe('capabilitiesForTurn', () => {

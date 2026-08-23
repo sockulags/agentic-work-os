@@ -1,9 +1,9 @@
 # Agentic Work OS — Architecture
 
-A lightweight harness that drives **Claude Code CLI** and **OpenAI Codex** in a single
-conversation thread. Either agent can take the next turn. Each keeps its own native
-session on disk; the harness keeps the canonical transcript and replays it across the
-boundary so a switch never loses context.
+A lightweight harness that drives **Claude Code CLI**, **OpenAI Codex**, and **Qwen Code**
+worker profiles in a single conversation thread. Either worker can take the next turn.
+Each keeps its native session state; the harness keeps the canonical transcript and
+replays it across the boundary so a switch never loses context.
 
 ---
 
@@ -13,7 +13,7 @@ These came out of the protocol research and shaped everything below.
 
 | Constraint | Consequence |
 | --- | --- |
-| Both agents are **long-lived child processes speaking newline-delimited JSON over stdio** | One adapter shape fits both. No HTTP, no SDK dependency. |
+| Worker adapters are stateful and own their native protocol boundary | One normalized adapter shape fits CLI and SDK transports; the static profile registry keeps target metadata separate from implementation ids. |
 | Codex speaks **JSON-RPC 2.0** (`initialize` → `thread/start` → `turn/start`) | Adapter needs request/response correlation by `id`, plus notification handling. |
 | Claude CLI speaks a **flat event stream** (`system`/`assistant`/`user`/`stream_event`/`result`) | Adapter is a pure event translator; no id correlation except for control requests. |
 | Claude CLI has **no callback channel for approvals** — the documented path is `--permission-prompt-tool <mcp tool>` | The harness ships its own MCP server whose only job is to relay approval requests back to the UI. |
@@ -40,9 +40,10 @@ contained in the adapters; everything above them sees one `approval.requested` e
 │  · ThreadStore      canonical JSONL transcript on disk       │
 │  · ReplayBuilder    cross-agent context handoff              │
 │  · PermissionBridge TCP rendezvous for the approval MCP      │
-│  ├── ClaudeAdapter ──► claude -p --input-format stream-json  │
+│  ├── ClaudeAdapter (claude-code-cli) ──► claude -p           │
 │  │                      └── mcp: harness-permissions ────┐   │
-│  └── CodexAdapter  ──► codex app-server                  │   │
+│  ├── CodexAdapter (codex-app-server) ──► codex app-server│   │
+│  └── QwenCodeAdapter (qwen-code-sdk) ──► @qwen-code/sdk │   │
 └──────────────────────────────────────────────────────────┼───┘
                                                            │
                         approval relay over 127.0.0.1 TCP ─┘
@@ -65,7 +66,7 @@ type HarnessEvent = {
   id: string;          // uuid
   seq: number;         // monotonic per thread — the canonical ordering
   threadId: string;
-  agent: AgentId;      // 'claude' | 'codex'
+  agent: AgentId;      // 'claude' | 'codex' | 'qwen-local'
   turnId: string | null;
   ts: number;
 } & HarnessEventBody;
@@ -76,14 +77,14 @@ type HarnessEvent = {
 | `kind` | Emitted when | Claude source | Codex source |
 | --- | --- | --- | --- |
 | `turn.started` | user input accepted | first `system/init` or replayed user msg | `turn/started` |
-| `turn.completed` | agent finished | `result` | `turn/completed` |
+| `turn.completed` | worker finished | `result` | `turn/completed`; Qwen result or timeout |
 | `message.delta` | assistant text streaming | `stream_event` → `text_delta` | `item/agentMessage/delta` |
 | `message.completed` | assistant text final | `assistant` msg text block | `item/completed` (agentMessage) |
 | `reasoning.delta` | thinking tokens | `stream_event` → `thinking_delta` | `item/reasoning/delta` |
 | `tool.started` | tool/command invoked | `assistant` msg `tool_use` block | `item/started` (commandExecution, fileChange, …) |
-| `tool.output` | incremental stdout/stderr | — (Claude batches) | `exec/outputDelta` |
+| `tool.output` | incremental stdout/stderr | — (Claude/Qwen batch) | `exec/outputDelta` |
 | `tool.completed` | tool returned | `user` msg `tool_result` block | `item/completed` |
-| `plan.updated` | todo/plan changed | `TodoWrite` tool input | `turn/plan/updated` |
+| `plan.updated` | todo/plan changed | `TodoWrite` tool input | `turn/plan/updated`; Qwen does not emit plans |
 | `diff.updated` | turn's cumulative patch | — (no equivalent) | `turn/diff/updated` |
 | `artifact.updated` | file written under `.awos/artifacts/` | harness file watcher | harness file watcher |
 | `approval.requested` | permission gate | MCP relay | `item/permissions/requestApproval` |

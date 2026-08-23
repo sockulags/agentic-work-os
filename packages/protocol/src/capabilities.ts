@@ -10,7 +10,7 @@
  * for a capability the agent lacks. A capability set is how the UI knows to explain the
  * absence rather than show an empty panel.
  */
-export interface AgentCapabilities {
+export interface WorkerCapabilities {
   /** Emits incremental stdout/stderr while a command runs. */
   streamingToolOutput: boolean;
   /** Emits token-level deltas for assistant text. */
@@ -32,3 +32,6 @@ export interface AgentCapabilities {
   /** Can resume a prior native session by id. */
   resumableSessions: boolean;
 }
+
+/** Compatibility name for the pre-WorkerProfile protocol. */
+export type AgentCapabilities = WorkerCapabilities;

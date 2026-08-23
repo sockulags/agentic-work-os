@@ -23,6 +23,12 @@ export interface HarnessConfig {
   /** Default model per agent; empty string means "let the CLI decide". */
   claudeModel: string;
   codexModel: string;
+  /** Qwen Code local OpenAI-compatible target. Optional for injected legacy test configs. */
+  qwenBaseUrl?: string;
+  qwenModel?: string;
+  qwenApiKey?: string;
+  qwenBin?: string;
+  qwenTurnTimeoutMs?: number;
   /** WebSocket bind. Port 0 asks the OS for a free one. */
   host: string;
   port: number;
@@ -93,6 +99,11 @@ export function loadConfig(): HarnessConfig {
     codexBinArgs: envArgs('AWOS_CODEX_BIN_ARGS'),
     claudeModel: envStr('AWOS_CLAUDE_MODEL', ''),
     codexModel: envStr('AWOS_CODEX_MODEL', ''),
+    qwenBaseUrl: envStr('AWOS_QWEN_BASE_URL', 'http://127.0.0.1:1234/v1'),
+    qwenModel: envStr('AWOS_QWEN_MODEL', 'qwen3.8-27b-local'),
+    qwenApiKey: envStr('AWOS_QWEN_API_KEY', 'local-placeholder'),
+    qwenBin: envStr('AWOS_QWEN_BIN', ''),
+    qwenTurnTimeoutMs: envInt('AWOS_QWEN_TURN_TIMEOUT_MS', 600_000),
     host: envStr('AWOS_HOST', '127.0.0.1'),
     port: envInt('AWOS_PORT', 4319),
     replayMaxChars: envInt('AWOS_REPLAY_MAX_CHARS', 24_000),

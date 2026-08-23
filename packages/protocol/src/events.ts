@@ -23,12 +23,18 @@ import type {
   WorkingState,
 } from './evidence.js';
 
-export type AgentId = 'claude' | 'codex';
+/**
+ * Persisted worker/profile id. The historical name is retained because the canonical
+ * transcript and RPC protocol deliberately still call this field `agent`.
+ */
+export type AgentId = 'claude' | 'codex' | 'qwen-local';
 
-export const AGENT_IDS: readonly AgentId[] = ['claude', 'codex'] as const;
+export type WorkerProfileId = AgentId;
+
+export const AGENT_IDS: readonly AgentId[] = ['claude', 'codex', 'qwen-local'] as const;
 
 export function isAgentId(value: unknown): value is AgentId {
-  return value === 'claude' || value === 'codex';
+  return value === 'claude' || value === 'codex' || value === 'qwen-local';
 }
 
 /** Envelope fields present on every event. */

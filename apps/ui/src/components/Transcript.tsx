@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import { AlertTriangle, Info } from 'lucide-react';
 import type { TranscriptItem } from '@/lib/transcript';
 import { groupTranscriptItems } from '@/lib/group-items';
-import { AGENT_STYLE } from './AgentBadge';
+import { getAgentStyle } from './AgentBadge';
 import { Markdown } from './Markdown';
 import { ReasoningBlock } from './ReasoningBlock';
 import { ToolBlock } from './ToolBlock';
@@ -87,7 +87,7 @@ function TranscriptRow({
       );
 
     case 'divider': {
-      const style = AGENT_STYLE[item.agent];
+      const style = getAgentStyle(item.agent);
       return (
         <div className="flex items-center gap-3 pt-2">
           <span className={cn('h-1.5 w-1.5 rounded-full', style.dot)} />

@@ -53,6 +53,7 @@ export function idleRuntime(overrides: Partial<ThreadRuntimeState> = {}): Thread
     agents: {
       claude: { status: 'idle', model: null },
       codex: { status: 'idle', model: null },
+      'qwen-local': { status: 'idle', model: null },
     },
     ...overrides,
   };

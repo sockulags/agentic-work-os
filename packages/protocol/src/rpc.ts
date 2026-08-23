@@ -8,6 +8,7 @@
 
 import type { AgentId, ApprovalRequestedBody, HarnessEvent, PlanItem } from './events.js';
 import type { AgentCapabilities } from './capabilities.js';
+import type { WorkerProfileId } from './events.js';
 import type { WorkspaceResolution } from './workspace.js';
 import type { WorkItem, WorkSourceError } from './work.js';
 import type {
@@ -93,6 +94,9 @@ export const PINNED_CONTEXT_MAX_CHARS = 8_000;
 
 export interface AgentAvailability {
   agent: AgentId;
+  profileId: WorkerProfileId;
+  label: string;
+  adapterId: string;
   available: boolean;
   /** Version string when detected, else the reason it wasn't. */
   detail: string;
@@ -101,6 +105,7 @@ export interface AgentAvailability {
    * they describe the adapter rather than the installation.
    */
   capabilities: AgentCapabilities;
+  model: string;
 }
 
 // ---------------------------------------------------------------------------

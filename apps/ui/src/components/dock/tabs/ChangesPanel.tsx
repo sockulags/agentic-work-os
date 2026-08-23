@@ -5,7 +5,7 @@ import { diffFileToPatch } from '@/lib/file-tree';
 import { capabilitiesForTurn } from '@/lib/capabilities';
 import { DiffView } from '@/components/DiffView';
 import { FileTree } from '@/components/FileTree';
-import { AGENT_STYLE } from '@/components/AgentBadge';
+import { getAgentStyle } from '@/components/AgentBadge';
 import { useHarnessContext } from '@/state/HarnessContext';
 import { cn } from '@/lib/utils';
 
@@ -48,12 +48,13 @@ export function ChangesPanel(): React.JSX.Element {
   }
 
   if (agent !== null && !supportsTurnDiff) {
+    const style = getAgentStyle(agent);
     return (
       <div className="flex items-start gap-2 px-4 py-3 text-xs text-muted-foreground">
         <Info className="mt-0.5 h-3 w-3 shrink-0" />
         <p>
-          <span className={cn('font-medium', AGENT_STYLE[agent].text)}>
-            {AGENT_STYLE[agent].label}
+          <span className={cn('font-medium', style.text)}>
+            {style.label}
           </span>{' '}
           doesn&rsquo;t report a diff for its turns, so there are no aggregated changes to show
           here. Individual file edits appear as tool blocks in the transcript, and any{' '}
