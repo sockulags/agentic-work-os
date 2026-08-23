@@ -321,6 +321,24 @@ describe('WorkPanel evidence', () => {
     expect(screen.getByText(/with uncommitted changes/)).toBeTruthy();
   });
 
+  test('shows stale evidence in the integrated panel when its gate candidate has moved', () => {
+    render({
+      runtime: idleRuntime({ lanes: { claude: '/lanes/claude' } }),
+      gates: {
+        claude: {
+          agent: 'claude',
+          allowed: false,
+          requirements: [],
+          candidate: { commit: 'new-commit', tree: 'new-tree', dirty: false },
+        },
+      },
+      runs: [run({ evidence: [evidence({ state: { commit: 'old-commit', tree: 'old-tree', dirty: false } })] })],
+    });
+
+    expect(screen.getByText('Stale evidence')).toBeTruthy();
+    expect(screen.getByText(/candidate old-tree/)).toBeTruthy();
+  });
+
   test('attaches a fact from the run without retyping it', () => {
     const recordEvidence = vi.fn();
     render({
@@ -541,7 +559,19 @@ describe('WorkPanel integration gate', () => {
 
   test('an override has to carry a reason', () => {
     const integrateLane = vi.fn();
-    render({ runtime: lane, gates: gate(), integrateLane });
+    render({
+      runtime: lane,
+      gates: gate(),
+      integrateLane,
+      workspace: {
+        cwd: '/repo',
+        resolution: {
+          status: 'ok',
+          problems: [],
+          workspace: { integration: { allowOverride: true } },
+        },
+      },
+    });
 
     fireEvent.click(screen.getByText('Integrate anyway'));
     fireEvent.click(screen.getByRole('button', { name: 'Integrate anyway' }));
@@ -553,6 +583,27 @@ describe('WorkPanel integration gate', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Integrate anyway' }));
 
     expect(integrateLane).toHaveBeenCalledWith('claude', { reason: 'the suite is broken on main' });
+  });
+
+  test('fails closed when no resolved workspace permits an override', () => {
+    render({ runtime: lane, gates: gate() });
+
+    expect(screen.getByRole('button', { name: 'Integrate anyway' })).toBeDisabled();
+    expect(screen.getByText(/does not permit an override/)).toBeTruthy();
+  });
+
+  test('fails closed when the workspace declaration is invalid', () => {
+    render({
+      runtime: lane,
+      gates: gate(),
+      workspace: {
+        cwd: '/repo',
+        resolution: { status: 'invalid', problems: [] },
+      },
+    });
+
+    expect(screen.getByRole('button', { name: 'Integrate anyway' })).toBeDisabled();
+    expect(screen.getByText(/does not permit an override/)).toBeTruthy();
   });
 
   test('says plainly when a project requires nothing', () => {

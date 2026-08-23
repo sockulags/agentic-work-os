@@ -8,6 +8,7 @@ import {
 } from '@awos/protocol';
 import { useHarnessContext } from '@/state/HarnessContext';
 import { cn } from '@/lib/utils';
+import { ReviewState } from '@/components/review/ReviewPatterns';
 
 /**
  * What the project itself says about how work happens here.
@@ -25,14 +26,20 @@ export function WorkspacePanel(): React.JSX.Element {
 
   if (activeThreadId === null) {
     return (
-      <p className="px-4 py-3 text-xs text-muted-foreground">
-        Open a thread to see the workspace its directory belongs to.
-      </p>
+      <div className="space-y-1 px-4 py-3 text-xs">
+        <ReviewState state="idle" label="No thread selected" />
+        <p className="text-muted-foreground">Open a thread to see the workspace its directory belongs to.</p>
+      </div>
     );
   }
 
   if (workspace === null) {
-    return <p className="px-4 py-3 text-xs text-muted-foreground">Reading the declaration…</p>;
+    return (
+      <div className="space-y-1 px-4 py-3 text-xs">
+        <ReviewState state="busy" />
+        <p className="text-muted-foreground">Reading the declaration…</p>
+      </div>
+    );
   }
 
   const { cwd, resolution } = workspace;

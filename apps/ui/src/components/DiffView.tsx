@@ -131,7 +131,9 @@ function DiffFileBlock({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent/40"
+        aria-expanded={open}
+        aria-label={`${file.path}, ${status.label}, ${file.additions} additions, ${file.deletions} deletions`}
+        className="awos-focus-ring flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent/40"
       >
         <ChevronRight
           className={cn(

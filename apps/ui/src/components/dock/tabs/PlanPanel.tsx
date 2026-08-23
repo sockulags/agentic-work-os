@@ -1,6 +1,7 @@
 import { Circle, CircleDot, CheckCircle2 } from 'lucide-react';
 import { useHarnessContext } from '@/state/HarnessContext';
 import { cn } from '@/lib/utils';
+import { ReviewState } from '@/components/review/ReviewPatterns';
 
 /**
  * Live checklist, fed by Claude's TodoWrite and Codex's turn/plan/updated.
@@ -13,10 +14,13 @@ export function PlanPanel(): React.JSX.Element {
 
   if (items.length === 0) {
     return (
-      <p className="px-4 py-3 text-xs text-muted-foreground">
-        No plan yet. Claude&rsquo;s todo list and Codex&rsquo;s plan updates land here as the
-        agent works.
-      </p>
+      <div className="space-y-1 px-4 py-3 text-xs">
+        <ReviewState state="idle" label="No plan" />
+        <p className="text-muted-foreground">
+          No plan yet. Claude&rsquo;s todo list and Codex&rsquo;s plan updates land here as the
+          agent works.
+        </p>
+      </div>
     );
   }
 

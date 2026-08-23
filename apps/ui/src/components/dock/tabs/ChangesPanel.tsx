@@ -6,6 +6,7 @@ import { capabilitiesForTurn } from '@/lib/capabilities';
 import { DiffView } from '@/components/DiffView';
 import { FileTree } from '@/components/FileTree';
 import { getAgentStyle } from '@/components/AgentBadge';
+import { ReviewState } from '@/components/review/ReviewPatterns';
 import { useHarnessContext } from '@/state/HarnessContext';
 import { cn } from '@/lib/utils';
 
@@ -54,23 +55,27 @@ export function ChangesPanel(): React.JSX.Element {
         className={cn(style.root, 'flex items-start gap-2 px-4 py-3 text-xs text-muted-foreground')}
         style={style.cssVars}
       >
-        <Info className="mt-0.5 h-3 w-3 shrink-0" />
-        <p>
+        <Info className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
+        <div className="min-w-0 space-y-1">
+          <ReviewState state="waiting" label="Diff unavailable" />
+          <p>
           <span className={cn('font-medium', style.text)}>
             {style.label}
           </span>{' '}
           doesn&rsquo;t report a diff for its turns, so there are no aggregated changes to show
           here. Individual file edits appear as tool blocks in the transcript, and any{' '}
           <code className="font-mono">git diff</code> it runs is rendered in full.
-        </p>
+          </p>
+        </div>
       </div>
     );
   }
 
   return (
-    <p className="px-4 py-3 text-xs text-muted-foreground">
-      No file changes reported for this turn.
-    </p>
+    <div className="space-y-1 px-4 py-3 text-xs">
+      <ReviewState state="idle" label="No changes reported" />
+      <p className="text-muted-foreground">No file changes reported for this turn.</p>
+    </div>
   );
 }
 
@@ -105,7 +110,8 @@ function ChangeReview({ parsed }: { parsed: ParsedDiff }): React.JSX.Element {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5 text-xs text-muted-foreground">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5 text-xs text-muted-foreground" aria-label="Change summary">
+        <span className="sr-only">Change summary:</span>
         <span>
           {parsed.files.length} {parsed.files.length === 1 ? 'file' : 'files'}
         </span>
