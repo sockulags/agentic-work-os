@@ -10,6 +10,7 @@ import type { AgentId, ApprovalRequestedBody, HarnessEvent, PlanItem } from './e
 import type { AgentCapabilities } from './capabilities.js';
 import type { WorkerProfileId } from './events.js';
 import type { WorkspaceResolution } from './workspace.js';
+import type { WorkspaceRoleSelection } from './role-selection.js';
 import type { WorkItem, WorkSourceError } from './work.js';
 import type {
   EvidenceKind,
@@ -146,6 +147,8 @@ export type ClientRequest =
    * exists for it. Naming both is an error rather than a precedence rule to remember.
    */
   | { type: 'workspace.get'; threadId?: string; cwd?: string }
+  | { type: 'workspace.role.get'; threadId?: string; cwd?: string }
+  | { type: 'workspace.role.set'; threadId?: string; cwd?: string; roleId: string | null }
   /** Attach a GitHub issue by URL, `owner/name#12`, or a bare number. */
   | { type: 'work.attach'; threadId: string; reference: string }
   /** Ask the source again. Never rewrites a run that has already happened. */
@@ -214,6 +217,7 @@ export type ServerResponseBody =
   | { type: 'context'; threadId: string; text: string }
   /** Carries the directory it resolved, for the same reason `context` carries its thread. */
   | { type: 'workspace'; cwd: string; resolution: WorkspaceResolution }
+  | { type: 'workspace.role'; cwd: string; selection: WorkspaceRoleSelection }
   /**
    * The thread's work item, the reason it could not be read, or both.
    *

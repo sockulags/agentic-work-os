@@ -3,6 +3,7 @@ export * from './capabilities.js';
 export * from './profiles.js';
 export * from './rpc.js';
 export * from './workspace.js';
+export * from './role-selection.js';
 export * from './work.js';
 export * from './evidence.js';
 export * from './catalog.js';

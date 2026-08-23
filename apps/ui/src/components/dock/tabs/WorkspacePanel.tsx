@@ -9,6 +9,7 @@ import {
 import { useHarnessContext } from '@/state/HarnessContext';
 import { cn } from '@/lib/utils';
 import { ReviewState } from '@/components/review/ReviewPatterns';
+import { WorkspaceRoleSelector } from '@/components/WorkspaceRoleSelector';
 
 /**
  * What the project itself says about how work happens here.
@@ -22,7 +23,15 @@ import { ReviewState } from '@/components/review/ReviewPatterns';
  * panel offers to look again rather than pretending to be live.
  */
 export function WorkspacePanel(): React.JSX.Element {
-  const { activeThreadId, workspace, refreshWorkspace } = useHarnessContext();
+  const {
+    activeThreadId,
+    workspace,
+    refreshWorkspace,
+    roleSelection,
+    roleSelectionSave,
+    roleSelectionError,
+    setWorkspaceRole,
+  } = useHarnessContext();
 
   if (activeThreadId === null) {
     return (
@@ -75,6 +84,21 @@ export function WorkspacePanel(): React.JSX.Element {
       {resolution.status === 'ok' && (
         <>
           <Settings workspace={resolution.workspace} />
+          {resolution.workspace.roles.length > 0 && (
+            roleSelection !== null ? (
+              <WorkspaceRoleSelector
+                roles={resolution.workspace.roles}
+                selection={roleSelection}
+                save={roleSelectionSave}
+                error={roleSelectionError}
+                onChange={(roleId) => void setWorkspaceRole(roleId)}
+              />
+            ) : roleSelectionError !== null ? (
+              <p role="alert" className="border-t border-border pt-2 text-destructive">
+                {roleSelectionError}
+              </p>
+            ) : null
+          )}
           <Problems problems={resolution.problems} />
           <p className="pt-1 text-[10px] text-muted-foreground">
             Read from {resolution.workspace.sources.join(', ')}

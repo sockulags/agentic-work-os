@@ -24,6 +24,7 @@ import type {
   WorkingState,
   WorkSourceError,
   WorkspaceResolution,
+  WorkspaceRoleSelection,
   WorkspaceIssueCatalog,
   IssueCatalogSource,
   IssueCatalogOverlay,
@@ -38,6 +39,7 @@ import { PermissionBridge } from './permission-bridge.js';
 import { ThreadStore } from './store/thread-store.js';
 import { ContextStore, applyPinnedContext, buildPinnedContext } from './store/context-store.js';
 import { resolveWorkspace } from './workspace/resolve.js';
+import { WorkspaceRoleSelectionStore } from './workspace/role-selection-store.js';
 import { applyWorkspace, buildWorkspaceBlock } from './workspace/prompt.js';
 import { WorkItemStore } from './work/store.js';
 import { CatalogStore } from './work/catalog-store.js';
@@ -1136,6 +1138,7 @@ export class Orchestrator extends EventEmitter {
   readonly context: ContextStore;
   readonly work: WorkItemStore;
   readonly catalog: CatalogStore;
+  readonly roleSelections: WorkspaceRoleSelectionStore;
   readonly #config: HarnessConfig;
   readonly #bridge = new PermissionBridge();
   readonly #threads = new Map<string, Thread>();
@@ -1147,6 +1150,7 @@ export class Orchestrator extends EventEmitter {
     this.context = new ContextStore(config.dataDir);
     this.work = new WorkItemStore(config.dataDir);
     this.catalog = new CatalogStore(config.dataDir);
+    this.roleSelections = new WorkspaceRoleSelectionStore(config.dataDir);
   }
 
   async start(): Promise<void> {
@@ -1246,6 +1250,45 @@ export class Orchestrator extends EventEmitter {
    */
   workspace(cwd: string): WorkspaceResolution {
     return resolveWorkspace(cwd, { laneSetup: this.#config.laneSetup });
+  }
+
+  /** Project the local role preference against the current shared role authority. */
+  workspaceRoleSelection(cwd: string): WorkspaceRoleSelection {
+    const resolution = this.workspace(cwd);
+    if (resolution.status !== 'ok' || resolution.workspace.roles.length === 0) {
+      return { status: 'unconfigured', roleId: null, role: null };
+    }
+
+    const roleId = this.roleSelections.read(resolution.workspace.root);
+    if (roleId === null) return { status: 'needs-selection', roleId: null, role: null };
+
+    const role = resolution.workspace.roles.find((candidate) => candidate.id === roleId) ?? null;
+    return role === null
+      ? { status: 'stale', roleId, role: null }
+      : { status: 'selected', roleId, role };
+  }
+
+  /** Validate against the current resolved workspace before changing local preference data. */
+  setWorkspaceRoleSelection(cwd: string, roleId: string | null): WorkspaceRoleSelection {
+    const resolution = this.workspace(cwd);
+    if (resolution.status !== 'ok' || resolution.workspace.roles.length === 0) {
+      throw new Error('This directory has no configured workspace roles.');
+    }
+
+    if (roleId !== null) {
+      if (typeof roleId !== 'string') throw new Error('Workspace role id must be a string or null.');
+      const role = resolution.workspace.roles.find((candidate) => candidate.id === roleId);
+      if (role === undefined) {
+        throw new Error(
+          `Unknown workspace role "${roleId}". Choose one of: ${resolution.workspace.roles
+            .map((candidate) => candidate.id)
+            .join(', ')}.`,
+        );
+      }
+    }
+
+    this.roleSelections.write(resolution.workspace.root, roleId);
+    return this.workspaceRoleSelection(cwd);
   }
 
   getIssueCatalog(cwd: string): { catalog: WorkspaceIssueCatalog | null; error: WorkSourceError | null } {

@@ -16,6 +16,7 @@ import type {
   WorkItem,
   WorkSourceError,
   WorkspaceResolution,
+  WorkspaceRoleSelection,
 } from '@awos/protocol';
 import type { ClientRequest } from '@awos/protocol';
 import { HarnessClient, resolveClientOptions, type ConnectionStatus } from '@/lib/client';
@@ -34,6 +35,8 @@ import { foldRuns } from '@/lib/runs';
 const SAVE_DEBOUNCE_MS = 600;
 
 export type PinnedContextSave = 'saved' | 'unsaved' | 'saving' | 'failed';
+
+export type WorkspaceRoleSave = 'saved' | 'saving' | 'failed';
 
 /**
  * The thread's pinned notes as the editor has them, tagged with the thread they belong to.
@@ -120,6 +123,9 @@ export function useHarness() {
   const [notice, setNotice] = useState<{ level: string; message: string } | null>(null);
   const [pinnedContext, setPinnedContext] = useState<PinnedContext | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceView | null>(null);
+  const [roleSelection, setRoleSelection] = useState<WorkspaceRoleSelection | null>(null);
+  const [roleSelectionSave, setRoleSelectionSave] = useState<WorkspaceRoleSave>('saved');
+  const [roleSelectionError, setRoleSelectionError] = useState<string | null>(null);
   const [work, setWork] = useState<WorkView | null>(null);
   const [gates, setGates] = useState<Partial<Record<AgentId, GateView>>>({});
 
@@ -209,6 +215,9 @@ export function useHarness() {
             setRuntime(null);
             setPinnedContext(null);
             setWorkspace(null);
+            setRoleSelection(null);
+            setRoleSelectionSave('saved');
+            setRoleSelectionError(null);
             setWork(null);
             setGates({});
             activeCwdRef.current = null;
@@ -242,6 +251,42 @@ export function useHarness() {
       // settings under the wrong project name are worse than a panel that lags a moment.
       if (activeCwdRef.current !== cwd) return;
       setWorkspace({ cwd, resolution: res.resolution });
+
+      const role = await client.request({ type: 'workspace.role.get', cwd }).catch(() => null);
+      if (activeCwdRef.current !== cwd) return;
+      if (role?.type !== 'workspace.role') {
+        setRoleSelection(null);
+        setRoleSelectionError('Could not load the local role preference. Re-read the workspace to try again.');
+        return;
+      }
+      setRoleSelection(role.selection);
+      setRoleSelectionSave('saved');
+      setRoleSelectionError(null);
+    },
+    [client],
+  );
+
+  const setWorkspaceRole = useCallback(
+    async (roleId: string | null) => {
+      const cwd = activeCwdRef.current;
+      if (cwd === null) return;
+      setRoleSelectionSave('saving');
+      setRoleSelectionError(null);
+      try {
+        const res = await client.request({ type: 'workspace.role.set', cwd, roleId });
+        if (activeCwdRef.current !== cwd) return;
+        if (res.type !== 'workspace.role') {
+          setRoleSelectionSave('failed');
+          setRoleSelectionError('The harness returned an unexpected role-selection response.');
+          return;
+        }
+        setRoleSelection(res.selection);
+        setRoleSelectionSave('saved');
+      } catch (error) {
+        if (activeCwdRef.current !== cwd) return;
+        setRoleSelectionSave('failed');
+        setRoleSelectionError(error instanceof Error ? error.message : 'Could not save the local role preference.');
+      }
     },
     [client],
   );
@@ -433,11 +478,17 @@ export function useHarness() {
       setActiveThreadId(threadId);
       // Claimed here rather than waiting for the next render, so the pinned-context reply
       // below can tell whether it is still wanted.
+      const previousCwd = activeCwdRef.current;
       activeThreadRef.current = threadId;
       activeCwdRef.current = res.thread.cwd;
       // Blanked on a move to another directory only: reopening the same thread keeps the
       // panel populated rather than flashing its empty state.
       setWorkspace((prev) => (prev?.cwd === res.thread.cwd ? prev : null));
+      if (previousCwd !== res.thread.cwd) {
+        setRoleSelection(null);
+        setRoleSelectionSave('saved');
+        setRoleSelectionError(null);
+      }
       // Lanes belong to a thread, so a verdict about another thread's lane is nonsense.
       setGates({});
       void refreshWorkspace(res.thread.cwd);
@@ -627,6 +678,10 @@ export function useHarness() {
     editPinnedContext,
     workspace,
     refreshWorkspace,
+    roleSelection,
+    roleSelectionSave,
+    roleSelectionError,
+    setWorkspaceRole,
     work,
     runs,
     attachWorkItem,

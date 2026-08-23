@@ -243,6 +243,16 @@ export class HarnessServer {
         return { type: 'workspace', cwd, resolution: orchestrator.workspace(cwd) };
       }
 
+      case 'workspace.role.get': {
+        const cwd = this.#workspaceCwd(msg);
+        return { type: 'workspace.role', cwd, selection: orchestrator.workspaceRoleSelection(cwd) };
+      }
+
+      case 'workspace.role.set': {
+        const cwd = this.#workspaceCwd(msg);
+        return { type: 'workspace.role', cwd, selection: orchestrator.setWorkspaceRoleSelection(cwd, msg.roleId) };
+      }
+
       case 'work.get':
         return this.#work(msg.threadId, { item: orchestrator.workItem(msg.threadId), error: null });
 
@@ -349,7 +359,7 @@ export class HarnessServer {
       throw new Error('Ask about a thread or about a path, not both.');
     }
     if (msg.cwd !== undefined) return msg.cwd;
-    if (msg.threadId === undefined) throw new Error('workspace.get needs a threadId or a cwd.');
+    if (msg.threadId === undefined) throw new Error('A workspace request needs a threadId or a cwd.');
 
     const thread = this.#orchestrator.store.get(msg.threadId);
     if (!thread) throw new Error(`Unknown thread ${msg.threadId}`);
