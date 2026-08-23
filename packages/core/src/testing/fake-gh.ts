@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
 /**
  * A fake `gh` for tests, speaking the same command line and the same JSON.
  *
@@ -16,7 +17,16 @@
  *   FAKE_GH_TITLE, FAKE_GH_BODY, FAKE_GH_STATE, FAKE_GH_UPDATED_AT — override the issue
  */
 
-const argv = process.argv.slice(2);
+const orchestratorCatalogMode = process.argv.includes('--catalog-orchestrator-test');
+const catalogMode = orchestratorCatalogMode || process.argv.includes('--catalog-test');
+const argv = process.argv.slice(2).filter(
+  (arg) => arg !== '--catalog-test' && arg !== '--catalog-orchestrator-test',
+);
+
+const callsFile = process.env['FAKE_GH_CALLS_FILE'];
+if (callsFile) {
+  appendFileSync(callsFile, 'call\n', 'utf8');
+}
 
 function flag(name: string): string | null {
   const at = argv.indexOf(name);
@@ -28,7 +38,9 @@ function fail(message: string, code = 1): never {
   process.exit(code);
 }
 
-const mode = process.env['FAKE_GH_FAIL'] ?? '';
+const mode = orchestratorCatalogMode
+  ? ''
+  : process.env[catalogMode ? 'FAKE_GH_CATALOG_FAIL' : 'FAKE_GH_FAIL'] ?? '';
 switch (mode) {
   case 'auth':
     fail('gh: To get started with GitHub CLI, please run: gh auth login');
@@ -49,6 +61,37 @@ switch (mode) {
     break;
   default:
     break;
+}
+
+if (argv[0] === 'issue' && argv[1] === 'list') {
+  const supportedFields = 'number,url,title,state,labels,assignees,updatedAt';
+  if (flag('--json') !== supportedFields) {
+    fail(`fake-gh: unsupported issue list fields ${flag('--json') ?? '(missing)'}`, 2);
+  }
+  let issues: unknown[];
+  try {
+    const configured = orchestratorCatalogMode
+      ? undefined
+      : catalogMode
+      ? process.env['FAKE_GH_CATALOG_ISSUES']
+      : process.env['FAKE_GH_ISSUES'];
+    issues = configured ? JSON.parse(configured) as unknown[] : [
+      {
+        number: 14,
+        title: 'Execute one GitHub issue as a work item',
+        state: 'OPEN',
+        labels: [{ name: 'enhancement' }],
+        assignees: [{ login: 'sockulags' }],
+        updatedAt: '2026-08-22T19:26:05Z',
+        url: 'https://github.com/owner/repo/issues/14',
+        isPullRequest: false,
+      },
+    ];
+  } catch {
+    fail('fake-gh: invalid FAKE_GH_ISSUES', 2);
+  }
+  process.stdout.write(`${JSON.stringify(issues)}\n`);
+  process.exit(0);
 }
 
 if (argv[0] !== 'issue' || argv[1] !== 'view') {

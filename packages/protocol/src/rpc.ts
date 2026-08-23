@@ -160,6 +160,10 @@ export type ClientRequest =
    * message that is merely conversation should not have to pretend otherwise.
    */
   | { type: 'work.start'; threadId: string; agent: AgentId; text: string }
+  /** Read the persisted workspace issue catalog without contacting GitHub. */
+  | { type: 'catalog.get'; threadId?: string; cwd?: string }
+  /** Explicitly refresh the workspace issue catalog through the user's `gh` CLI. */
+  | { type: 'catalog.refresh'; threadId?: string; cwd?: string }
   /**
    * State what a run achieved. Sending it again with the same `runId` is a correction:
    * the later claim stands and the earlier one stays in the log.
@@ -228,6 +232,12 @@ export type ServerResponseBody =
        * live in threads this client has not opened.
        */
       retained: RetainedItem[];
+    }
+  | {
+      type: 'catalog';
+      cwd: string;
+      catalog: import('./catalog.js').WorkspaceIssueCatalog | null;
+      error: WorkSourceError | null;
     }
   /**
    * The gate's verdict on one lane, requirement by requirement.

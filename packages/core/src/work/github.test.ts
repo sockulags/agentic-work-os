@@ -2,7 +2,13 @@ import assert from 'node:assert/strict';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, test } from 'node:test';
-import { fetchIssue, parseIssueRef, type GitHubOptions } from './github.js';
+import {
+  fetchIssue,
+  fetchOpenIssueCatalog,
+  OPEN_ISSUE_LIMIT,
+  parseIssueRef,
+  type GitHubOptions,
+} from './github.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const FAKE_GH = join(here, '..', 'testing', 'fake-gh.js');
@@ -18,6 +24,7 @@ afterEach(() => {
   delete process.env['FAKE_GH_FAIL'];
   delete process.env['FAKE_GH_UPDATED_AT'];
   delete process.env['FAKE_GH_TITLE'];
+  delete process.env['FAKE_GH_ISSUES'];
 });
 
 describe('fetchIssue', () => {
@@ -85,6 +92,113 @@ describe('fetchIssue', () => {
       assert.ok(['missing-cli', 'unknown', 'not-found'].includes(result.error.kind));
       assert.ok(result.error.message.length > 0);
     });
+  });
+});
+
+describe('fetchOpenIssueCatalog', () => {
+  test('uses the supported gh issue-list fields and normalizes them without bodies', async () => {
+    process.env['FAKE_GH_ISSUES'] = JSON.stringify([
+      {
+        number: 7,
+        url: 'https://github.com/owner/repo/issues/7',
+        title: 'Catalog this',
+        state: 'OPEN',
+        labels: [{ name: 'bug' }],
+        assignees: [{ login: 'lucas' }],
+        updatedAt: '2026-08-23T10:00:00Z',
+        body: 'must not be requested',
+        isPullRequest: false,
+      },
+    ]);
+
+    const result = await fetchOpenIssueCatalog('owner/repo', options);
+
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.deepEqual(result.issues, [{
+      number: 7,
+      url: 'https://github.com/owner/repo/issues/7',
+      title: 'Catalog this',
+      state: 'OPEN',
+      labels: ['bug'],
+      assignees: ['lucas'],
+      updatedAt: '2026-08-23T10:00:00Z',
+    }]);
+  });
+
+  test('excludes pull requests and marks a limit-sized response incomplete', async () => {
+    process.env['FAKE_GH_ISSUES'] = JSON.stringify([
+      { number: 99, title: 'PR', state: 'OPEN', isPullRequest: true },
+      ...Array.from({ length: OPEN_ISSUE_LIMIT }, (_, index) => ({
+        number: index + 1,
+        url: `https://github.com/owner/repo/issues/${index + 1}`,
+        title: `Issue ${index + 1}`,
+        state: 'OPEN',
+        labels: [],
+        assignees: [],
+        updatedAt: '2026-08-23T10:00:00Z',
+        isPullRequest: false,
+      })),
+    ]);
+
+    const result = await fetchOpenIssueCatalog('owner/repo', options);
+
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.issues.some((issue) => issue.number === 99), false);
+    assert.equal(result.issues.length, OPEN_ISSUE_LIMIT);
+    assert.equal(result.complete, false);
+  });
+
+  test('truncates an oversized wrapper response to the fixed first issue limit', async () => {
+    process.env['FAKE_GH_ISSUES'] = JSON.stringify(
+      Array.from({ length: OPEN_ISSUE_LIMIT + 5 }, (_, index) => ({
+        number: index + 1,
+        url: `https://github.com/owner/repo/issues/${index + 1}`,
+        title: `Issue ${index + 1}`,
+        state: 'OPEN',
+        labels: [],
+        assignees: [],
+        updatedAt: '2026-08-23T10:00:00Z',
+      })),
+    );
+
+    const result = await fetchOpenIssueCatalog('owner/repo', options);
+
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.issues.length, OPEN_ISSUE_LIMIT);
+    assert.equal(result.issues[0]?.number, 1);
+    assert.equal(result.issues.at(-1)?.number, OPEN_ISSUE_LIMIT);
+    assert.equal(result.complete, false);
+  });
+
+  test('rejects malformed required source fields instead of inventing defaults', async () => {
+    const valid = {
+      number: 7,
+      url: 'https://github.com/owner/repo/issues/7',
+      title: 'Catalog this',
+      state: 'OPEN',
+      labels: [{ name: 'bug' }],
+      assignees: [{ login: 'lucas' }],
+      updatedAt: '2026-08-23T10:00:00Z',
+    };
+    const malformed = [
+      { ...valid, title: undefined },
+      { ...valid, url: 42 },
+      { ...valid, updatedAt: '' },
+      { ...valid, labels: undefined },
+      { ...valid, labels: [{ name: 42 }] },
+      { ...valid, assignees: null },
+      { ...valid, assignees: [{ login: '' }] },
+    ];
+
+    for (const issue of malformed) {
+      process.env['FAKE_GH_ISSUES'] = JSON.stringify([issue]);
+      const result = await fetchOpenIssueCatalog('owner/repo', options);
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.match(result.error.message, /expected GitHub JSON/);
+    }
   });
 });
 

@@ -299,6 +299,16 @@ export class HarnessServer {
         });
         return { type: 'ok' };
 
+      case 'catalog.get': {
+        const cwd = this.#workspaceCwd(msg);
+        return { type: 'catalog', cwd, ...orchestrator.getIssueCatalog(cwd) };
+      }
+
+      case 'catalog.refresh': {
+        const cwd = this.#workspaceCwd(msg);
+        return { type: 'catalog', cwd, ...(await orchestrator.refreshIssueCatalog(cwd)) };
+      }
+
       case 'agents.probe':
         return { type: 'agents.probe', agents: await this.#probeAgents() };
 

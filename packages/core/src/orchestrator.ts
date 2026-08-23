@@ -24,6 +24,10 @@ import type {
   WorkingState,
   WorkSourceError,
   WorkspaceResolution,
+  WorkspaceIssueCatalog,
+  IssueCatalogSource,
+  IssueCatalogOverlay,
+  CatalogRunEvidence,
 } from '@awos/protocol';
 import { AGENT_IDS, PINNED_CONTEXT_MAX_CHARS, RETAINED_FILE, RUN_CONTEXT_MAX_CHARS } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
@@ -36,6 +40,7 @@ import { ContextStore, applyPinnedContext, buildPinnedContext } from './store/co
 import { resolveWorkspace } from './workspace/resolve.js';
 import { applyWorkspace, buildWorkspaceBlock } from './workspace/prompt.js';
 import { WorkItemStore } from './work/store.js';
+import { CatalogStore } from './work/catalog-store.js';
 import {
   applyRetained,
   applyWorkItem,
@@ -124,6 +129,8 @@ class Thread {
    * a lane each, two agents cannot race on the filesystem, so the lock is per agent.
    */
   readonly #turns = new Map<AgentId, string | null>();
+  /** Run identity for each in-flight turn that was explicitly started as work. */
+  readonly #activeRuns = new Map<AgentId, string>();
   #lastTurnAgent: AgentId | null = null;
   #plan: PlanItem[] = [];
   #diff: string | null = null;
@@ -207,6 +214,10 @@ class Thread {
 
   get busyWith(): AgentId | null {
     return this.#busy[0] ?? null;
+  }
+
+  isRunActive(runId: string): boolean {
+    return [...this.#activeRuns.values()].includes(runId);
   }
 
   get #busy(): AgentId[] {
@@ -364,15 +375,16 @@ class Thread {
     // Claim the turn synchronously, before any await, so a second send to the same agent
     // sees it busy and is rejected rather than racing in.
     this.#turns.set(agent, null);
+    if (runId) this.#activeRuns.set(agent, runId);
     this.#onState();
 
     // Agents that don't report their own turn diff (Claude) get one synthesized from a
     // git snapshot taken around the turn. Ground truth from the working tree, never a
     // guess parsed from tool output. Codex reports its own, so we don't shadow it.
-    const diffBaseline = adapter.capabilities.turnDiff ? null : await snapshotWorkingTree(cwd);
-
+    let diffBaseline: Awaited<ReturnType<typeof snapshotWorkingTree>> = null;
     let failure: string | null = null;
     try {
+      diffBaseline = adapter.capabilities.turnDiff ? null : await snapshotWorkingTree(cwd);
       let retriedStaleResume = false;
       for (;;) {
         try {
@@ -416,6 +428,7 @@ class Thread {
         if (patch) this.#record(agent, { kind: 'diff.updated', turnId, patch });
       }
       this.#turns.delete(agent);
+      if (runId) this.#activeRuns.delete(agent);
       // Read after the turn rather than watched during it: nothing needs these the moment
       // they are written, and a file read on a boundary we already have beats another
       // watcher with its own debounce and restart story.
@@ -1122,6 +1135,7 @@ export class Orchestrator extends EventEmitter {
   readonly store: ThreadStore;
   readonly context: ContextStore;
   readonly work: WorkItemStore;
+  readonly catalog: CatalogStore;
   readonly #config: HarnessConfig;
   readonly #bridge = new PermissionBridge();
   readonly #threads = new Map<string, Thread>();
@@ -1132,6 +1146,7 @@ export class Orchestrator extends EventEmitter {
     this.store = new ThreadStore(config.dataDir);
     this.context = new ContextStore(config.dataDir);
     this.work = new WorkItemStore(config.dataDir);
+    this.catalog = new CatalogStore(config.dataDir);
   }
 
   async start(): Promise<void> {
@@ -1231,6 +1246,21 @@ export class Orchestrator extends EventEmitter {
    */
   workspace(cwd: string): WorkspaceResolution {
     return resolveWorkspace(cwd, { laneSetup: this.#config.laneSetup });
+  }
+
+  getIssueCatalog(cwd: string): { catalog: WorkspaceIssueCatalog | null; error: WorkSourceError | null } {
+    const scope = this.#catalogScope(cwd);
+    if (!scope.ok) return { catalog: null, error: scope.error };
+    return { catalog: this.#composeIssueCatalog(this.catalog.read(scope)), error: null };
+  }
+
+  async refreshIssueCatalog(
+    cwd: string,
+  ): Promise<{ catalog: WorkspaceIssueCatalog | null; error: WorkSourceError | null }> {
+    const scope = this.#catalogScope(cwd);
+    if (!scope.ok) return { catalog: null, error: scope.error };
+    const source = await this.catalog.refresh(scope, this.#github());
+    return { catalog: this.#composeIssueCatalog(source), error: source.error };
   }
 
   // -------------------------------------------------------------------------
@@ -1393,6 +1423,93 @@ export class Orchestrator extends EventEmitter {
       binArgs: this.#config.ghBinArgs,
       timeoutMs: this.#config.ghTimeoutMs,
     };
+  }
+
+  #catalogScope(
+    cwd: string,
+  ): { ok: true; workspaceRoot: string; repository: string } | { ok: false; error: WorkSourceError } {
+    const resolution = this.workspace(cwd);
+    if (resolution.status !== 'ok') {
+      return {
+        ok: false,
+        error: {
+          kind: 'unknown',
+          message:
+            resolution.status === 'none'
+              ? 'This directory is not a workspace yet. Declare .awos/workspace.json first.'
+              : 'The workspace declaration is invalid. Fix it before reading its GitHub issue catalog.',
+          retryable: false,
+        },
+      };
+    }
+    const repository = resolution.workspace.repository.github;
+    if (repository === null) {
+      return {
+        ok: false,
+        error: {
+          kind: 'unknown',
+          message: 'This workspace does not declare repository.github, so no GitHub issue catalog is available.',
+          retryable: false,
+        },
+      };
+    }
+    return { ok: true, workspaceRoot: resolution.workspace.root, repository };
+  }
+
+  #composeIssueCatalog(source: IssueCatalogSource): WorkspaceIssueCatalog {
+    const overlay: Record<string, IssueCatalogOverlay> = {};
+    for (const issue of source.issues) {
+      overlay[`${source.repository}#${issue.number}`] = { linkedThreads: [], runs: [] };
+    }
+
+    const items = this.work.list(source.workspaceRoot).filter((item) => item.source.repo === source.repository);
+    const summaries = this.store.list();
+    for (const item of items) {
+      const key = `${item.source.repo}#${item.source.number}`;
+      const linked = summaries.filter((thread) => thread.workItemId === item.id);
+      if (linked.length === 0) continue;
+      const entry = overlay[key] ??= { linkedThreads: [], runs: [] };
+      entry.linkedThreads.push(
+        ...linked.map((thread) => ({
+          threadId: thread.id,
+          workItemId: item.id,
+          title: thread.title,
+          updatedAt: thread.updatedAt,
+        })),
+      );
+
+      for (const thread of linked) {
+        const events = this.store.events(thread.id);
+        const runs = new Map<string, CatalogRunEvidence>();
+        for (const event of events) {
+          if (event.kind === 'run.started' && event.workItemId === item.id) {
+            const runtime = this.#threads.get(thread.id);
+            const live = runtime?.isRunActive(event.runId) === true;
+            runs.set(event.runId, {
+              runId: event.runId,
+              threadId: thread.id,
+              agent: event.agent,
+              startedAt: event.ts,
+              state: live ? 'running' : 'unknown',
+              live,
+              evidenceCount: 0,
+            });
+          } else if (event.kind === 'run.completed') {
+            const run = runs.get(event.runId);
+            if (run) {
+              run.state = event.state;
+              run.live = false;
+            }
+          } else if (event.kind === 'evidence.recorded' && event.runId !== null) {
+            const run = runs.get(event.runId);
+            if (run) run.evidenceCount += 1;
+          }
+        }
+        entry.runs.push(...runs.values());
+      }
+    }
+
+    return { source, overlay };
   }
 
   getPinnedContext(threadId: string): string {
