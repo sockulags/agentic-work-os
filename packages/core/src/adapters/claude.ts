@@ -20,6 +20,19 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** Resolved against dist/, since that's what actually runs. */
 const PERMISSION_MCP_ENTRY = join(here, '..', 'permission-mcp', 'main.js');
 
+function nextOrdinal(
+  ordinals: Map<'text' | 'thinking', number>,
+  kind: 'text' | 'thinking',
+): number {
+  const ordinal = ordinals.get(kind) ?? 0;
+  ordinals.set(kind, ordinal + 1);
+  return ordinal;
+}
+
+function semanticItemId(messageId: string, ordinal: number): string {
+  return `${messageId}#${ordinal}`;
+}
+
 /**
  * Drives `claude -p` in bidirectional stream-json mode.
  *
@@ -70,12 +83,10 @@ export class ClaudeAdapter implements WorkerAdapter {
   /** Control requests we sent to the CLI (currently only `interrupt`). */
   readonly #controlWaiters = new Map<string, (ok: boolean) => void>();
 
-  /**
-   * Streaming state. `content_block_start` tells us what kind of block an index is;
-   * subsequent deltas carry only the index, so we have to remember.
-   */
+  /** Streaming state. Subsequent deltas carry only the raw content-block index. */
   #streamMessageId: string | null = null;
-  readonly #blockKinds = new Map<number, 'text' | 'thinking'>();
+  readonly #blockItemIds = new Map<number, string>();
+  readonly #blockOrdinals = new Map<'text' | 'thinking', number>();
 
   /** tool_use id → display name, so `tool_result` can be labelled on completion. */
   readonly #toolNames = new Map<string, string>();
@@ -246,7 +257,8 @@ export class ClaudeAdapter implements WorkerAdapter {
 
     this.#busy = true;
     this.#turnId = randomUUID();
-    this.#blockKinds.clear();
+    this.#blockItemIds.clear();
+    this.#blockOrdinals.clear();
     this.#streamMessageId = null;
 
     this.#ctx.emit({
@@ -461,28 +473,34 @@ export class ClaudeAdapter implements WorkerAdapter {
 
     if (event.type === 'message_start') {
       this.#streamMessageId = event.message?.id ?? randomUUID();
-      this.#blockKinds.clear();
+      this.#blockItemIds.clear();
+      this.#blockOrdinals.clear();
       return;
     }
 
     if (event.type === 'content_block_start' && event.index !== undefined) {
       const blockType = event.content_block?.type;
       if (blockType === 'text' || blockType === 'thinking') {
-        this.#blockKinds.set(event.index, blockType);
+        this.#blockItemIds.set(event.index, this.#nextStreamItemId(blockType));
       }
       return;
     }
 
     if (event.type === 'content_block_stop' && event.index !== undefined) {
-      this.#blockKinds.delete(event.index);
+      this.#blockItemIds.delete(event.index);
       return;
     }
 
     if (event.type !== 'content_block_delta' || event.index === undefined) return;
 
-    const itemId = this.#itemId(event.index);
     const delta = event.delta;
     if (!delta) return;
+
+    const blockType =
+      delta.type === 'text_delta' ? 'text' : delta.type === 'thinking_delta' ? 'thinking' : null;
+    if (!blockType) return;
+    const itemId = this.#blockItemIds.get(event.index) ?? this.#nextStreamItemId(blockType);
+    this.#blockItemIds.set(event.index, itemId);
 
     if (delta.type === 'text_delta' && delta.text) {
       this.#ctx.emit({
@@ -508,15 +526,17 @@ export class ClaudeAdapter implements WorkerAdapter {
     const messageId = msg.message.id ?? this.#streamMessageId ?? randomUUID();
     if (msg.message.model) this.#model = msg.message.model;
 
-    msg.message.content.forEach((block, index) => {
+    const ordinals = new Map<'text' | 'thinking', number>();
+    msg.message.content.forEach((block) => {
       if (block.type === 'text') {
         if (fromSubagent) return;
+        const itemId = semanticItemId(messageId, nextOrdinal(ordinals, 'text'));
         const text = (block as ClaudeWire.ClaudeTextBlock).text;
         if (!text) return;
         this.#ctx.emit({
           kind: 'message.completed',
           turnId: this.#turnId,
-          itemId: `${messageId}#${index}`,
+          itemId,
           text,
         });
         return;
@@ -524,12 +544,13 @@ export class ClaudeAdapter implements WorkerAdapter {
 
       if (block.type === 'thinking') {
         if (fromSubagent) return;
+        const itemId = semanticItemId(messageId, nextOrdinal(ordinals, 'thinking'));
         const thinking = (block as ClaudeWire.ClaudeThinkingBlock).thinking;
         if (!thinking) return;
         this.#ctx.emit({
           kind: 'reasoning.completed',
           turnId: this.#turnId,
-          itemId: `${messageId}#${index}`,
+          itemId,
           text: thinking,
         });
         return;
@@ -631,8 +652,11 @@ export class ClaudeAdapter implements WorkerAdapter {
   // Helpers
   // -------------------------------------------------------------------------
 
-  #itemId(index: number): string {
-    return `${this.#streamMessageId ?? 'msg'}#${index}`;
+  #nextStreamItemId(kind: 'text' | 'thinking'): string {
+    return semanticItemId(
+      this.#streamMessageId ?? 'msg',
+      nextOrdinal(this.#blockOrdinals, kind),
+    );
   }
 
   #emitStatus(status: 'spawning' | 'ready' | 'busy' | 'idle' | 'exited' | 'failed', detail: string | null): void {

@@ -86,6 +86,8 @@ interface FoldState {
   items: TranscriptItem[];
   /** Item key to its position in `items`, so an update is a lookup rather than a scan. */
   index: Map<string, number>;
+  /** Active streamed messages, bucketed by the identity needed for legacy reconciliation. */
+  legacyCandidates: Map<string, Set<string>>;
   totals: { inputTokens: number; outputTokens: number; costUsd: number };
   /** Which agent each turn belongs to, so a divider only appears when it changes. */
   lastDividerAgent: AgentId | null;
@@ -149,9 +151,75 @@ function createFoldState(): FoldState {
   return {
     items: [],
     index: new Map(),
+    legacyCandidates: new Map(),
     totals: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
     lastDividerAgent: null,
   };
+}
+
+function nativeMessageBase(itemId: string): string | null {
+  const match = /^(.*)#\d+$/.exec(itemId);
+  return match?.[1] ?? null;
+}
+
+function legacyIdentity(agent: AgentId, turnId: string | null, nativeBase: string): string {
+  return JSON.stringify([agent, turnId, nativeBase]);
+}
+
+function addLegacyCandidate(
+  state: FoldState,
+  key: string,
+  agent: AgentId,
+  turnId: string | null,
+  itemId: string,
+): void {
+  const base = nativeMessageBase(itemId);
+  if (agent !== 'claude' || base === null) return;
+  const identity = legacyIdentity(agent, turnId, base);
+  const candidates = state.legacyCandidates.get(identity) ?? new Set<string>();
+  candidates.add(key);
+  state.legacyCandidates.set(identity, candidates);
+}
+
+function removeLegacyCandidate(
+  state: FoldState,
+  key: string,
+  agent: AgentId,
+  turnId: string | null,
+  itemId: string,
+): void {
+  const base = nativeMessageBase(itemId);
+  if (agent !== 'claude' || base === null) return;
+  const identity = legacyIdentity(agent, turnId, base);
+  const candidates = state.legacyCandidates.get(identity);
+  if (!candidates) return;
+  candidates.delete(key);
+  if (candidates.size === 0) state.legacyCandidates.delete(identity);
+}
+
+function findLegacyMessageKey(
+  state: FoldState,
+  itemId: string,
+  agent: AgentId,
+  turnId: string | null,
+  text: string,
+): string | null {
+  if (agent !== 'claude') return null;
+  const base = nativeMessageBase(itemId);
+  if (base === null) return null;
+  const directKey = `msg:${itemId}`;
+  // A current producer already uses the direct semantic id. Never reinterpret it as
+  // a historical raw-index sequence.
+  if (state.index.has(directKey)) return null;
+  const candidates = state.legacyCandidates.get(legacyIdentity(agent, turnId, base));
+  if (!candidates) return null;
+
+  for (const key of candidates) {
+    const at = state.index.get(key);
+    const item = at === undefined ? undefined : state.items[at];
+    if (item?.kind === 'message' && item.text === text) return key;
+  }
+  return null;
 }
 
 /**
@@ -212,8 +280,10 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
     case 'message.delta': {
       const agent = event.agent;
       if (agent === null) break;
+      const key = `msg:${event.itemId}`;
+      addLegacyCandidate(state, key, agent, event.turnId, event.itemId);
       upsert(
-        `msg:${event.itemId}`,
+        key,
         () => ({
           kind: 'message',
           id: event.itemId,
@@ -234,8 +304,24 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
     case 'message.completed': {
       const agent = event.agent;
       if (agent === null) break;
+      const directKey = `msg:${event.itemId}`;
+      const candidateKey = findLegacyMessageKey(
+        state,
+        event.itemId,
+        agent,
+        event.turnId,
+        event.text,
+      );
+      const key = candidateKey ?? directKey;
+      if (candidateKey !== null) {
+        const at = state.index.get(candidateKey);
+        if (at !== undefined) {
+          state.index.delete(candidateKey);
+          state.index.set(directKey, at);
+        }
+      }
       upsert(
-        `msg:${event.itemId}`,
+        directKey,
         () => ({
           kind: 'message',
           id: event.itemId,
@@ -246,8 +332,11 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
           ts: event.ts,
         }),
         (item) =>
-          item.kind === 'message' ? { ...item, text: event.text, streaming: false } : null,
+          item.kind === 'message'
+            ? { ...item, id: event.itemId, text: event.text, streaming: false }
+            : null,
       );
+      removeLegacyCandidate(state, key, agent, event.turnId, event.itemId);
       break;
     }
 

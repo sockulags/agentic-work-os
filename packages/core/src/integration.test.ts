@@ -202,6 +202,26 @@ describe('Claude adapter end to end', () => {
     );
   });
 
+  test('keeps text identity when final assistant payload omits thinking', async () => {
+    const { orch, events } = await boot(
+      makeConfig({ claudeBinArgs: [FAKE_CLAUDE, '--think-omit-final'] }),
+    );
+    const thread = orch.createThread({ cwd: workDir });
+
+    await orch.send(thread.id, 'claude', 'think about it');
+
+    const delta = events.find((event) => event.kind === 'message.delta');
+    const completed = events.find((event) => event.kind === 'message.completed');
+    assert.ok(delta, 'text delta emitted');
+    assert.ok(completed, 'text completion emitted');
+    assert.equal(
+      delta.kind === 'message.delta' ? delta.itemId : null,
+      completed.kind === 'message.completed' ? completed.itemId : null,
+    );
+    assert.match(delta.kind === 'message.delta' ? delta.itemId : '', /#0$/);
+    assert.equal(events.filter((event) => event.kind === 'reasoning.delta').length > 0, true);
+  });
+
   test('records usage from the result event', async () => {
     const { orch, events } = await boot(makeConfig());
     const thread = orch.createThread({ cwd: workDir });

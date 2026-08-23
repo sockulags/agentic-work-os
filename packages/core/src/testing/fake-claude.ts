@@ -8,6 +8,7 @@
  * mock. Behaviour is scripted through argv so one binary covers several scenarios.
  *
  * Usage: fake-claude.js [--tool] [--tools] [--permission] [--slow] [--markdown] [--think]
+ *   [--think-omit-final]
  */
 
 import { LineDecoder } from '../util/jsonl.js';
@@ -144,10 +145,11 @@ async function runTurn(text: string): Promise<void> {
     session_id: SESSION_ID,
   });
 
-  const thinking = args.has('--think');
-  // Content-block indices are what the adapter derives item ids from, so a thinking
-  // block ahead of the text pushes the text to index 1 — and the final assistant
-  // message has to list the blocks in the same order or the ids stop matching.
+  const thinking = args.has('--think') || args.has('--think-omit-final');
+  const omitThinkingFromFinal = args.has('--think-omit-final');
+  // The stream uses raw content-block indices. The omitted-thinking variant keeps the
+  // text at index 1 in the stream, then removes thinking from the final payload so the
+  // final text arrives at index 0, matching the production wire shape.
   const textIndex = thinking ? 1 : 0;
   let thinkingText = '';
 
@@ -230,7 +232,7 @@ async function runTurn(text: string): Promise<void> {
       id: messageId,
       role: 'assistant',
       model: 'claude-fake-1',
-      content: thinking
+      content: thinking && !omitThinkingFromFinal
         ? [
             { type: 'thinking', thinking: thinkingText },
             { type: 'text', text: finalText },
