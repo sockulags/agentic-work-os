@@ -91,7 +91,7 @@ export class ThreadStore {
   // Writes
   // -------------------------------------------------------------------------
 
-  create(options: { cwd: string; title?: string; agent?: AgentId }): ThreadSummary {
+  create(options: { cwd: string; title?: string; agent?: AgentId; workItemId?: string | null }): ThreadSummary {
     const id = randomUUID();
     const now = this.#tick();
     const summary: ThreadSummary = {
@@ -104,14 +104,21 @@ export class ThreadStore {
       nativeSessions: {},
       watermarks: Object.fromEntries(AGENT_IDS.map((agent) => [agent, 0])) as Record<AgentId, number>,
       eventCount: 0,
-      workItemId: null,
+      workItemId: options.workItemId ?? null,
       parallel: false,
     };
 
-    mkdirSync(this.#dir(id), { recursive: true });
-    this.#summaries.set(id, summary);
-    this.#events.set(id, []);
-    this.#writeMeta(summary);
+    try {
+      mkdirSync(this.#dir(id), { recursive: true });
+      this.#summaries.set(id, summary);
+      this.#events.set(id, []);
+      this.#writeMeta(summary);
+    } catch (error) {
+      this.#summaries.delete(id);
+      this.#events.delete(id);
+      rmSync(this.#dir(id), { recursive: true, force: true });
+      throw error;
+    }
     return summary;
   }
 

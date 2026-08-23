@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 /**
  * A fake `gh` for tests, speaking the same command line and the same JSON.
  *
@@ -14,18 +14,19 @@ import { appendFileSync } from 'node:fs';
  * builds the argument list and the test only controls the environment:
  *
  *   FAKE_GH_FAIL=auth|not-found|rate-limit|offline|garbage
- *   FAKE_GH_TITLE, FAKE_GH_BODY, FAKE_GH_STATE, FAKE_GH_UPDATED_AT — override the issue
+ *   FAKE_GH_TITLE, FAKE_GH_BODY, FAKE_GH_STATE, FAKE_GH_UPDATED_AT, FAKE_GH_VIEW_LABELS — override the issue
  */
 
+const issueOpenMode = process.argv.includes('--issue-open-test');
 const orchestratorCatalogMode = process.argv.includes('--catalog-orchestrator-test');
 const catalogMode = orchestratorCatalogMode || process.argv.includes('--catalog-test');
 const argv = process.argv.slice(2).filter(
-  (arg) => arg !== '--catalog-test' && arg !== '--catalog-orchestrator-test',
+  (arg) => arg !== '--catalog-test' && arg !== '--catalog-orchestrator-test' && arg !== '--issue-open-test',
 );
 
-const callsFile = process.env['FAKE_GH_CALLS_FILE'];
+const callsFile = process.env[issueOpenMode ? 'FAKE_GH_ISSUE_OPEN_CALLS_FILE' : 'FAKE_GH_CALLS_FILE'];
 if (callsFile) {
-  appendFileSync(callsFile, 'call\n', 'utf8');
+  appendFileSync(callsFile, `${argv[0] ?? ''} ${argv[1] ?? ''}\n`, 'utf8');
 }
 
 function flag(name: string): string | null {
@@ -40,7 +41,7 @@ function fail(message: string, code = 1): never {
 
 const mode = orchestratorCatalogMode
   ? ''
-  : process.env[catalogMode ? 'FAKE_GH_CATALOG_FAIL' : 'FAKE_GH_FAIL'] ?? '';
+  : process.env[issueOpenMode ? 'FAKE_GH_ISSUE_OPEN_FAIL' : catalogMode ? 'FAKE_GH_CATALOG_FAIL' : 'FAKE_GH_FAIL'] ?? '';
 switch (mode) {
   case 'auth':
     fail('gh: To get started with GitHub CLI, please run: gh auth login');
@@ -72,6 +73,8 @@ if (argv[0] === 'issue' && argv[1] === 'list') {
   try {
     const configured = orchestratorCatalogMode
       ? undefined
+      : issueOpenMode
+      ? process.env['FAKE_GH_ISSUE_OPEN_ISSUES']
       : catalogMode
       ? process.env['FAKE_GH_CATALOG_ISSUES']
       : process.env['FAKE_GH_ISSUES'];
@@ -100,16 +103,37 @@ if (argv[0] !== 'issue' || argv[1] !== 'view') {
 
 const number = Number(argv[2]);
 const repo = flag('--repo') ?? 'owner/repo';
+const envPrefix = issueOpenMode ? 'FAKE_GH_ISSUE_OPEN_' : 'FAKE_GH_';
+if (issueOpenMode) {
+  const readyFile = process.env['FAKE_GH_ISSUE_OPEN_VIEW_READY_FILE'];
+  const releaseFile = process.env['FAKE_GH_ISSUE_OPEN_VIEW_RELEASE_FILE'];
+  if (readyFile && releaseFile) {
+    writeFileSync(readyFile, 'ready\n', 'utf8');
+    while (!existsSync(releaseFile)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  }
+}
+let labels = [{ name: 'enhancement' }];
+if (process.env[`${envPrefix}VIEW_LABELS`] !== undefined) {
+  try {
+    const parsed = JSON.parse(process.env[`${envPrefix}VIEW_LABELS`]!) as unknown;
+    if (!Array.isArray(parsed) || !parsed.every((label) => typeof label === 'string')) {
+      fail('fake-gh: invalid FAKE_GH_VIEW_LABELS', 2);
+    }
+    labels = (parsed as string[]).map((name) => ({ name }));
+  } catch {
+    fail('fake-gh: invalid FAKE_GH_VIEW_LABELS', 2);
+  }
+}
 
 process.stdout.write(
   `${JSON.stringify({
     number,
-    title: process.env['FAKE_GH_TITLE'] ?? 'Execute one GitHub issue as a work item',
-    body: process.env['FAKE_GH_BODY'] ?? 'The issue body, as GitHub has it.',
-    state: process.env['FAKE_GH_STATE'] ?? 'OPEN',
-    labels: [{ name: 'enhancement' }],
+    title: process.env[`${envPrefix}TITLE`] ?? 'Execute one GitHub issue as a work item',
+    body: process.env[`${envPrefix}BODY`] ?? 'The issue body, as GitHub has it.',
+    state: process.env[`${envPrefix}STATE`] ?? 'OPEN',
+    labels,
     author: { login: 'sockulags' },
-    updatedAt: process.env['FAKE_GH_UPDATED_AT'] ?? '2026-08-22T19:26:05Z',
+    updatedAt: process.env[`${envPrefix}UPDATED_AT`] ?? '2026-08-22T19:26:05Z',
     url: `https://github.com/${repo}/issues/${number}`,
   })}\n`,
 );

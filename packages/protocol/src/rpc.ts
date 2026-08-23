@@ -12,6 +12,7 @@ import type { WorkerProfileId } from './events.js';
 import type { WorkspaceResolution } from './workspace.js';
 import type { WorkspaceRoleSelection } from './role-selection.js';
 import type { WorkItem, WorkSourceError } from './work.js';
+import type { IssueOpenResult } from './issue-open.js';
 import type {
   EvidenceKind,
   EvidenceRef,
@@ -167,6 +168,8 @@ export type ClientRequest =
   | { type: 'catalog.get'; threadId?: string; cwd?: string }
   /** Explicitly refresh the workspace issue catalog through the user's `gh` CLI. */
   | { type: 'catalog.refresh'; threadId?: string; cwd?: string }
+  /** Atomically prepare a new issue thread, or continue the surviving linked thread. */
+  | { type: 'issue.open'; threadId?: string; cwd?: string; number: number }
   /**
    * State what a run achieved. Sending it again with the same `runId` is a correction:
    * the later claim stands and the earlier one stays in the log.
@@ -243,6 +246,7 @@ export type ServerResponseBody =
       catalog: import('./catalog.js').WorkspaceIssueCatalog | null;
       error: WorkSourceError | null;
     }
+  | { type: 'issue.open'; result: IssueOpenResult }
   /**
    * The gate's verdict on one lane, requirement by requirement.
    *
