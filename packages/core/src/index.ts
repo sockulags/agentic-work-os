@@ -26,6 +26,8 @@ export { parseDeclaration, type WorkspaceDeclaration } from './workspace/declara
 export { buildWorkspaceBlock, applyWorkspace } from './workspace/prompt.js';
 export { WorkItemStore } from './work/store.js';
 export { fetchIssue, parseIssueRef, type GitHubOptions } from './work/github.js';
+export { projectIssueRoute } from './work/issue-route.js';
+export { explainIssueRoute } from './work/issue-route-presentation.js';
 export {
   buildWorkItemBlock,
   applyWorkItem,
