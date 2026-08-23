@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Project overview · AWOS prototype</title>
+    <style>
+      :root {
+        --surface-canvas: 222 28% 7%;
+        --surface-sunken: 222 30% 5%;
+        --surface-rail: 222 25% 9%;
+        --surface-raised: 221 24% 11%;
+        --surface-overlay: 220 26% 13%;
+        --surface-subtle: 221 20% 15%;
+        --surface-interactive: 220 20% 18%;
+        --surface-selected: 38 35% 18%;
+        --text-primary: 218 25% 96%;
+        --text-secondary: 218 18% 77%;
+        --text-muted: 218 13% 60%;
+        --text-subtle: 218 10% 46%;
+        --text-disabled: 218 8% 38%;
+        --text-inverse: 222 30% 8%;
+        --border-subtle: 220 13% 14%;
+        --border-default: 218 16% 22%;
+        --border-strong: 218 16% 31%;
+        --border-input: 218 16% 27%;
+        --focus-ring: 39 95% 62%;
+        --action-primary: 38 95% 60%;
+        --action-primary-foreground: 32 35% 10%;
+        --action-secondary: 220 20% 18%;
+        --action-secondary-foreground: 218 25% 96%;
+        --state-idle: 218 12% 68%;
+        --state-idle-surface: 218 18% 18%;
+        --state-idle-border: 218 20% 30%;
+        --state-busy: 39 95% 65%;
+        --state-busy-surface: 38 55% 20%;
+        --state-busy-border: 39 70% 36%;
+        --state-waiting: 204 90% 70%;
+        --state-waiting-surface: 204 55% 20%;
+        --state-waiting-border: 204 65% 35%;
+        --state-blocked: 12 86% 66%;
+        --state-blocked-surface: 12 55% 20%;
+        --state-blocked-border: 12 70% 36%;
+        --state-passed: 148 64% 62%;
+        --state-passed-surface: 148 48% 19%;
+        --state-passed-border: 148 55% 34%;
+        --state-interrupted: 220 12% 68%;
+        --state-interrupted-surface: 220 18% 18%;
+        --state-interrupted-border: 220 20% 30%;
+        --state-stale: 30 88% 68%;
+        --state-stale-surface: 30 55% 20%;
+        --state-stale-border: 30 72% 36%;
+        --radius-control: 0.45rem;
+        --radius-panel: 0.65rem;
+        --radius-overlay: 0.75rem;
+        --shadow-panel: 0 10px 28px hsl(222 40% 2% / 0.24);
+        --shadow-overlay: 0 24px 70px hsl(222 40% 2% / 0.5);
+        --motion-fast: 120ms;
+        --motion-base: 180ms;
+      }
+
+      * { box-sizing: border-box; }
+      html { background: hsl(var(--surface-sunken)); color-scheme: dark; }
+      body {
+        min-width: 320px;
+        min-height: 100vh;
+        margin: 0;
+        background: hsl(var(--surface-canvas));
+        color: hsl(var(--text-primary));
+        font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      button, select { font: inherit; }
+      button, select, [role="button"] { -webkit-tap-highlight-color: transparent; }
+      button:focus-visible, select:focus-visible, summary:focus-visible, [tabindex="0"]:focus-visible {
+        outline: 2px solid hsl(var(--focus-ring));
+        outline-offset: 3px;
+      }
+      button { cursor: pointer; }
+      .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+      .app-shell { display: grid; grid-template-columns: 226px minmax(0, 1fr); min-height: 100vh; }
+      .rail { display: flex; flex-direction: column; gap: 26px; padding: 24px 16px; border-right: 1px solid hsl(var(--border-subtle)); background: hsl(var(--surface-rail)); }
+      .brand { display: flex; align-items: center; gap: 10px; padding: 0 8px; }
+      .brand-mark { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: hsl(var(--action-primary)); color: hsl(var(--action-primary-foreground)); font-weight: 850; letter-spacing: -0.08em; }
+      .brand strong { font-size: 14px; letter-spacing: -0.02em; }
+      .brand small { display: block; margin-top: 1px; color: hsl(var(--text-muted)); font-size: 11px; }
+      .rail-nav { display: grid; gap: 4px; }
+      .nav-item { display: flex; align-items: center; gap: 10px; min-height: 38px; padding: 0 11px; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; color: hsl(var(--text-muted)); text-align: left; }
+      .nav-item.active { border-color: hsl(var(--border-default)); background: hsl(var(--surface-selected)); color: hsl(var(--text-primary)); }
+      .nav-item:hover { background: hsl(var(--surface-interactive)); color: hsl(var(--text-primary)); }
+      .nav-icon { width: 17px; color: hsl(var(--text-subtle)); text-align: center; }
+      .nav-item.active .nav-icon { color: hsl(var(--action-primary)); }
+      .rail-context { margin-top: auto; padding: 14px; border: 1px solid hsl(var(--border-subtle)); border-radius: var(--radius-panel); background: hsl(var(--surface-sunken)); }
+      .rail-context p { margin: 0; color: hsl(var(--text-muted)); font-size: 12px; }
+      .rail-context .mono { display: block; margin-top: 6px; color: hsl(var(--text-secondary)); font-size: 11px; overflow-wrap: anywhere; }
+      .sync-dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: hsl(var(--state-busy)); box-shadow: 0 0 0 3px hsl(var(--state-busy-surface)); }
+
+      main { min-width: 0; }
+      .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 72px; padding: 16px 32px; border-bottom: 1px solid hsl(var(--border-subtle)); background: hsl(var(--surface-rail)); }
+      .breadcrumbs { color: hsl(var(--text-muted)); font-size: 12px; }
+      .breadcrumbs strong { color: hsl(var(--text-primary)); font-weight: 600; }
+      .top-actions { display: flex; align-items: center; gap: 10px; }
+      .role-label { color: hsl(var(--text-muted)); font-size: 12px; }
+      select, .select-like { min-height: 36px; padding: 0 30px 0 11px; border: 1px solid hsl(var(--border-input)); border-radius: var(--radius-control); background: hsl(var(--surface-raised)); color: hsl(var(--text-primary)); }
+      select { appearance: auto; }
+      .button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 0 12px; border: 1px solid transparent; border-radius: var(--radius-control); font-weight: 650; transition: background var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast); }
+      .button.primary { background: hsl(var(--action-primary)); color: hsl(var(--action-primary-foreground)); }
+      .button.primary:hover { background: hsl(38 95% 67%); }
+      .button.secondary { border-color: hsl(var(--border-default)); background: hsl(var(--action-secondary)); color: hsl(var(--action-secondary-foreground)); }
+      .button.secondary:hover, .button.ghost:hover { background: hsl(var(--surface-interactive)); }
+      .button.ghost { border-color: transparent; background: transparent; color: hsl(var(--text-secondary)); }
+      .button:disabled { cursor: not-allowed; opacity: 0.48; }
+      .button.small { min-height: 30px; padding: 0 9px; font-size: 12px; }
+      .button .icon { font-size: 16px; line-height: 1; }
+
+      .content { max-width: 1500px; margin: 0 auto; padding: 30px 32px 48px; }
+      .page-intro { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 23px; }
+      h1, h2, h3, p { margin-top: 0; }
+      h1 { margin-bottom: 6px; font-size: clamp(25px, 3vw, 34px); letter-spacing: -0.04em; line-height: 1.1; }
+      .lede { max-width: 650px; margin-bottom: 0; color: hsl(var(--text-secondary)); }
+      .intro-note { max-width: 280px; padding: 12px 14px; border-left: 2px solid hsl(var(--action-primary)); color: hsl(var(--text-muted)); font-size: 12px; }
+      .intro-note strong { display: block; margin-bottom: 3px; color: hsl(var(--text-secondary)); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+
+      .outage-banner { display: flex; align-items: start; gap: 12px; margin-bottom: 22px; padding: 14px 16px; border: 1px solid hsl(var(--state-stale-border)); border-radius: var(--radius-panel); background: hsl(var(--state-stale-surface)); color: hsl(var(--text-secondary)); }
+      .outage-banner .banner-icon { color: hsl(var(--state-stale)); font-size: 18px; }
+      .outage-banner strong { color: hsl(var(--text-primary)); }
+      .outage-banner p { margin: 2px 0 0; font-size: 12px; }
+      .outage-banner .button { margin-left: auto; flex: 0 0 auto; }
+
+      .toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 28px; padding: 12px; border: 1px solid hsl(var(--border-subtle)); border-radius: var(--radius-panel); background: hsl(var(--surface-rail)); }
+      .toolbar-group { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+      .toolbar-label { padding-left: 4px; color: hsl(var(--text-muted)); font-size: 12px; }
+      .segmented { display: inline-flex; padding: 3px; border: 1px solid hsl(var(--border-default)); border-radius: var(--radius-control); background: hsl(var(--surface-sunken)); }
+      .segmented button { min-height: 28px; padding: 0 10px; border: 0; border-radius: 4px; background: transparent; color: hsl(var(--text-muted)); font-size: 12px; font-weight: 650; }
+      .segmented button[aria-pressed="true"] { background: hsl(var(--surface-interactive)); color: hsl(var(--text-primary)); box-shadow: 0 1px 2px hsl(222 40% 2% / .25); }
+      .last-refresh { color: hsl(var(--text-subtle)); font-size: 11px; }
+
+      .groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; gap: 16px; }
+      .group { min-width: 0; border: 1px solid hsl(var(--border-subtle)); border-radius: var(--radius-panel); background: hsl(var(--surface-rail)); overflow: hidden; }
+      .group-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; min-height: 61px; padding: 14px 16px; border-bottom: 1px solid hsl(var(--border-subtle)); }
+      .group-title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 15px; }
+      .group-title .count { display: inline-grid; place-items: center; min-width: 22px; height: 22px; padding: 0 5px; border-radius: 12px; background: hsl(var(--surface-interactive)); color: hsl(var(--text-secondary)); font-size: 11px; }
+      .group-hint { margin: 3px 0 0; color: hsl(var(--text-subtle)); font-size: 11px; }
+      .group-list { display: grid; gap: 1px; background: hsl(var(--border-subtle)); }
+      .issue { position: relative; min-width: 0; padding: 15px 16px; background: hsl(var(--surface-raised)); }
+      .issue:hover { background: hsl(var(--surface-overlay)); }
+      .issue-top { display: flex; align-items: start; justify-content: space-between; gap: 8px; }
+      .issue-number { color: hsl(var(--text-subtle)); font-size: 11px; }
+      .issue h3 { margin: 4px 0 8px; font-size: 13px; line-height: 1.35; letter-spacing: -0.01em; }
+      .issue p { margin: 0 0 11px; color: hsl(var(--text-muted)); font-size: 12px; }
+      .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; }
+      .chip { display: inline-flex; align-items: center; min-height: 22px; padding: 0 7px; border: 1px solid hsl(var(--border-default)); border-radius: 999px; color: hsl(var(--text-secondary)); font-size: 10px; font-weight: 650; white-space: nowrap; }
+      .chip.ready { border-color: hsl(var(--state-passed-border)); background: hsl(var(--state-passed-surface)); color: hsl(var(--state-passed)); }
+      .chip.blocked { border-color: hsl(var(--state-blocked-border)); background: hsl(var(--state-blocked-surface)); color: hsl(var(--state-blocked)); }
+      .chip.waiting { border-color: hsl(var(--state-waiting-border)); background: hsl(var(--state-waiting-surface)); color: hsl(var(--state-waiting)); }
+      .chip.stale { border-color: hsl(var(--state-stale-border)); background: hsl(var(--state-stale-surface)); color: hsl(var(--state-stale)); }
+      .chip.interrupted { border-color: hsl(var(--state-interrupted-border)); background: hsl(var(--state-interrupted-surface)); color: hsl(var(--state-interrupted)); }
+      .chip.neutral { background: hsl(var(--surface-subtle)); color: hsl(var(--text-muted)); }
+      .route-line { display: flex; align-items: center; gap: 6px; margin-bottom: 11px; color: hsl(var(--text-muted)); font-size: 11px; }
+      .route-line .route { color: hsl(var(--text-secondary)); }
+      .route-line .worker { margin-left: auto; color: hsl(var(--text-subtle)); }
+      .issue-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .explanation { margin-top: 11px; padding: 9px 10px; border-left: 2px solid hsl(var(--border-strong)); background: hsl(var(--surface-subtle)); color: hsl(var(--text-muted)); font-size: 11px; }
+      .explanation strong { color: hsl(var(--text-secondary)); }
+      .explanation.ready { border-color: hsl(var(--state-passed-border)); }
+      .explanation.blocked { border-color: hsl(var(--state-blocked-border)); }
+      .explanation.stale { border-color: hsl(var(--state-stale-border)); }
+      .panel-mode .explanation { display: none; }
+      .panel-mode .issue { cursor: pointer; }
+      .panel-mode .issue::after { content: '›'; position: absolute; right: 16px; bottom: 16px; color: hsl(var(--text-subtle)); font-size: 18px; }
+      .detail-panel { margin-top: 16px; padding: 17px 18px; border: 1px solid hsl(var(--border-strong)); border-radius: var(--radius-panel); background: hsl(var(--surface-overlay)); box-shadow: var(--shadow-panel); }
+      .detail-panel[hidden] { display: none; }
+      .detail-panel .detail-label { margin-bottom: 5px; color: hsl(var(--text-muted)); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+      .detail-panel h2 { margin-bottom: 7px; font-size: 15px; }
+      .detail-panel h2:focus { outline: 2px solid hsl(var(--focus-ring)); outline-offset: 3px; }
+      .detail-panel p { margin-bottom: 0; color: hsl(var(--text-secondary)); font-size: 12px; }
+      .cards-mode .group-list { display: grid; gap: 10px; padding: 10px; background: hsl(var(--surface-sunken)); }
+      .cards-mode .issue { border: 1px solid hsl(var(--border-subtle)); border-radius: var(--radius-panel); }
+      .cards-mode .issue h3 { font-size: 14px; }
+      .cards-mode .issue p { font-size: 12px; }
+      .cards-mode .issue-actions { padding-top: 2px; }
+      .empty-note { padding: 20px 16px; color: hsl(var(--text-subtle)); font-size: 12px; }
+
+      .comparison { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; margin-top: 24px; }
+      .comparison > section { padding: 17px 18px; border: 1px solid hsl(var(--border-default)); border-radius: var(--radius-panel); background: hsl(var(--surface-rail)); }
+      .comparison h2 { margin-bottom: 6px; font-size: 14px; }
+      .comparison p { margin-bottom: 0; color: hsl(var(--text-muted)); font-size: 12px; }
+      .comparison ul { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 12px 0 0; padding: 0 0 0 16px; color: hsl(var(--text-secondary)); font-size: 12px; }
+      .comparison li::marker { color: hsl(var(--action-primary)); }
+      .guardrail { border-left: 2px solid hsl(var(--state-waiting-border)) !important; }
+      .guardrail strong { color: hsl(var(--state-waiting)); }
+
+      dialog { width: min(540px, calc(100% - 30px)); padding: 0; border: 1px solid hsl(var(--border-strong)); border-radius: var(--radius-overlay); background: hsl(var(--surface-overlay)); color: hsl(var(--text-primary)); box-shadow: var(--shadow-overlay); }
+      dialog::backdrop { background: hsl(222 35% 3% / .78); }
+      .dialog-content { padding: 23px; }
+      .dialog-header { display: flex; align-items: start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+      .dialog-header h2 { margin: 0 0 4px; font-size: 18px; letter-spacing: -0.02em; }
+      .dialog-header p { margin: 0; color: hsl(var(--text-muted)); font-size: 12px; }
+      .close-button { width: 30px; height: 30px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: hsl(var(--text-muted)); font-size: 20px; }
+      .close-button:hover { background: hsl(var(--surface-interactive)); color: hsl(var(--text-primary)); }
+      .flow { display: grid; gap: 8px; margin-bottom: 20px; }
+      .flow-step { display: flex; align-items: start; gap: 11px; padding: 11px 12px; border: 1px solid hsl(var(--border-subtle)); border-radius: var(--radius-control); background: hsl(var(--surface-raised)); }
+      .flow-step.current { border-color: hsl(var(--action-primary)); background: hsl(var(--surface-selected)); }
+      .step-number { display: grid; place-items: center; flex: 0 0 auto; width: 21px; height: 21px; border-radius: 50%; background: hsl(var(--surface-interactive)); color: hsl(var(--text-secondary)); font-size: 11px; font-weight: 700; }
+      .flow-step.current .step-number { background: hsl(var(--action-primary)); color: hsl(var(--action-primary-foreground)); }
+      .flow-step strong { display: block; margin-bottom: 2px; font-size: 12px; }
+      .flow-step span { color: hsl(var(--text-muted)); font-size: 11px; }
+      .worker-choice { display: grid; gap: 7px; margin-bottom: 19px; }
+      .worker-choice legend { margin-bottom: 8px; color: hsl(var(--text-secondary)); font-size: 12px; font-weight: 700; }
+      .worker-option { display: flex; align-items: center; gap: 9px; padding: 10px; border: 1px solid hsl(var(--border-default)); border-radius: var(--radius-control); background: hsl(var(--surface-raised)); }
+      .worker-option:has(input:checked) { border-color: hsl(var(--action-primary)); background: hsl(var(--surface-selected)); }
+      .worker-option input { accent-color: hsl(var(--action-primary)); }
+      .worker-option span { font-size: 12px; }
+      .worker-option small { display: block; color: hsl(var(--text-muted)); font-size: 11px; }
+      .instruction { margin-bottom: 19px; padding: 11px 12px; border: 1px solid hsl(var(--border-subtle)); border-radius: var(--radius-control); background: hsl(var(--surface-sunken)); }
+      .instruction strong { display: block; margin-bottom: 4px; color: hsl(var(--text-secondary)); font-size: 11px; text-transform: uppercase; letter-spacing: .07em; }
+      .instruction p { margin: 0; color: hsl(var(--text-muted)); font-size: 12px; }
+      .dialog-footer { display: flex; justify-content: flex-end; gap: 8px; }
+      .toast { position: fixed; right: 24px; bottom: 24px; z-index: 3; max-width: 340px; padding: 12px 14px; border: 1px solid hsl(var(--state-passed-border)); border-radius: var(--radius-control); background: hsl(var(--state-passed-surface)); color: hsl(var(--state-passed)); box-shadow: var(--shadow-panel); font-size: 12px; }
+      .toast[hidden] { display: none; }
+
+      @media (max-width: 1100px) {
+        .app-shell { grid-template-columns: 72px minmax(0, 1fr); }
+        .rail { align-items: center; padding-inline: 10px; }
+        .brand { padding: 0; }
+        .brand-copy, .nav-label, .rail-context { display: none; }
+        .nav-item { justify-content: center; width: 42px; padding: 0; }
+        .groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .group.blocked-group { grid-column: 1 / -1; }
+      }
+      @media (max-width: 760px) {
+        .app-shell { display: block; }
+        .rail { flex-direction: row; justify-content: space-between; min-height: 58px; padding: 10px 14px; border-right: 0; border-bottom: 1px solid hsl(var(--border-subtle)); }
+        .rail-nav { display: flex; }
+        .nav-item { min-height: 34px; }
+        .nav-item:not(.active) { display: none; }
+        .topbar { align-items: start; padding: 15px 18px; }
+        .top-actions { flex-wrap: wrap; justify-content: end; }
+        .role-label { display: none; }
+        .content { padding: 24px 18px 36px; }
+        .page-intro { display: block; }
+        .intro-note { max-width: none; margin-top: 16px; }
+        .outage-banner { flex-wrap: wrap; }
+        .outage-banner .button { margin-left: 30px; }
+        .toolbar { align-items: start; }
+        .groups, .comparison { grid-template-columns: 1fr; }
+        .group.blocked-group { grid-column: auto; }
+      }
+      @media (max-width: 520px) {
+        .topbar { display: block; }
+        .top-actions { justify-content: start; margin-top: 12px; }
+        .page-intro h1 { font-size: 28px; }
+        .toolbar-group:last-child { width: 100%; justify-content: space-between; }
+        .segmented button { padding-inline: 8px; }
+        .issue-actions { align-items: stretch; flex-direction: column; }
+        .issue-actions .button { width: 100%; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="rail" aria-label="Project navigation">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">aw</span>
+          <div class="brand-copy"><strong>Agentic Work OS</strong><small>operator console</small></div>
+        </div>
+        <nav class="rail-nav">
+          <button class="nav-item" type="button"><span class="nav-icon" aria-hidden="true">⌂</span><span class="nav-label">Workspace</span></button>
+          <button class="nav-item active" type="button" aria-current="page"><span class="nav-icon" aria-hidden="true">▦</span><span class="nav-label">Project overview</span></button>
+          <button class="nav-item" type="button"><span class="nav-icon" aria-hidden="true">◌</span><span class="nav-label">Threads</span></button>
+        </nav>
+        <div class="rail-context">
+          <p><span class="sync-dot" aria-hidden="true"></span>GitHub source</p>
+          <span class="mono">sockulags/agentic-work-os</span>
+        </div>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div class="breadcrumbs"><span>Workspace</span> <span aria-hidden="true">/</span> <strong>Project overview</strong></div>
+          <div class="top-actions">
+            <label class="role-label" for="active-role">Active role</label>
+            <select id="active-role" aria-label="Active local role">
+              <option value="implementer">Implementer · delivery</option>
+              <option value="reviewer">Reviewer · quality</option>
+              <option value="designer">Designer · discovery</option>
+            </select>
+            <button class="button secondary" id="refresh" type="button"><span class="icon" aria-hidden="true">↻</span> Refresh issues</button>
+          </div>
+        </header>
+
+        <div class="content">
+          <section class="page-intro" aria-labelledby="page-title">
+            <div>
+              <h1 id="page-title">Project overview</h1>
+              <p class="lede">Find work your role can own, see why an issue is blocked, and prepare the next step without dispatching a worker.</p>
+            </div>
+            <div class="intro-note"><strong>Local overlay</strong>Role selection, prepared steps, and active thread state live here. GitHub remains the source of issue truth.</div>
+          </section>
+
+          <section class="outage-banner" aria-label="Source failure example">
+            <span class="banner-icon" aria-hidden="true">◌</span>
+            <div><strong>Source failure example</strong><p>If GitHub becomes unavailable, show the dated cache from <span class="mono">23 Aug 2026 · 10:42 CET</span>, remove every new Take action, and keep Continue available for linked work. The interactive list below is a current fixture.</p></div>
+            <button class="button secondary small" id="retry-refresh" type="button">Refresh required</button>
+          </section>
+
+          <section class="toolbar" aria-label="Prototype comparison controls">
+            <div class="toolbar-group">
+              <span class="toolbar-label">Issue surface</span>
+              <div class="segmented" role="group" aria-label="Issue surface variant">
+                <button type="button" data-layout="rows" aria-pressed="true">Compact rows</button>
+                <button type="button" data-layout="cards" aria-pressed="false">Larger cards</button>
+              </div>
+              <span class="toolbar-label">Next action</span>
+              <div class="segmented" role="group" aria-label="Next action explanation variant">
+                <button type="button" data-explanation="inline" aria-pressed="true">Inline explanation</button>
+                <button type="button" data-explanation="panel" aria-pressed="false">Detail panel</button>
+              </div>
+            </div>
+            <div class="toolbar-group"><span class="last-refresh">Current fixture · 7 open issues · no background polling</span></div>
+          </section>
+
+          <section class="groups" aria-label="Issues grouped by local workflow state">
+            <section class="group" aria-labelledby="available-title">
+              <header class="group-header"><div><h2 class="group-title" id="available-title"><span aria-hidden="true">◈</span> Available <span class="count">3</span></h2><p class="group-hint">Current, open, and singly routed</p></div><span class="chip ready">Singly routed</span></header>
+              <div class="group-list">
+                <article class="issue" data-issue="142" data-route-role="implementer" data-action="take">
+                  <div class="issue-top"><span class="issue-number mono">#142 · bug</span><span class="chip ready">Ready</span></div>
+                  <h3>Fix stale worker status in run drawer</h3>
+                  <p>Refresh the status label after a local run ends so the drawer does not show a stale busy state.</p>
+                  <div class="chips"><span class="chip neutral">delivery</span><span class="chip neutral">implementation</span><span class="chip neutral">1 route</span></div>
+                  <div class="route-line"><span aria-hidden="true">↳</span><span class="route mono">implement · Implementer</span><span class="worker">Claude Code available</span></div>
+                  <div class="issue-actions"><button class="button primary small take-button" type="button">Take issue</button><button class="button ghost small details-button" type="button">Why this route?</button></div>
+                  <div class="explanation ready"><strong>Next action:</strong> takeable because the issue is open, the exact <span class="mono">implement</span> label routes once, and an allowed worker is available.</div>
+                </article>
+
+                <article class="issue" data-issue="166" data-route-role="implementer" data-action="take">
+                  <div class="issue-top"><span class="issue-number mono">#166 · enhancement</span><span class="chip ready">Ready</span></div>
+                  <h3>Document cache refresh behavior</h3>
+                  <p>The body says “blocked until we decide the copy.” AWOS does not infer a blocker from prose; the route is still ready.</p>
+                  <div class="chips"><span class="chip neutral">delivery</span><span class="chip neutral">body prose ignored</span></div>
+                  <div class="route-line"><span aria-hidden="true">↳</span><span class="route mono">implement · Implementer</span><span class="worker">Codex available</span></div>
+                  <div class="issue-actions"><button class="button primary small take-button" type="button">Take issue</button><button class="button ghost small details-button" type="button">Why not blocked?</button></div>
+                  <div class="explanation ready"><strong>Explicit guardrail:</strong> body text never determines blockers. Only dependency state, route, role, worker, and source freshness do.</div>
+                </article>
+
+                <article class="issue" data-issue="149" data-route-role="reviewer" data-action="take">
+                  <div class="issue-top"><span class="issue-number mono">#149 · review</span><span class="chip waiting">Role mismatch</span></div>
+                  <h3>Review retry behavior in the run drawer</h3>
+                  <p>A review step is available to the project-owned Reviewer role.</p>
+                  <div class="chips"><span class="chip neutral">quality</span><span class="chip waiting">requires Reviewer</span></div>
+                  <div class="route-line"><span aria-hidden="true">↳</span><span class="route mono">review · Reviewer</span><span class="worker">Claude Code available</span></div>
+                  <div class="issue-actions"><button class="button secondary small details-button" type="button">Explain role mismatch</button></div>
+                  <div class="explanation"><strong>Role mismatch:</strong> routed to Reviewer; selected local role is Implementer. Select Reviewer to enable Take.</div>
+                </article>
+              </div>
+            </section>
+
+            <section class="group" aria-labelledby="active-title">
+              <header class="group-header"><div><h2 class="group-title" id="active-title"><span aria-hidden="true">◉</span> Active <span class="count">1</span></h2><p class="group-hint">Local threads and unfinished work</p></div><span class="chip waiting">Local only</span></header>
+              <div class="group-list">
+                <article class="issue" data-issue="153" data-route-role="implementer" data-action="continue">
+                  <div class="issue-top"><span class="issue-number mono">#153 · bug</span><span class="chip interrupted">Interrupted</span></div>
+                  <h3>Preserve issue context across worker handoff</h3>
+                  <p>Thread exists locally. Its unfinished run was interrupted after the last session ended.</p>
+                  <div class="chips"><span class="chip neutral">thread linked</span><span class="chip interrupted">run interrupted</span></div>
+                  <div class="route-line"><span aria-hidden="true">↳</span><span class="route mono">implement · Implementer</span><span class="worker">last: Qwen local</span></div>
+                  <div class="issue-actions"><button class="button primary small continue-button" type="button">Continue</button><button class="button ghost small details-button" type="button">Open thread details</button></div>
+                  <div class="explanation"><strong>Continue:</strong> reopens the same linked thread and destination. It does not start a worker until a separate action.</div>
+                </article>
+              </div>
+            </section>
+
+            <section class="group blocked-group" aria-labelledby="blocked-title">
+              <header class="group-header"><div><h2 class="group-title" id="blocked-title"><span aria-hidden="true">⊘</span> Blocked <span class="count">3</span></h2><p class="group-hint">A dependency, worker, or routing gate stops Take</p></div><span class="chip blocked">No dispatch</span></header>
+              <div class="group-list">
+                <article class="issue" data-issue="137" data-route-role="implementer" data-action="none">
+                  <div class="issue-top"><span class="issue-number mono">#137 · feature</span><span class="chip blocked">Dependency blocked</span></div>
+                  <h3>Add repository snapshot tests</h3>
+                  <p>Depends on open issue <span class="mono">#121</span>, which has not reached its routed completion state.</p>
+                  <div class="chips"><span class="chip blocked">depends on #121</span><span class="chip neutral">implement</span></div>
+                  <div class="route-line"><span aria-hidden="true">!</span><span class="route mono">implement · Implementer</span><span class="worker">Codex available</span></div>
+                  <div class="issue-actions"><button class="button secondary small details-button" type="button">Explain blocker</button></div>
+                  <div class="explanation blocked"><strong>Blocked by dependency:</strong> route and worker are valid, but <span class="mono">#121</span> must move first. Body prose is not consulted.</div>
+                </article>
+
+                <article class="issue" data-issue="145" data-route-role="implementer" data-action="none">
+                  <div class="issue-top"><span class="issue-number mono">#145 · task</span><span class="chip blocked">Worker unavailable</span></div>
+                  <h3>Move queue replay into the worker lane</h3>
+                  <p>Exactly one route matches, but every allowed worker profile is unavailable in this snapshot.</p>
+                  <div class="chips"><span class="chip neutral">implement</span><span class="chip blocked">0 allowed workers</span></div>
+                  <div class="route-line"><span aria-hidden="true">!</span><span class="route mono">implement · Implementer</span><span class="worker">workers unavailable</span></div>
+                  <div class="issue-actions"><button class="button secondary small details-button" type="button">Explain availability</button></div>
+                  <div class="explanation blocked"><strong>Cannot take:</strong> choose-worker would have no valid option. No worker is launched or reserved by this page.</div>
+                </article>
+
+                <article class="issue" data-issue="161" data-route-role="none" data-action="none">
+                  <div class="issue-top"><span class="issue-number mono">#161 · task</span><span class="chip blocked">Unrouted</span></div>
+                  <h3>Capture a project decision in the handbook</h3>
+                  <p>No exact workflow label maps this issue to one project-owned step.</p>
+                  <div class="chips"><span class="chip neutral">no matching route</span><span class="chip blocked">not takeable</span></div>
+                  <div class="route-line"><span aria-hidden="true">×</span><span class="route">Unrouted / no route</span><span class="worker">—</span></div>
+                  <div class="issue-actions"><button class="button secondary small details-button" type="button">Explain routing</button></div>
+                  <div class="explanation blocked"><strong>Cannot take:</strong> no matching route. This prototype does not guess from title or body.</div>
+                </article>
+              </div>
+            </section>
+          </section>
+
+          <aside class="detail-panel" id="detail-panel" aria-labelledby="detail-panel-title" hidden>
+            <div class="detail-label">Selected issue explanation</div>
+            <h2 id="detail-panel-title" tabindex="-1">Issue details</h2>
+            <p id="detail-panel-copy"></p>
+          </aside>
+
+          <section class="comparison" aria-labelledby="comparison-title">
+            <section>
+              <h2 id="comparison-title">Comparison notes</h2>
+              <p>Currently showing <strong id="selected-layout">compact rows</strong> with <strong id="selected-explanation">inline next-action explanations</strong>.</p>
+              <ul><li>Find role work</li><li>Explain a blocker</li><li>Take one issue</li><li>Continue active work</li></ul>
+            </section>
+            <section class="guardrail"><strong>Prototype boundary</strong><p>Take prepares a step, offers an allowed worker, and asks for instruction confirmation. Continue reopens the same thread. Neither action launches anything, mutates GitHub, claims a lease, or persists state.</p></section>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <dialog id="action-dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description">
+      <div class="dialog-content">
+        <header class="dialog-header"><div><h2 id="dialog-title">Prepare a step</h2><p id="dialog-description">This is a local preview of the Take contract.</p></div><button class="close-button" type="button" aria-label="Close dialog">×</button></header>
+        <div class="flow" id="take-flow">
+          <div class="flow-step current"><span class="step-number">1</span><div><strong>Prepared step</strong><span id="prepared-copy">Implement · #142 · exact route match</span></div></div>
+          <div class="flow-step"><span class="step-number">2</span><div><strong>Choose worker</strong><span>Pick from the allowed profiles; nothing starts yet.</span></div></div>
+          <div class="flow-step"><span class="step-number">3</span><div><strong>Confirm instruction</strong><span>Review the instruction that would be handed to the selected worker.</span></div></div>
+        </div>
+        <fieldset class="worker-choice" id="worker-choice"><legend>Allowed workers for this step</legend><label class="worker-option"><input type="radio" name="worker" value="codex" checked /><span><strong>Codex</strong><small>available · profile <span class="mono">codex</span></small></span></label><label class="worker-option"><input type="radio" name="worker" value="claude" /><span><strong>Claude Code</strong><small>available · profile <span class="mono">claude</span></small></span></label></fieldset>
+        <div class="instruction" id="instruction"><strong>Instruction preview</strong><p>“Work on issue #142 using the prepared <span class="mono">implement</span> step. Do not start until this instruction is confirmed.”</p></div>
+        <div class="dialog-footer"><button class="button ghost" type="button" id="dialog-cancel">Cancel</button><button class="button primary" type="button" id="dialog-confirm">Confirm preparation only</button></div>
+      </div>
+    </dialog>
+
+    <dialog id="continue-dialog" aria-labelledby="continue-title" aria-describedby="continue-description">
+      <div class="dialog-content">
+        <header class="dialog-header"><div><h2 id="continue-title">Continue linked work</h2><p id="continue-description">The existing thread remains the destination if a later GitHub refresh fails.</p></div><button class="close-button" type="button" aria-label="Close dialog">×</button></header>
+        <div class="flow"><div class="flow-step current"><span class="step-number">1</span><div><strong>Existing linked thread</strong><span><span class="mono">thread-153-a7</span> · last run interrupted</span></div></div><div class="flow-step"><span class="step-number">2</span><div><strong>Same destination</strong><span><span class="mono">implement</span> · Implementer · reopened locally</span></div></div></div>
+        <div class="instruction"><strong>What Continue does</strong><p>Reopens the same thread and keeps its routed destination. It does not retry against a different route and does not start a worker.</p></div>
+        <div class="dialog-footer"><button class="button ghost" type="button" id="continue-cancel">Cancel</button><button class="button primary" type="button" id="continue-confirm">Reopen same thread</button></div>
+      </div>
+    </dialog>
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <script>
+      (() => {
+        const body = document.body;
+        const actionDialog = document.querySelector('#action-dialog');
+        const continueDialog = document.querySelector('#continue-dialog');
+        const toast = document.querySelector('#toast');
+        const roleSelect = document.querySelector('#active-role');
+        const detailPanel = document.querySelector('#detail-panel');
+        const detailPanelTitle = document.querySelector('#detail-panel-title');
+        const detailPanelCopy = document.querySelector('#detail-panel-copy');
+        let selectedIssue = '142';
+        let toastTimer;
+
+        function showToast(message) {
+          toast.textContent = message;
+          toast.hidden = false;
+          window.clearTimeout(toastTimer);
+          toastTimer = window.setTimeout(() => { toast.hidden = true; }, 4200);
+        }
+
+        function openDialog(dialog) {
+          if (typeof dialog.showModal === 'function') dialog.showModal();
+          else dialog.setAttribute('open', '');
+        }
+
+        function closeDialog(dialog) {
+          if (typeof dialog.close === 'function') dialog.close();
+          else dialog.removeAttribute('open');
+        }
+
+        function updateRoleAvailability() {
+          const role = roleSelect.value;
+          const selectedRole = roleSelect.options[roleSelect.selectedIndex].text.split(' · ')[0];
+          detailPanel.hidden = true;
+          document.querySelectorAll('.issue[data-action="take"]').forEach((issue) => {
+            const routeMatch = issue.dataset.routeRole === role;
+            const [step, routedRole] = issue.querySelector('.route').textContent.split(' · ');
+            const status = issue.querySelector('.issue-top .chip');
+            const detailsLabel = issue.dataset.issue === '166' ? 'Why not blocked?' : 'Why this route?';
+
+            status.textContent = routeMatch ? 'Ready' : 'Role mismatch';
+            status.className = routeMatch ? 'chip ready' : 'chip waiting';
+            issue.querySelector('.issue-actions').innerHTML = routeMatch
+              ? `<button class="button primary small take-button" type="button">Take issue</button><button class="button ghost small details-button" type="button">${detailsLabel}</button>`
+              : '<button class="button secondary small details-button" type="button">Explain role mismatch</button>';
+
+            issue.querySelector('.explanation').innerHTML = routeMatch
+              ? issue.dataset.issue === '166'
+                ? '<strong>Explicit guardrail:</strong> body text never determines blockers. The issue is open, singly routed to the selected role, and has an allowed worker.'
+                : `<strong>Next action:</strong> takeable because the issue is open, the exact <span class="mono">${step}</span> label routes once to the selected ${routedRole} role, and an allowed worker is available.`
+              : `<strong>Role mismatch:</strong> routed to ${routedRole}; selected local role is ${selectedRole}. Select ${routedRole} to enable Take.`;
+            bindIssueButtons(issue);
+          });
+        }
+
+        function bindIssueButtons(issue) {
+          issue.querySelectorAll('.take-button').forEach((button) => button.addEventListener('click', () => {
+            selectedIssue = issue.dataset.issue;
+            const step = issue.querySelector('.route').textContent.split(' · ')[0];
+            const stepLabel = step.charAt(0).toUpperCase() + step.slice(1);
+            document.querySelector('#prepared-copy').textContent = `${stepLabel} · #${selectedIssue} · exact route match`;
+            document.querySelector('#instruction p').innerHTML = `“Work on issue #${selectedIssue} using the prepared <span class="mono">${step}</span> step. Do not start until this instruction is confirmed.”`;
+            openDialog(actionDialog);
+          }));
+          issue.querySelectorAll('.continue-button').forEach((button) => button.addEventListener('click', () => openDialog(continueDialog)));
+          issue.querySelectorAll('.details-button').forEach((button) => button.addEventListener('click', () => {
+            const title = issue.querySelector('h3').textContent;
+            const explanation = issue.querySelector('.explanation');
+            if (body.classList.contains('panel-mode')) {
+              detailPanelTitle.textContent = `#${issue.dataset.issue} · ${title}`;
+              detailPanelCopy.innerHTML = explanation.innerHTML;
+              detailPanel.hidden = false;
+              detailPanelTitle.focus();
+            } else {
+              showToast(`${title}: ${explanation.textContent}`);
+            }
+          }));
+        }
+
+        document.querySelectorAll('.issue:not([data-action="take"])').forEach(bindIssueButtons);
+        updateRoleAvailability();
+        roleSelect.addEventListener('change', () => {
+          updateRoleAvailability();
+          showToast(`Active role changed locally to ${roleSelect.options[roleSelect.selectedIndex].text}.`);
+        });
+
+        document.querySelectorAll('[data-layout]').forEach((button) => button.addEventListener('click', () => {
+          const layout = button.dataset.layout;
+          body.classList.toggle('cards-mode', layout === 'cards');
+          document.querySelectorAll('[data-layout]').forEach((item) => item.setAttribute('aria-pressed', String(item === button)));
+          document.querySelector('#selected-layout').textContent = layout === 'cards' ? 'larger issue cards' : 'compact rows';
+        }));
+        document.querySelectorAll('[data-explanation]').forEach((button) => button.addEventListener('click', () => {
+          const panel = button.dataset.explanation === 'panel';
+          body.classList.toggle('panel-mode', panel);
+          document.querySelectorAll('[data-explanation]').forEach((item) => item.setAttribute('aria-pressed', String(item === button)));
+          document.querySelector('#selected-explanation').textContent = panel ? 'detail panels' : 'inline next-action explanations';
+          if (!panel) detailPanel.hidden = true;
+        }));
+
+        document.querySelectorAll('.close-button, #dialog-cancel, #continue-cancel').forEach((button) => button.addEventListener('click', () => closeDialog(button.closest('dialog'))));
+        document.querySelector('#dialog-confirm').addEventListener('click', () => { closeDialog(actionDialog); showToast(`Step for #${selectedIssue} prepared locally. No worker launched.`); });
+        document.querySelector('#continue-confirm').addEventListener('click', () => { closeDialog(continueDialog); showToast('Reopened thread-153-a7 at the same implement destination. No worker launched.'); });
+        document.querySelector('#refresh').addEventListener('click', () => showToast('Foreground refresh requested for the current fixture. No background polling.'));
+        document.querySelector('#retry-refresh').addEventListener('click', () => showToast('Failure rule: refresh is required before any new Take; linked Continue remains available.'));
+      })();
+    </script>
+  </body>
+</html>
