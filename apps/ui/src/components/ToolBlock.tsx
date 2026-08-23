@@ -70,7 +70,7 @@ export function ToolBlock({ item }: { item: ToolItem }): React.JSX.Element {
     <div
       className={cn(
         'rounded-md border bg-card/50 text-sm',
-        item.status === 'error' ? 'border-destructive/40' : 'border-border',
+        item.status === 'error' ? 'border-state-failed-border' : 'border-border',
       )}
     >
       <button
@@ -150,11 +150,16 @@ function StatusPill({
   exitCode: number | null;
 }): React.JSX.Element {
   if (status === 'running') {
-    return <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />;
+    return (
+      <span className="flex shrink-0 items-center gap-1 text-xs text-state-busy">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+        <span>Running</span>
+      </span>
+    );
   }
   if (status === 'ok') {
     return (
-      <span className="flex shrink-0 items-center gap-1 text-xs text-emerald-400">
+      <span className="flex shrink-0 items-center gap-1 text-xs text-state-passed">
         <Check className="h-3.5 w-3.5" />
         {exitCode !== null && exitCode !== 0 ? exitCode : null}
       </span>
@@ -162,14 +167,14 @@ function StatusPill({
   }
   if (status === 'denied') {
     return (
-      <span className="flex shrink-0 items-center gap-1 text-xs text-amber-400">
+      <span className="flex shrink-0 items-center gap-1 text-xs text-state-blocked">
         <Ban className="h-3.5 w-3.5" />
         denied
       </span>
     );
   }
   return (
-    <span className="flex shrink-0 items-center gap-1 text-xs text-destructive">
+    <span className="flex shrink-0 items-center gap-1 text-xs text-state-failed">
       <X className="h-3.5 w-3.5" />
       {exitCode !== null ? `exit ${exitCode}` : status}
     </span>

@@ -24,7 +24,7 @@ export function ApprovalDialog(): React.JSX.Element | null {
         onInteractOutside={(e) => e.preventDefault()}
       >
         <div className="flex items-start gap-3">
-          <span className="mt-0.5 rounded-md bg-amber-500/15 p-2 text-amber-400">
+          <span className="mt-0.5 rounded-md border border-state-waiting-border bg-state-waiting-surface p-2 text-state-waiting">
             <ShieldAlert className="h-4 w-4" />
           </span>
           <div className="min-w-0 flex-1">

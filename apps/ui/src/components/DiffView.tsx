@@ -83,10 +83,10 @@ function ViewModeToggle({
           onClick={() => onChange(value)}
           aria-pressed={mode === value}
           className={cn(
-            'flex items-center gap-1 px-2 py-1 text-[11px] transition-colors',
+            'awos-focus-ring flex items-center gap-1 px-2 py-1 text-[11px] transition-colors duration-[var(--motion-fast)]',
             mode === value
-              ? 'bg-accent text-accent-foreground'
-              : 'text-muted-foreground hover:bg-accent/50',
+              ? 'bg-surface-selected text-foreground'
+              : 'text-muted-foreground hover:bg-surface-interactive',
           )}
         >
           <Icon className="h-3 w-3" />
@@ -101,11 +101,11 @@ const STATUS_META: Record<
   DiffFileStatus,
   { label: string; Icon: typeof FilePen; className: string }
 > = {
-  added: { label: 'added', Icon: FilePlus2, className: 'text-emerald-400' },
-  deleted: { label: 'deleted', Icon: FileMinus2, className: 'text-red-400' },
-  renamed: { label: 'renamed', Icon: FileSymlink, className: 'text-sky-400' },
-  binary: { label: 'binary', Icon: FileQuestion, className: 'text-muted-foreground' },
-  modified: { label: 'modified', Icon: FilePen, className: 'text-muted-foreground' },
+  added: { label: 'added', Icon: FilePlus2, className: 'text-diff-add' },
+  deleted: { label: 'deleted', Icon: FileMinus2, className: 'text-diff-remove' },
+  renamed: { label: 'renamed', Icon: FileSymlink, className: 'text-diff-modify' },
+  binary: { label: 'binary', Icon: FileQuestion, className: 'text-diff-context' },
+  modified: { label: 'modified', Icon: FilePen, className: 'text-diff-modify' },
 };
 
 function DiffFileBlock({
@@ -127,7 +127,7 @@ function DiffFileBlock({
   const status = STATUS_META[file.status];
 
   return (
-    <div className="overflow-hidden rounded-md border border-border bg-card/40">
+    <div className="overflow-hidden rounded-md border border-border bg-surface-raised">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -157,12 +157,12 @@ function DiffFileBlock({
           {status.label}
         </span>
         {file.additions > 0 && (
-          <span className="shrink-0 font-mono text-[11px] text-emerald-400">
+          <span className="shrink-0 font-mono text-[11px] text-diff-add">
             +{file.additions}
           </span>
         )}
         {file.deletions > 0 && (
-          <span className="shrink-0 font-mono text-[11px] text-red-400">−{file.deletions}</span>
+          <span className="shrink-0 font-mono text-[11px] text-diff-remove">−{file.deletions}</span>
         )}
       </button>
 
@@ -227,7 +227,7 @@ function FileBody({
 
 function HunkHeader({ header, columns }: { header: string; columns: number }): React.JSX.Element {
   return (
-    <tr className="bg-muted/60">
+    <tr className="bg-diff-context-surface">
       <td
         colSpan={columns}
         className="px-2 py-0.5 font-mono text-[11px] text-muted-foreground"
@@ -307,9 +307,9 @@ function SideCells({
     // An empty counterpart is what makes an unbalanced change readable at a glance.
     return (
       <>
-        <td className={cn(NUMBER_CELL, 'bg-muted/20')} />
-        <td className={cn(MARKER_CELL, 'bg-muted/20')} />
-        <td className="bg-muted/20" />
+        <td className={cn(NUMBER_CELL, 'bg-diff-context-surface')} />
+        <td className={cn(MARKER_CELL, 'bg-diff-context-surface')} />
+        <td className="bg-diff-context-surface" />
       </>
     );
   }
@@ -317,8 +317,8 @@ function SideCells({
   const tone = isContext
     ? ''
     : side === 'old'
-      ? 'bg-red-500/10 text-red-200'
-      : 'bg-emerald-500/10 text-emerald-200';
+      ? 'bg-diff-remove-surface text-diff-remove'
+      : 'bg-diff-add-surface text-diff-add';
 
   const marker = isContext ? '' : side === 'old' ? '−' : '+';
   const number = side === 'old' ? line.oldNumber : line.newNumber;
@@ -350,9 +350,9 @@ function UnifiedHunk({ hunk }: { hunk: DiffHunk }): React.JSX.Element {
 }
 
 const UNIFIED_TONE: Record<DiffLine['kind'], { row: string; marker: string }> = {
-  add: { row: 'bg-emerald-500/10 text-emerald-200', marker: '+' },
-  remove: { row: 'bg-red-500/10 text-red-200', marker: '−' },
-  context: { row: 'text-foreground/70', marker: ' ' },
+  add: { row: 'bg-diff-add-surface text-diff-add', marker: '+' },
+  remove: { row: 'bg-diff-remove-surface text-diff-remove', marker: '−' },
+  context: { row: 'bg-diff-context-surface text-diff-context', marker: ' ' },
 };
 
 function UnifiedRow({ line }: { line: DiffLine }): React.JSX.Element {
@@ -392,7 +392,7 @@ function LineText({
       <mark
         className={cn(
           'rounded-[2px] bg-transparent px-0 text-inherit',
-          side === 'old' ? 'bg-red-500/35' : 'bg-emerald-500/35',
+          side === 'old' ? 'bg-diff-remove-highlight' : 'bg-diff-add-highlight',
         )}
       >
         {text.slice(start, end)}

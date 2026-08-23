@@ -50,7 +50,10 @@ export function ChangesPanel(): React.JSX.Element {
   if (agent !== null && !supportsTurnDiff) {
     const style = getAgentStyle(agent);
     return (
-      <div className="flex items-start gap-2 px-4 py-3 text-xs text-muted-foreground">
+      <div
+        className={cn(style.root, 'flex items-start gap-2 px-4 py-3 text-xs text-muted-foreground')}
+        style={style.cssVars}
+      >
         <Info className="mt-0.5 h-3 w-3 shrink-0" />
         <p>
           <span className={cn('font-medium', style.text)}>
@@ -107,10 +110,10 @@ function ChangeReview({ parsed }: { parsed: ParsedDiff }): React.JSX.Element {
           {parsed.files.length} {parsed.files.length === 1 ? 'file' : 'files'}
         </span>
         {parsed.additions > 0 && (
-          <span className="font-mono text-emerald-400">+{parsed.additions}</span>
+          <span className="font-mono text-diff-add">+{parsed.additions}</span>
         )}
         {parsed.deletions > 0 && (
-          <span className="font-mono text-red-400">−{parsed.deletions}</span>
+          <span className="font-mono text-diff-remove">−{parsed.deletions}</span>
         )}
       </div>
 

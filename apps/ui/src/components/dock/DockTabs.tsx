@@ -67,10 +67,10 @@ export function DockTabs({
             tabIndex={selected ? 0 : -1}
             onClick={() => onSelect(tab.id)}
             className={cn(
-              'flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+              'awos-focus-ring flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors duration-[var(--motion-fast)]',
               selected
-                ? 'bg-accent text-accent-foreground'
-                : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
+                ? 'bg-surface-selected text-foreground'
+                : 'text-muted-foreground hover:bg-surface-interactive hover:text-foreground',
             )}
           >
             <Icon className="h-3.5 w-3.5 shrink-0" />

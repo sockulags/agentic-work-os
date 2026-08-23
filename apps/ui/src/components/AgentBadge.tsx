@@ -1,53 +1,51 @@
 import type { AgentId } from '@awos/protocol';
 import { cn } from '@/lib/utils';
 
+type WorkerStyleVars = React.CSSProperties & { '--worker-hue': string };
+
 /**
- * A single source of truth for how each agent is styled.
+ * Shared class roles for a profile-provided worker identity.
  *
- * Two speakers share one transcript, so colour is doing real work here: it's the fastest
- * way to see who did what when scrolling back through a long thread.
+ * The profile id is the only styling input. A stable hash picks a hue and the CSS token
+ * layer derives its light/dark foreground, surface, border, and dot treatments. There is
+ * intentionally no profile-name branch here: a new registered worker gets the same
+ * mechanism as every existing worker.
  */
-export interface AgentStyle { label: string; text: string; bg: string; border: string; dot: string }
+export interface AgentStyle {
+  label: string;
+  root: 'awos-worker';
+  text: 'awos-worker-text';
+  bg: 'awos-worker-surface';
+  border: 'awos-worker-border';
+  dot: 'awos-worker-dot';
+  cssVars: WorkerStyleVars;
+}
 
-export const AGENT_STYLE: Readonly<Record<string, AgentStyle>> = {
-  claude: {
-    label: 'Claude',
-    text: 'text-claude',
-    bg: 'bg-claude/10',
-    border: 'border-claude/30',
-    dot: 'bg-claude',
-  },
-  codex: {
-    label: 'Codex',
-    text: 'text-codex',
-    bg: 'bg-codex/10',
-    border: 'border-codex/30',
-    dot: 'bg-codex',
-  },
-  'qwen-local': {
-    label: 'Qwen Code · Qwen3.8 local',
-    text: 'text-amber-500',
-    bg: 'bg-amber-500/10',
-    border: 'border-amber-500/30',
-    dot: 'bg-amber-500',
-  },
-};
+const WORKER_HUES = [34, 164, 205, 270, 320, 12, 92, 236] as const;
 
-const FALLBACK_STYLES: readonly Omit<AgentStyle, 'label'>[] = [
-  { text: 'text-sky-500', bg: 'bg-sky-500/10', border: 'border-sky-500/30', dot: 'bg-sky-500' },
-  { text: 'text-emerald-500', bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', dot: 'bg-emerald-500' },
-  { text: 'text-violet-500', bg: 'bg-violet-500/10', border: 'border-violet-500/30', dot: 'bg-violet-500' },
-  { text: 'text-rose-500', bg: 'bg-rose-500/10', border: 'border-rose-500/30', dot: 'bg-rose-500' },
-] as const;
-
-/** Server labels win; unknown profile ids receive a stable, safe built-in palette. */
+/** Server labels win; every profile id receives a stable, token-derived identity. */
 export function getAgentStyle(agent: string, label?: string): AgentStyle {
-  const builtIn = AGENT_STYLE[agent];
-  if (builtIn) return { ...builtIn, label: label ?? builtIn.label };
   let hash = 0;
-  for (const char of agent) hash = ((hash * 31) + char.charCodeAt(0)) >>> 0;
-  const fallback = FALLBACK_STYLES[hash % FALLBACK_STYLES.length] ?? FALLBACK_STYLES[0]!;
-  return { ...fallback, label: label ?? agent };
+  for (const char of agent) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  const hue = WORKER_HUES[hash % WORKER_HUES.length] ?? WORKER_HUES[0];
+
+  return {
+    label: label ?? humanizeProfileId(agent),
+    root: 'awos-worker',
+    text: 'awos-worker-text',
+    bg: 'awos-worker-surface',
+    border: 'awos-worker-border',
+    dot: 'awos-worker-dot',
+    cssVars: { '--worker-hue': String(hue) },
+  };
+}
+
+function humanizeProfileId(profileId: string): string {
+  return profileId
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(' ');
 }
 
 export function AgentBadge({
@@ -62,7 +60,9 @@ export function AgentBadge({
   const style = getAgentStyle(agent, label);
   return (
     <span
+      style={style.cssVars}
       className={cn(
+        style.root,
         'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs font-medium',
         style.bg,
         style.border,

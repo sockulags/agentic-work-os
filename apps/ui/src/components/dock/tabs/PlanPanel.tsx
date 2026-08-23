@@ -48,9 +48,9 @@ export function PlanPanel(): React.JSX.Element {
             )}
           >
             {item.status === 'completed' ? (
-              <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-emerald-500" />
+              <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-state-passed" />
             ) : item.status === 'in_progress' ? (
-              <CircleDot className="mt-0.5 h-3 w-3 shrink-0 animate-pulse text-amber-400" />
+              <CircleDot className="mt-0.5 h-3 w-3 shrink-0 animate-pulse text-state-busy" />
             ) : (
               <Circle className="mt-0.5 h-3 w-3 shrink-0" />
             )}

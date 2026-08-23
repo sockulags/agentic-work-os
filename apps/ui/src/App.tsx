@@ -8,8 +8,10 @@ import { Composer } from '@/components/Composer';
 import { Dock } from '@/components/dock/Dock';
 import { ApprovalDialog } from '@/components/ApprovalDialog';
 import { DensityToggle } from '@/components/DensityToggle';
+import { Button } from '@/components/ui/button';
 import { getAgentStyle } from '@/components/AgentBadge';
 import { cn, formatTokens } from '@/lib/utils';
+import { useDisplaySettings } from '@/state/DisplaySettingsContext';
 
 const PERMISSION_MODES: Array<{ value: PermissionMode; label: string }> = [
   { value: 'default', label: 'Ask' },
@@ -20,6 +22,7 @@ const PERMISSION_MODES: Array<{ value: PermissionMode; label: string }> = [
 
 export default function App(): React.JSX.Element {
   const h = useHarnessContext();
+  const { density } = useDisplaySettings();
 
   // Notices are transient; they shouldn't linger after the user has moved on.
   useEffect(() => {
@@ -29,7 +32,10 @@ export default function App(): React.JSX.Element {
   }, [h.notice, h.dismissNotice]);
 
   return (
-    <div className="flex h-full">
+    <div
+      data-density={density === 'compact' ? 'compact' : 'comfortable'}
+      className="awos-shell flex h-full bg-surface-canvas"
+    >
       <ThreadSidebar />
 
       <main className="flex min-w-0 flex-1 flex-col">
@@ -50,16 +56,23 @@ export default function App(): React.JSX.Element {
         {h.notice && (
           <div
             className={cn(
-              'flex items-start gap-2 border-b px-6 py-2 text-xs',
+              'flex items-start gap-2 border-b px-[var(--density-shell-gutter)] py-2 text-xs',
               h.notice.level === 'error'
-                ? 'border-destructive/40 bg-destructive/10'
-                : 'border-border bg-muted/40',
+                ? 'border-state-failed-border bg-state-failed-surface text-state-failed'
+                : 'border-border bg-surface-subtle text-muted-foreground',
             )}
           >
             <span className="flex-1">{h.notice.message}</span>
-            <button type="button" onClick={h.dismissNotice} className="opacity-60 hover:opacity-100">
-              <X className="h-3.5 w-3.5" />
-            </button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={h.dismissNotice}
+              aria-label="Dismiss notice"
+              className="-my-1 -mr-1 opacity-70 hover:opacity-100"
+            >
+              <X data-icon="inline-start" />
+            </Button>
           </div>
         )}
 
@@ -109,49 +122,54 @@ function Header({
   onIntegrate: (agent: AgentId) => void;
 }): React.JSX.Element {
   return (
-    <header className="flex shrink-0 items-center gap-3 border-b border-border px-6 py-2.5">
+    <header className="awos-header flex shrink-0 items-center gap-[var(--density-shell-gap)] border-b border-border bg-surface-rail px-[var(--density-shell-gutter)] py-[var(--density-shell-header-padding)]">
       <div className="min-w-0 flex-1">
         <h2 className="truncate text-sm font-medium">{title}</h2>
         {cwd && <p className="truncate font-mono text-[11px] text-muted-foreground">{cwd}</p>}
       </div>
 
       {hasThread && (
-        <div className="flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1.5">
           {/* One button per lane with work to hand over. Integration is explicit because
               the thread directory is the user's, and files arriving in it unasked is the
               surprise this whole mode has to avoid. */}
           {parallel &&
             (Object.keys(lanes) as AgentId[]).map((agent) => (
-              <button
+              <Button
                 key={agent}
                 type="button"
+                size="sm"
+                variant="outline"
                 onClick={() => onIntegrate(agent)}
                 disabled={busy.includes(agent)}
                 title={`Apply ${agent}'s lane to ${cwd ?? 'the thread directory'}`}
-                className="rounded-md border border-input px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent disabled:opacity-40"
+                className="text-xs text-muted-foreground disabled:opacity-40"
               >
-                <GitMerge className="mr-1 inline h-3 w-3" />
+                <GitMerge data-icon="inline-start" />
                 {agent}
-              </button>
+              </Button>
             ))}
 
-          <button
+          <Button
             type="button"
+            size="sm"
+            variant="outline"
             onClick={() => onParallel(!parallel)}
+            aria-pressed={parallel}
             title={
               parallel
                 ? 'Agents each work in their own copy of the repository and can run at the same time'
                 : 'Agents share this directory, so only one can work at a time'
             }
             className={cn(
-              'rounded-md border px-2 py-1 text-xs transition-colors',
+              'text-xs',
               parallel
-                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500'
-                : 'border-input text-muted-foreground hover:bg-accent',
+                ? 'border-state-passed-border bg-state-passed-surface text-state-passed hover:bg-state-passed-surface'
+                : 'text-muted-foreground',
             )}
           >
             {parallel ? 'Lanes on' : 'Lanes off'}
-          </button>
+          </Button>
         </div>
       )}
 
@@ -162,7 +180,7 @@ function Header({
           onChange={(e) => onPermissionMode(e.target.value as PermissionMode)}
           defaultValue="default"
           title="Applies the next time an agent process starts"
-          className="rounded-md border border-input bg-transparent px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="awos-input shrink-0 text-xs"
         >
           {PERMISSION_MODES.map((mode) => (
             <option key={mode.value} value={mode.value} className="bg-card">
@@ -173,23 +191,27 @@ function Header({
       )}
 
       {(totals.inputTokens > 0 || totals.outputTokens > 0) && (
-        <span className="whitespace-nowrap text-[11px] text-muted-foreground">
+        <span className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground">
           {formatTokens(totals.inputTokens)} in · {formatTokens(totals.outputTokens)} out
           {totals.costUsd > 0 && ` · $${totals.costUsd.toFixed(3)}`}
         </span>
       )}
 
       <span
+        role="status"
+        aria-label={`Harness ${status}`}
         className={cn(
           'h-2 w-2 shrink-0 rounded-full',
           status === 'open'
-            ? 'bg-emerald-500'
+            ? 'bg-state-passed'
             : status === 'connecting'
-              ? 'animate-pulse bg-amber-500'
-              : 'bg-destructive',
+              ? 'animate-pulse bg-state-busy'
+              : 'bg-state-failed',
         )}
         title={`Harness ${status}`}
-      />
+      >
+        <span className="sr-only">Harness {status}</span>
+      </span>
     </header>
   );
 }
@@ -204,7 +226,8 @@ function EmptyState({ connected, profiles }: { connected: boolean; profiles: Age
             return (
               <span
                 key={profile.profileId}
-                className={cn('rounded-md border px-2.5 py-1 text-xs font-medium', style.bg, style.border, style.text)}
+                style={style.cssVars}
+                className={cn(style.root, 'rounded-md border px-2.5 py-1 text-xs font-medium', style.bg, style.border, style.text)}
               >
                 {style.label}
               </span>

@@ -50,7 +50,7 @@ export function Dock(): React.JSX.Element {
         minWidth: DOCK_MIN_WIDTH,
         maxWidth: `${DOCK_MAX_VIEWPORT_FRACTION * 100}vw`,
       }}
-      className="relative flex shrink-0 flex-col border-l border-border bg-card/30"
+      className="relative flex shrink-0 flex-col border-l border-border bg-surface-rail"
     >
       <ResizeHandle width={dock.width} onWidth={dock.setWidth} />
 
@@ -61,7 +61,7 @@ export function Dock(): React.JSX.Element {
           onClick={() => dock.setOpen(false)}
           title="Collapse dock"
           aria-label="Collapse dock"
-          className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="awos-focus-ring shrink-0 rounded-md p-1 text-muted-foreground transition-colors duration-[var(--motion-fast)] hover:bg-surface-interactive hover:text-foreground"
         >
           <PanelRightClose className="h-4 w-4" />
         </button>
@@ -94,13 +94,13 @@ function CollapsedRail({
   onOpenTab: (id: string) => void;
 }): React.JSX.Element {
   return (
-    <aside className="flex w-10 shrink-0 flex-col items-center gap-1 border-l border-border bg-card/30 py-1.5">
+    <aside className="flex w-[var(--shell-dock-rail-width)] shrink-0 flex-col items-center gap-1 border-l border-border bg-surface-rail py-1.5">
       <button
         type="button"
         onClick={onExpand}
         title="Expand dock"
         aria-label="Expand dock"
-        className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="awos-focus-ring rounded-md p-1 text-muted-foreground transition-colors duration-[var(--motion-fast)] hover:bg-surface-interactive hover:text-foreground"
       >
         <PanelRightOpen className="h-4 w-4" />
       </button>
@@ -114,7 +114,7 @@ function CollapsedRail({
             onClick={() => onOpenTab(tab.id)}
             title={tab.label}
             aria-label={tab.label}
-            className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="awos-focus-ring rounded-md p-1 text-muted-foreground transition-colors duration-[var(--motion-fast)] hover:bg-surface-interactive hover:text-foreground"
           >
             <Icon className="h-4 w-4" />
           </button>

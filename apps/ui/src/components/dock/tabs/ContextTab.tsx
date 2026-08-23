@@ -62,8 +62,8 @@ export function ContextTab(): React.JSX.Element {
         <span
           className={cn(
             'text-muted-foreground',
-            nearLimit && 'text-amber-500',
-            over > 0 && 'text-destructive',
+            nearLimit && 'text-state-stale',
+            over > 0 && 'text-state-failed',
           )}
         >
           {used.toLocaleString()} / {PINNED_CONTEXT_MAX_CHARS.toLocaleString()} characters
@@ -94,7 +94,13 @@ function SaveIndicator({ state }: { state: PinnedContextSave }): React.JSX.Eleme
       role="status"
       className={cn(
         'shrink-0',
-        state === 'failed' ? 'text-destructive' : 'text-muted-foreground',
+        state === 'saved'
+          ? 'text-state-passed'
+          : state === 'saving'
+            ? 'text-state-busy'
+            : state === 'unsaved'
+              ? 'text-state-stale'
+              : 'text-state-failed',
       )}
     >
       {label}

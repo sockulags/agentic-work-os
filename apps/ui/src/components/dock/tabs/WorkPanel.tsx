@@ -103,7 +103,7 @@ function AttachForm({
         onChange={(e) => setReference(e.target.value)}
         placeholder="#14, owner/name#14, or the issue URL"
         aria-label="Issue reference"
-        className="w-full rounded-md border border-input bg-transparent px-2 py-1.5 font-mono text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="awos-input w-full py-1.5 font-mono text-xs"
       />
       {error && <Problem error={error} />}
       <Button type="submit" size="sm" variant="outline" disabled={busy} className="h-auto px-2 py-1 text-xs">
@@ -209,7 +209,10 @@ function Run({ run, currentRevision }: { run: RunView; currentRevision: string }
     <li className="space-y-1">
       <div className="flex items-center gap-1.5">
         {agentStyle && (
-          <span className={cn('rounded px-1 py-px text-[9px]', agentStyle.bg, agentStyle.text)}>
+          <span
+            style={agentStyle.cssVars}
+            className={cn(agentStyle.root, 'rounded px-1 py-px text-[9px]', agentStyle.bg, agentStyle.text)}
+          >
             {agentStyle.label}
           </span>
         )}
@@ -222,7 +225,7 @@ function Run({ run, currentRevision }: { run: RunView; currentRevision: string }
       {run.detail && <p className="text-[10px] text-muted-foreground">{run.detail}</p>}
 
       {sourceMoved && (
-        <p className="flex items-start gap-1 text-[10px] text-amber-500">
+        <p className="flex items-start gap-1 text-[10px] text-state-stale">
           <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
           The issue has changed since this run. Its context is kept as it was.
         </p>
@@ -256,9 +259,9 @@ const CLAIMS: Array<{ value: RunClaim; label: string }> = [
 ];
 
 const CLAIM_STYLE: Record<RunClaim, string> = {
-  delivered: 'text-emerald-500',
-  partial: 'text-amber-500',
-  blocked: 'text-destructive',
+  delivered: 'text-state-passed',
+  partial: 'text-state-stale',
+  blocked: 'text-state-blocked',
   abandoned: 'text-muted-foreground',
 };
 
@@ -324,7 +327,7 @@ function Outcome({ run }: { run: RunView }): React.JSX.Element {
         value={claim}
         onChange={(e) => setClaim(e.target.value as RunClaim)}
         aria-label="Outcome"
-        className="w-full rounded-md border border-input bg-transparent px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="awos-input w-full py-1 text-xs"
       >
         {CLAIMS.map((entry) => (
           <option key={entry.value} value={entry.value} className="bg-card">
@@ -337,7 +340,7 @@ function Outcome({ run }: { run: RunView }): React.JSX.Element {
         onChange={(e) => setStatement(e.target.value)}
         placeholder="What actually came of this run?"
         aria-label="Outcome statement"
-        className="w-full rounded-md border border-input bg-transparent px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="awos-input w-full py-1 text-xs"
       />
       <Button type="submit" size="sm" variant="outline" className="h-auto px-2 py-1 text-xs">
         Record the outcome
@@ -431,14 +434,14 @@ function Evidence({ run }: { run: RunView }): React.JSX.Element {
               onChange={(e) => setUrl(e.target.value)}
               placeholder="https://… (optional)"
               aria-label="Evidence link"
-              className="w-full rounded-md border border-input bg-transparent px-2 py-1 font-mono text-[10px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="awos-input w-full py-1 font-mono text-[10px]"
             />
             <input
               value={summary}
               onChange={(e) => setSummary(e.target.value)}
               placeholder="What does it show?"
               aria-label="Evidence summary"
-              className="w-full rounded-md border border-input bg-transparent px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="awos-input w-full py-1 text-xs"
             />
             <Button type="submit" size="sm" variant="outline" className="h-auto px-2 py-1 text-xs">
               Attach
@@ -581,7 +584,7 @@ function Retained({ items }: { items: RetainedItem[] }): React.JSX.Element {
             value={kind}
             onChange={(e) => setKind(e.target.value as RetainedKind)}
             aria-label="What kind"
-            className="w-full rounded-md border border-input bg-transparent px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="awos-input w-full py-1 text-xs"
           >
             {RETAINED_KINDS.map((entry) => (
               <option key={entry.value} value={entry.value} className="bg-card">
@@ -594,7 +597,7 @@ function Retained({ items }: { items: RetainedItem[] }): React.JSX.Element {
             onChange={(e) => setText(e.target.value)}
             placeholder="What should later work on this issue know?"
             aria-label="What to keep"
-            className="w-full rounded-md border border-input bg-transparent px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="awos-input w-full py-1 text-xs"
           />
           <Button type="submit" size="sm" variant="outline" className="h-auto px-2 py-1 text-xs">
             Keep it
@@ -628,10 +631,10 @@ function Gates(): React.JSX.Element | null {
 }
 
 const REQUIREMENT_ICON: Record<RequirementResult['state'], React.JSX.Element> = {
-  satisfied: <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-emerald-500" />,
+  satisfied: <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-state-passed" />,
   missing: <CircleSlash className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />,
-  failed: <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-destructive" />,
-  stale: <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-amber-500" />,
+  failed: <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-state-failed" />,
+  stale: <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-state-stale" />,
 };
 
 const REQUIREMENT_TEXT: Record<RequirementResult['state'], string> = {
@@ -667,7 +670,7 @@ function Gate({ agent }: { agent: AgentId }): React.JSX.Element | null {
     <div className="space-y-1">
       <p className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
         Before integrating {agent}
-        {gate.allowed && <CheckCircle2 className="h-3 w-3 text-emerald-500" />}
+        {gate.allowed && <CheckCircle2 className="h-3 w-3 text-state-passed" />}
       </p>
 
       <ul className="space-y-1">
@@ -723,7 +726,7 @@ function Gate({ agent }: { agent: AgentId }): React.JSX.Element | null {
             onChange={(e) => setReason(e.target.value)}
             placeholder="Why integrate without this?"
             aria-label="Override reason"
-            className="w-full rounded-md border border-input bg-transparent px-2 py-1 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="awos-input w-full py-1 text-xs"
           />
           <Button type="submit" size="sm" variant="outline" className="h-auto px-2 py-1 text-xs">
             Integrate anyway
@@ -766,7 +769,7 @@ function StartWork(): React.JSX.Element {
         onChange={(e) => setText(e.target.value)}
         placeholder="What should the agent do about this issue?"
         aria-label="Run instruction"
-        className="w-full rounded-md border border-input bg-transparent px-2 py-1.5 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="awos-input w-full py-1.5 text-xs"
       />
       <Button type="submit" size="sm" variant="outline" disabled={busy} className="h-auto px-2 py-1 text-xs">
         <Play className="mr-1 h-3 w-3" />
@@ -782,7 +785,7 @@ function Problem({ error }: { error: WorkSourceError }): React.JSX.Element {
       role="status"
       className={cn(
         'flex items-start gap-1.5',
-        error.retryable ? 'text-amber-500' : 'text-destructive',
+        error.retryable ? 'text-state-waiting' : 'text-state-failed',
       )}
     >
       <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
@@ -801,8 +804,8 @@ const STATE_LABEL: Record<RunView['state'], string> = {
 };
 
 const STATE_STYLE: Record<RunView['state'], string> = {
-  running: 'text-amber-500',
-  completed: 'text-emerald-500',
-  interrupted: 'text-muted-foreground',
-  error: 'text-destructive',
+  running: 'text-state-busy',
+  completed: 'text-state-passed',
+  interrupted: 'text-state-interrupted',
+  error: 'text-state-failed',
 };

@@ -22,7 +22,7 @@ export function ToolGroup({ items }: { items: ToolItem[] }): React.JSX.Element {
   const summary = summarizeToolGroup(items);
 
   return (
-    <div className={cn('rounded-md border', summary.failed > 0 ? 'border-destructive/40' : 'border-border')}>
+    <div className={cn('rounded-md border', summary.failed > 0 ? 'border-state-failed-border' : 'border-border')}>
       <button
         type="button"
         onClick={() => setOverride(!open)}
@@ -43,7 +43,7 @@ export function ToolGroup({ items }: { items: ToolItem[] }): React.JSX.Element {
           )}
         </span>
         {summary.failed > 0 && (
-          <span className="shrink-0 text-[11px] text-destructive">
+            <span className="shrink-0 text-[11px] text-state-failed">
             {summary.failed} failed
           </span>
         )}
