@@ -204,8 +204,8 @@ function PathAffordance({ path }: { path: string }): React.JSX.Element {
         aria-label="Copy path"
         className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
-        {result === 'copied' && <Check className="h-3 w-3 text-emerald-500" />}
-        {result === 'failed' && <AlertTriangle className="h-3 w-3 text-destructive" />}
+        {result === 'copied' && <Check className="h-3 w-3 text-state-passed" />}
+        {result === 'failed' && <AlertTriangle className="h-3 w-3 text-state-failed" />}
         {result === 'idle' && <Copy className="h-3 w-3" />}
       </button>
       <span aria-live="polite" className="sr-only">

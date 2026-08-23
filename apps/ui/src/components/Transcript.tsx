@@ -53,9 +53,9 @@ export function Transcript({ items }: { items: TranscriptItem[] }): React.JSX.El
     <div
       ref={scrollRef}
       onScroll={handleScroll}
-      className="awos-scroll flex-1 overflow-y-auto px-6 py-4"
+      className="awos-scroll flex-1 overflow-y-auto px-[var(--density-shell-gutter)] py-4"
     >
-      <div className="mx-auto flex max-w-3xl flex-col gap-4">
+      <div className="mx-auto flex max-w-3xl flex-col gap-[var(--density-shell-gap)]">
         {rows.map((row, index) =>
           row.type === 'tool-group' ? (
             <ToolGroup key={row.key} items={row.items} />
@@ -80,7 +80,7 @@ function TranscriptRow({
     case 'user':
       return (
         <div className="flex justify-end">
-          <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-lg bg-secondary px-4 py-2.5 text-sm">
+          <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-lg bg-surface-interactive px-4 py-2.5 text-sm">
             {item.text}
           </div>
         </div>
@@ -89,7 +89,7 @@ function TranscriptRow({
     case 'divider': {
       const style = getAgentStyle(item.agent);
       return (
-        <div className="flex items-center gap-3 pt-2">
+        <div style={style.cssVars} className={cn(style.root, 'flex items-center gap-3 pt-2')}>
           <span className={cn('h-1.5 w-1.5 rounded-full', style.dot)} />
           <span className={cn('text-xs font-medium', style.text)}>{style.label}</span>
           <span className="h-px flex-1 bg-border" />
@@ -119,8 +119,8 @@ function TranscriptRow({
           className={cn(
             'flex items-start gap-2 rounded-md border px-3 py-2 text-xs',
             item.level === 'error'
-              ? 'border-destructive/40 bg-destructive/10 text-destructive-foreground'
-              : 'border-border bg-muted/40 text-muted-foreground',
+              ? 'border-state-failed-border bg-state-failed-surface text-state-failed'
+              : 'border-border bg-surface-subtle text-muted-foreground',
           )}
         >
           {item.level === 'error' ? (
@@ -139,7 +139,8 @@ function TranscriptRow({
 
 function ThinkingIndicator(): React.JSX.Element {
   return (
-    <div className="flex items-center gap-1.5 py-1 text-muted-foreground">
+    <div role="status" className="flex items-center gap-1.5 py-1 text-state-busy">
+      <span className="sr-only">Working</span>
       {[0, 150, 300].map((delay) => (
         <span
           key={delay}

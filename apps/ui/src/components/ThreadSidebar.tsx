@@ -16,13 +16,12 @@ export function ThreadSidebar(): React.JSX.Element {
   const [cwd, setCwd] = useState(threads[0]?.cwd ?? '');
 
   return (
-    <aside className="flex w-64 shrink-0 flex-col border-r border-border bg-card/30">
-      <div className="flex items-center justify-between px-3 py-3">
+    <aside className="flex w-[var(--shell-sidebar-width)] shrink-0 flex-col border-r border-border bg-surface-rail">
+      <div className="flex items-center justify-between px-3 py-[var(--density-shell-header-padding)]">
         <h1 className="text-sm font-semibold">Threads</h1>
         <Button
           size="icon"
           variant="ghost"
-          className="h-7 w-7"
           onClick={() => setCreating((v) => !v)}
           title="New thread"
         >
@@ -32,7 +31,7 @@ export function ThreadSidebar(): React.JSX.Element {
 
       {creating && (
         <form
-          className="space-y-2 border-y border-border bg-background/60 px-3 py-3"
+          className="flex flex-col gap-2 border-y border-border bg-surface-sunken px-3 py-3"
           onSubmit={async (e) => {
             e.preventDefault();
             const trimmed = cwd.trim();
@@ -60,14 +59,14 @@ export function ThreadSidebar(): React.JSX.Element {
                 }}
                 placeholder="C:\\Users\\you\\project"
                 autoFocus
-                className="min-w-0 flex-1 rounded-md border border-input bg-transparent px-2 py-1.5 font-mono text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="awos-input min-w-0 flex-1 font-mono text-xs"
               />
               {supportsNativeFolderPicker() && (
                 <Button
                   type="button"
                   size="sm"
                   variant="outline"
-                  className="h-auto shrink-0 px-2 text-xs"
+                  className="shrink-0 text-xs"
                   disabled={submitting}
                   onClick={async () => {
                     setCreateError(null);
@@ -86,14 +85,14 @@ export function ThreadSidebar(): React.JSX.Element {
           </label>
           {createError && <p className="text-xs text-destructive">{createError}</p>}
           <div className="flex gap-1.5">
-            <Button type="submit" size="sm" className="h-7 flex-1 text-xs" disabled={submitting}>
+            <Button type="submit" size="sm" className="flex-1 text-xs" disabled={submitting}>
               {submitting ? 'Creating…' : 'Create'}
             </Button>
             <Button
               type="button"
               size="sm"
               variant="ghost"
-              className="h-7 text-xs"
+              className="text-xs"
               disabled={submitting}
               onClick={() => {
                 setCreateError(null);
@@ -120,8 +119,9 @@ export function ThreadSidebar(): React.JSX.Element {
                 key={thread.id}
                 className={cn(
                   'group relative mb-0.5 cursor-pointer rounded-md px-2 py-2 text-left transition-colors',
-                  active ? 'bg-accent' : 'hover:bg-accent/50',
+                  active ? 'bg-surface-selected' : 'hover:bg-surface-interactive/60',
                 )}
+                style={style.cssVars}
                 onClick={() => void openThread(thread.id)}
               >
                 <div className="flex items-center gap-1.5">
@@ -143,7 +143,7 @@ export function ThreadSidebar(): React.JSX.Element {
                     e.stopPropagation();
                     void deleteThread(thread.id);
                   }}
-                  className="absolute right-1 top-1.5 hidden rounded p-1 text-muted-foreground hover:bg-destructive/20 hover:text-destructive group-hover:block"
+                  className="awos-focus-ring absolute right-1 top-1.5 hidden rounded p-1 text-muted-foreground hover:bg-state-failed-surface hover:text-state-failed group-hover:block"
                 >
                   <Trash2 className="h-3 w-3" />
                 </button>

@@ -1,64 +1,272 @@
 @import 'tailwindcss';
 
 /*
- * shadcn/ui token set, Tailwind v4 flavour.
- *
- * These are the stock shadcn variables, so `npx shadcn@latest add <component>` drops
- * components straight in without a theme fight. The two additions are `--agent-claude`
- * and `--agent-codex`: a single conversation carries two speakers, and a consistent
- * colour per agent is what makes the transcript readable at a glance.
+ * AWOS owns the semantic layer here. Components consume the aliases below rather than
+ * choosing a palette value, so the same primitives work in the light set and the dark
+ * operator-console set without a second theme engine.
  */
-
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 240 10% 3.9%;
-    --primary: 240 5.9% 10%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 240 4.8% 95.9%;
-    --secondary-foreground: 240 5.9% 10%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 240 5.9% 10%;
-    --radius: 0.5rem;
+    /* Surfaces */
+    --surface-canvas: 220 20% 98%;
+    --surface-sunken: 220 18% 94%;
+    --surface-rail: 220 18% 96%;
+    --surface-raised: 0 0% 100%;
+    --surface-overlay: 0 0% 100%;
+    --surface-subtle: 220 16% 93%;
+    --surface-interactive: 220 14% 89%;
+    --surface-selected: 38 100% 95%;
+    --surface-backdrop: 0 0% 0% / 46%;
 
-    --agent-claude: 24 95% 53%;
-    --agent-codex: 152 60% 45%;
+    /* Text hierarchy */
+    --text-primary: 222 25% 13%;
+    --text-secondary: 220 16% 30%;
+    --text-muted: 220 12% 45%;
+    --text-subtle: 220 10% 56%;
+    --text-disabled: 220 10% 68%;
+    --text-inverse: 0 0% 100%;
+
+    /* Borders and focus */
+    --border-subtle: 220 13% 89%;
+    --border-default: 220 14% 83%;
+    --border-strong: 220 16% 65%;
+    --border-input: 220 14% 78%;
+    --focus-ring: 39 92% 48%;
+
+    /* Actions */
+    --action-primary: 38 88% 48%;
+    --action-primary-foreground: 32 35% 10%;
+    --action-secondary: 220 16% 90%;
+    --action-secondary-foreground: 222 25% 16%;
+
+    /* Operational states: each state has foreground, surface, and border roles. */
+    --state-idle: 220 12% 42%;
+    --state-idle-surface: 220 18% 94%;
+    --state-idle-border: 220 18% 80%;
+    --state-busy: 34 82% 39%;
+    --state-busy-surface: 36 90% 93%;
+    --state-busy-border: 35 75% 70%;
+    --state-waiting: 204 72% 38%;
+    --state-waiting-surface: 204 72% 94%;
+    --state-waiting-border: 204 62% 72%;
+    --state-blocked: 10 76% 40%;
+    --state-blocked-surface: 10 82% 94%;
+    --state-blocked-border: 10 68% 72%;
+    --state-passed: 148 60% 32%;
+    --state-passed-surface: 148 64% 93%;
+    --state-passed-border: 148 50% 70%;
+    --state-failed: 0 70% 43%;
+    --state-failed-surface: 0 76% 95%;
+    --state-failed-border: 0 62% 74%;
+    --state-interrupted: 220 12% 42%;
+    --state-interrupted-surface: 220 16% 94%;
+    --state-interrupted-border: 220 14% 80%;
+    --state-stale: 30 78% 38%;
+    --state-stale-surface: 30 88% 93%;
+    --state-stale-border: 30 72% 70%;
+
+    /* Diff roles: modifications are separate from add/remove semantics. */
+    --diff-add: 145 60% 32%;
+    --diff-add-surface: 145 70% 94%;
+    --diff-add-highlight: 145 70% 84%;
+    --diff-remove: 0 65% 42%;
+    --diff-remove-surface: 0 70% 95%;
+    --diff-remove-highlight: 0 70% 87%;
+    --diff-modify: 205 65% 35%;
+    --diff-modify-surface: 205 70% 94%;
+    --diff-modify-highlight: 205 70% 84%;
+    --diff-context: 220 12% 45%;
+    --diff-context-surface: 220 16% 93%;
+
+    /* Radius, spacing, motion, and elevation */
+    --radius-control: 0.45rem;
+    --radius-panel: 0.65rem;
+    --radius-overlay: 0.75rem;
+    --radius-pill: 9999px;
+    --space-0: 0rem;
+    --space-1: 0.25rem;
+    --space-2: 0.5rem;
+    --space-3: 0.75rem;
+    --space-4: 1rem;
+    --space-5: 1.25rem;
+    --space-6: 1.5rem;
+    --space-8: 2rem;
+    --space-10: 2.5rem;
+    --space-12: 3rem;
+    --space-16: 4rem;
+    --motion-fast: 120ms;
+    --motion-base: 180ms;
+    --motion-slow: 260ms;
+    --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+    --elevation-control: 0 1px 2px hsl(222 30% 10% / 0.08);
+    --elevation-panel: 0 8px 24px hsl(222 30% 10% / 0.08);
+    --elevation-overlay: 0 20px 60px hsl(222 30% 10% / 0.18);
+
+    /* The chrome density contract. Transcript modes remain compact/normal/verbose. */
+    --density-control-height: 2.25rem;
+    --density-control-height-sm: 2rem;
+    --density-control-height-lg: 2.5rem;
+    --density-control-padding-inline: 0.75rem;
+    --density-textarea-min-height: 2.75rem;
+    --density-shell-gutter: var(--space-6);
+    --density-shell-gap: var(--space-3);
+    --density-shell-header-padding: var(--space-3);
+    --density-panel-padding: var(--space-4);
+    --shell-sidebar-width: 16rem;
+    --shell-sidebar-width-narrow: 12rem;
+    --shell-dock-rail-width: 2.5rem;
+
+    /* One generic worker input. The profile id supplies only the stable hue. */
+    --worker-hue: 210;
+
+    /* shadcn-compatible semantic aliases */
+    --background: var(--surface-canvas);
+    --foreground: var(--text-primary);
+    --card: var(--surface-raised);
+    --card-foreground: var(--text-primary);
+    --popover: var(--surface-overlay);
+    --popover-foreground: var(--text-primary);
+    --primary: var(--action-primary);
+    --primary-foreground: var(--action-primary-foreground);
+    --secondary: var(--action-secondary);
+    --secondary-foreground: var(--action-secondary-foreground);
+    --muted: var(--surface-subtle);
+    --muted-foreground: var(--text-muted);
+    --accent: var(--surface-interactive);
+    --accent-foreground: var(--text-primary);
+    --destructive: var(--state-failed);
+    --destructive-foreground: var(--text-inverse);
+    --border: var(--border-default);
+    --input: var(--border-input);
+    --ring: var(--focus-ring);
   }
 
   .dark {
-    --background: 240 10% 3.9%;
-    --foreground: 0 0% 98%;
-    --card: 240 8% 6%;
-    --card-foreground: 0 0% 98%;
-    --popover: 240 10% 3.9%;
-    --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 240 5.9% 10%;
-    --secondary: 240 3.7% 15.9%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 240 3.7% 15.9%;
-    --muted-foreground: 240 5% 64.9%;
-    --accent: 240 3.7% 15.9%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 45%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 3.7% 15.9%;
-    --input: 240 3.7% 15.9%;
-    --ring: 240 4.9% 83.9%;
+    /* Default product presentation: a blue-charcoal console with warm primary actions. */
+    --surface-canvas: 222 28% 7%;
+    --surface-sunken: 222 30% 5%;
+    --surface-rail: 222 25% 9%;
+    --surface-raised: 221 24% 11%;
+    --surface-overlay: 220 26% 13%;
+    --surface-subtle: 221 20% 15%;
+    --surface-interactive: 220 20% 18%;
+    --surface-selected: 38 35% 18%;
+    --surface-backdrop: 222 35% 3% / 78%;
 
-    --agent-claude: 24 95% 58%;
-    --agent-codex: 152 55% 52%;
+    --text-primary: 218 25% 96%;
+    --text-secondary: 218 18% 77%;
+    --text-muted: 218 13% 60%;
+    --text-subtle: 218 10% 46%;
+    --text-disabled: 218 8% 38%;
+    --text-inverse: 222 30% 8%;
+
+    --border-subtle: 220 13% 14%;
+    --border-default: 218 16% 22%;
+    --border-strong: 218 16% 31%;
+    --border-input: 218 16% 27%;
+    --focus-ring: 39 95% 62%;
+
+    --action-primary: 38 95% 60%;
+    --action-primary-foreground: 32 35% 10%;
+    --action-secondary: 220 20% 18%;
+    --action-secondary-foreground: 218 25% 96%;
+
+    --state-idle: 218 12% 68%;
+    --state-idle-surface: 218 18% 18%;
+    --state-idle-border: 218 20% 30%;
+    --state-busy: 39 95% 65%;
+    --state-busy-surface: 38 55% 20%;
+    --state-busy-border: 39 70% 36%;
+    --state-waiting: 204 90% 70%;
+    --state-waiting-surface: 204 55% 20%;
+    --state-waiting-border: 204 65% 35%;
+    --state-blocked: 12 86% 66%;
+    --state-blocked-surface: 12 55% 20%;
+    --state-blocked-border: 12 70% 36%;
+    --state-passed: 148 64% 62%;
+    --state-passed-surface: 148 48% 19%;
+    --state-passed-border: 148 55% 34%;
+    --state-failed: 0 78% 68%;
+    --state-failed-surface: 0 52% 20%;
+    --state-failed-border: 0 65% 36%;
+    --state-interrupted: 220 12% 68%;
+    --state-interrupted-surface: 220 18% 18%;
+    --state-interrupted-border: 220 20% 30%;
+    --state-stale: 30 88% 68%;
+    --state-stale-surface: 30 55% 20%;
+    --state-stale-border: 30 72% 36%;
+
+    --diff-add: 145 70% 65%;
+    --diff-add-surface: 145 50% 18%;
+    --diff-add-highlight: 145 65% 32%;
+    --diff-remove: 0 75% 70%;
+    --diff-remove-surface: 0 50% 18%;
+    --diff-remove-highlight: 0 65% 32%;
+    --diff-modify: 205 80% 70%;
+    --diff-modify-surface: 205 50% 18%;
+    --diff-modify-highlight: 205 65% 32%;
+    --diff-context: 218 12% 60%;
+    --diff-context-surface: 220 16% 13%;
+
+    --elevation-control: 0 1px 2px hsl(222 40% 2% / 0.28);
+    --elevation-panel: 0 10px 28px hsl(222 40% 2% / 0.24);
+    --elevation-overlay: 0 24px 70px hsl(222 40% 2% / 0.5);
+  }
+
+  [data-density='compact'] {
+    --density-control-height: 2rem;
+    --density-control-height-sm: 1.75rem;
+    --density-control-height-lg: 2.25rem;
+    --density-control-padding-inline: 0.625rem;
+    --density-textarea-min-height: 2.5rem;
+    --density-shell-gutter: var(--space-4);
+    --density-shell-gap: var(--space-2);
+    --density-shell-header-padding: var(--space-2);
+    --density-panel-padding: var(--space-3);
+  }
+
+  [data-density='comfortable'] {
+    --density-control-height: 2.25rem;
+    --density-control-height-sm: 2rem;
+    --density-control-height-lg: 2.5rem;
+    --density-control-padding-inline: 0.75rem;
+    --density-textarea-min-height: 2.75rem;
+    --density-shell-gutter: var(--space-6);
+    --density-shell-gap: var(--space-3);
+    --density-shell-header-padding: var(--space-3);
+    --density-panel-padding: var(--space-4);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  html {
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-feature-settings:
+      'rlig' 1,
+      'calt' 1;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  * {
+    border-color: hsl(var(--border));
+  }
+
+  :where(button, [role='button'], input, select, textarea):focus-visible {
+    outline: 2px solid hsl(var(--focus-ring));
+    outline-offset: 2px;
   }
 }
 
@@ -82,35 +290,144 @@
   --color-border: hsl(var(--border));
   --color-input: hsl(var(--input));
   --color-ring: hsl(var(--ring));
-  --color-claude: hsl(var(--agent-claude));
-  --color-codex: hsl(var(--agent-codex));
-  --radius-lg: var(--radius);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-sm: calc(var(--radius) - 4px);
+
+  --color-surface-canvas: hsl(var(--surface-canvas));
+  --color-surface-sunken: hsl(var(--surface-sunken));
+  --color-surface-rail: hsl(var(--surface-rail));
+  --color-surface-raised: hsl(var(--surface-raised));
+  --color-surface-overlay: hsl(var(--surface-overlay));
+  --color-surface-subtle: hsl(var(--surface-subtle));
+  --color-surface-interactive: hsl(var(--surface-interactive));
+  --color-surface-selected: hsl(var(--surface-selected));
+  --color-overlay-backdrop: hsl(var(--surface-backdrop));
+
+  --color-text-primary: hsl(var(--text-primary));
+  --color-text-secondary: hsl(var(--text-secondary));
+  --color-text-muted: hsl(var(--text-muted));
+  --color-text-subtle: hsl(var(--text-subtle));
+  --color-text-disabled: hsl(var(--text-disabled));
+
+  --color-state-idle: hsl(var(--state-idle));
+  --color-state-idle-surface: hsl(var(--state-idle-surface));
+  --color-state-idle-border: hsl(var(--state-idle-border));
+  --color-state-busy: hsl(var(--state-busy));
+  --color-state-busy-surface: hsl(var(--state-busy-surface));
+  --color-state-busy-border: hsl(var(--state-busy-border));
+  --color-state-waiting: hsl(var(--state-waiting));
+  --color-state-waiting-surface: hsl(var(--state-waiting-surface));
+  --color-state-waiting-border: hsl(var(--state-waiting-border));
+  --color-state-blocked: hsl(var(--state-blocked));
+  --color-state-blocked-surface: hsl(var(--state-blocked-surface));
+  --color-state-blocked-border: hsl(var(--state-blocked-border));
+  --color-state-passed: hsl(var(--state-passed));
+  --color-state-passed-surface: hsl(var(--state-passed-surface));
+  --color-state-passed-border: hsl(var(--state-passed-border));
+  --color-state-failed: hsl(var(--state-failed));
+  --color-state-failed-surface: hsl(var(--state-failed-surface));
+  --color-state-failed-border: hsl(var(--state-failed-border));
+  --color-state-interrupted: hsl(var(--state-interrupted));
+  --color-state-interrupted-surface: hsl(var(--state-interrupted-surface));
+  --color-state-interrupted-border: hsl(var(--state-interrupted-border));
+  --color-state-stale: hsl(var(--state-stale));
+  --color-state-stale-surface: hsl(var(--state-stale-surface));
+  --color-state-stale-border: hsl(var(--state-stale-border));
+
+  --color-diff-add: hsl(var(--diff-add));
+  --color-diff-add-surface: hsl(var(--diff-add-surface));
+  --color-diff-add-highlight: hsl(var(--diff-add-highlight));
+  --color-diff-remove: hsl(var(--diff-remove));
+  --color-diff-remove-surface: hsl(var(--diff-remove-surface));
+  --color-diff-remove-highlight: hsl(var(--diff-remove-highlight));
+  --color-diff-modify: hsl(var(--diff-modify));
+  --color-diff-modify-surface: hsl(var(--diff-modify-surface));
+  --color-diff-modify-highlight: hsl(var(--diff-modify-highlight));
+  --color-diff-context: hsl(var(--diff-context));
+  --color-diff-context-surface: hsl(var(--diff-context-surface));
+
+  --radius-sm: var(--radius-control);
+  --radius-md: var(--radius-panel);
+  --radius-lg: var(--radius-overlay);
+  --radius-full: var(--radius-pill);
+  --shadow-awos-control: var(--elevation-control);
+  --shadow-awos-panel: var(--elevation-panel);
+  --shadow-awos-overlay: var(--elevation-overlay);
 }
 
-@layer base {
-  * {
-    border-color: hsl(var(--border));
+@layer components {
+  /* A single generic identity style. `--worker-hue` is supplied from profile metadata. */
+  .awos-worker {
+    --worker-accent: hsl(var(--worker-hue) 72% 44%);
+    --worker-surface: color-mix(in srgb, var(--worker-accent) 13%, hsl(var(--surface-raised)));
+    --worker-border: color-mix(in srgb, var(--worker-accent) 38%, hsl(var(--border-default)));
   }
 
-  html,
-  body,
-  #root {
-    height: 100%;
+  .dark .awos-worker {
+    --worker-accent: hsl(var(--worker-hue) 72% 68%);
   }
 
-  body {
-    background-color: hsl(var(--background));
-    color: hsl(var(--foreground));
-    font-feature-settings:
-      'rlig' 1,
-      'calt' 1;
-    -webkit-font-smoothing: antialiased;
+  .awos-worker-text {
+    color: var(--worker-accent);
+  }
+
+  .awos-worker-surface {
+    background-color: var(--worker-surface);
+  }
+
+  .awos-worker-border {
+    border-color: var(--worker-border);
+  }
+
+  .awos-worker-dot {
+    background-color: var(--worker-accent);
+  }
+
+  .awos-focus-ring:focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 2px hsl(var(--surface-canvas)),
+      0 0 0 4px hsl(var(--focus-ring));
+  }
+
+  .awos-button > [data-icon='inline-start'],
+  .awos-button > [data-icon='inline-end'] {
+    width: 1rem;
+    height: 1rem;
+    flex-shrink: 0;
+  }
+
+  .awos-input {
+    min-height: var(--density-control-height-sm);
+    border: 1px solid hsl(var(--input));
+    border-radius: var(--radius-control);
+    background-color: transparent;
+    padding-inline: var(--density-control-padding-inline);
+    color: hsl(var(--text-primary));
+    transition:
+      border-color var(--motion-fast) var(--ease-standard),
+      box-shadow var(--motion-fast) var(--ease-standard),
+      background-color var(--motion-fast) var(--ease-standard);
+  }
+
+  .awos-input::placeholder {
+    color: hsl(var(--text-muted));
+  }
+
+  .awos-input:focus-visible {
+    border-color: hsl(var(--focus-ring));
+    box-shadow:
+      0 0 0 2px hsl(var(--surface-canvas)),
+      0 0 0 4px hsl(var(--focus-ring));
+    outline: none;
+  }
+
+  .awos-input:disabled {
+    cursor: not-allowed;
+    color: hsl(var(--text-disabled));
+    opacity: 0.7;
   }
 }
 
-/* Streaming text gets a caret so a slow first token doesn't read as a hang. */
+/* Streaming text gets a caret so a slow first token does not read as a hang. */
 @keyframes awos-caret {
   0%,
   45% {
@@ -142,7 +459,28 @@
 
 .awos-scroll::-webkit-scrollbar-thumb {
   background-color: hsl(var(--border));
-  border-radius: 9999px;
+  border-radius: var(--radius-pill);
   border: 3px solid transparent;
   background-clip: content-box;
+}
+
+/* Keep the existing desktop proportions while making a narrow open-dock layout usable. */
+@media (max-width: 64rem) {
+  :root {
+    --shell-sidebar-width: var(--shell-sidebar-width-narrow);
+  }
+
+  .awos-header {
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  .awos-header > :first-child {
+    flex: 1 0 8rem;
+    min-width: 8rem;
+  }
+
+  .awos-header > :not(:first-child) {
+    flex-shrink: 0;
+  }
 }

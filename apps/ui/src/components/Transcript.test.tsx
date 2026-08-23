@@ -95,8 +95,10 @@ describe('Transcript item kinds', () => {
     // Tie each label back to its agent's colour. Asserting the two labels merely exist
     // passes just as happily when the agent styles are swapped, which is the one thing
     // this row has to get right: it is the only marker of who is speaking.
-    expect(screen.getByText('Codex')).toHaveClass('text-codex');
-    expect(screen.getByText('Claude')).toHaveClass('text-claude');
+    expect(screen.getByText('Codex')).toHaveClass('awos-worker-text');
+    expect(screen.getByText('Claude')).toHaveClass('awos-worker-text');
+    expect(screen.getByText('Codex').parentElement).toHaveClass('awos-worker');
+    expect(screen.getByText('Claude').parentElement).toHaveClass('awos-worker');
   });
 
   test('an agent message renders as markdown, with a caret only while streaming', () => {
@@ -155,8 +157,8 @@ describe('Transcript item kinds', () => {
     const info = screen.getByText('Interrupted.').parentElement as HTMLElement;
     const error = screen.getByText('spawn failed').parentElement as HTMLElement;
 
-    expect(error).toHaveClass('border-destructive/40');
-    expect(info).not.toHaveClass('border-destructive/40');
+    expect(error).toHaveClass('border-state-failed-border');
+    expect(info).not.toHaveClass('border-state-failed-border');
     expect(error.querySelector('.lucide-triangle-alert')).not.toBeNull();
     expect(info.querySelector('.lucide-info')).not.toBeNull();
   });

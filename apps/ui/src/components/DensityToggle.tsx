@@ -1,5 +1,5 @@
 import { useDisplaySettings, type Density } from '@/state/DisplaySettingsContext';
-import { cn } from '@/lib/utils';
+import { Button } from './ui/button';
 
 /**
  * The hints describe what the setting does today, not what it is meant to reach: tool
@@ -31,21 +31,18 @@ export function DensityToggle(): React.JSX.Element {
       {DENSITY_OPTIONS.map((option) => {
         const active = option.value === density;
         return (
-          <button
+          <Button
             key={option.value}
             type="button"
+            size="sm"
+            variant={active ? 'secondary' : 'ghost'}
             aria-pressed={active}
             title={option.hint}
             onClick={() => setDensity(option.value)}
-            className={cn(
-              'rounded px-2 py-0.5 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-              active
-                ? 'bg-secondary text-secondary-foreground'
-                : 'text-muted-foreground hover:text-foreground',
-            )}
+            className="h-[var(--density-control-height-sm)] rounded-sm px-2 py-0.5 text-[11px]"
           >
             {option.label}
-          </button>
+          </Button>
         );
       })}
     </div>

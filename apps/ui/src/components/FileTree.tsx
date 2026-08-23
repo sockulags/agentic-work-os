@@ -132,7 +132,7 @@ function DirectoryRow({
         type="button"
         onClick={() => onToggle(node.path)}
         style={{ paddingLeft: BASE_PADDING_PX + depth * INDENT_PX }}
-        className="flex w-full items-center gap-1 py-0.5 pr-2 text-left text-xs text-muted-foreground hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+        className="flex w-full items-center gap-1 py-0.5 pr-2 text-left text-xs text-muted-foreground hover:bg-surface-interactive focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
       >
         <ChevronRight
           className={cn('h-3 w-3 shrink-0 transition-transform', open && 'rotate-90')}
@@ -163,11 +163,11 @@ function DirectoryRow({
 }
 
 const STATUS_ICON: Record<DiffFileStatus, { Icon: LucideIcon; className: string; label: string }> = {
-  added: { Icon: FilePlus2, className: 'text-emerald-400', label: 'added' },
-  deleted: { Icon: FileMinus2, className: 'text-red-400', label: 'deleted' },
-  renamed: { Icon: FileSymlink, className: 'text-sky-400', label: 'renamed' },
-  binary: { Icon: FileQuestion, className: 'text-muted-foreground', label: 'binary' },
-  modified: { Icon: FilePen, className: 'text-muted-foreground', label: 'modified' },
+  added: { Icon: FilePlus2, className: 'text-diff-add', label: 'added' },
+  deleted: { Icon: FileMinus2, className: 'text-diff-remove', label: 'deleted' },
+  renamed: { Icon: FileSymlink, className: 'text-diff-modify', label: 'renamed' },
+  binary: { Icon: FileQuestion, className: 'text-diff-context', label: 'binary' },
+  modified: { Icon: FilePen, className: 'text-diff-modify', label: 'modified' },
 };
 
 function FileRow({
@@ -197,8 +197,8 @@ function FileRow({
         title={title}
         style={{ paddingLeft: BASE_PADDING_PX + depth * INDENT_PX }}
         className={cn(
-          'flex w-full items-center gap-1.5 py-0.5 pr-2 text-left text-xs hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring',
-          active && 'bg-accent text-accent-foreground',
+          'flex w-full items-center gap-1.5 py-0.5 pr-2 text-left text-xs hover:bg-surface-interactive focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring',
+          active && 'bg-surface-selected text-foreground',
         )}
       >
         <status.Icon className={cn('h-3 w-3 shrink-0', status.className)} aria-hidden="true" />
@@ -223,8 +223,8 @@ function Counts({
 
   return (
     <span className={cn('flex shrink-0 gap-1 font-mono text-[10px] tabular-nums', className)}>
-      {additions > 0 && <span className="text-emerald-400">+{additions}</span>}
-      {deletions > 0 && <span className="text-red-400">−{deletions}</span>}
+      {additions > 0 && <span className="text-diff-add">+{additions}</span>}
+      {deletions > 0 && <span className="text-diff-remove">−{deletions}</span>}
     </span>
   );
 }

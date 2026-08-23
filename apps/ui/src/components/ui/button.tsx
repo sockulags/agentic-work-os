@@ -3,7 +3,7 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '@/lib/utils';
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50',
+  'awos-button awos-focus-ring inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-[background-color,border-color,color,box-shadow,opacity] duration-[var(--motion-fast)] focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50',
   {
     variants: {
       variant: {
@@ -15,10 +15,10 @@ const buttonVariants = cva(
         link: 'text-primary underline-offset-4 hover:underline',
       },
       size: {
-        default: 'h-9 px-4 py-2',
-        sm: 'h-8 rounded-md px-3 text-xs',
-        lg: 'h-10 rounded-md px-8',
-        icon: 'h-9 w-9',
+        default: 'h-[var(--density-control-height)] px-4 py-2',
+        sm: 'h-[var(--density-control-height-sm)] rounded-sm px-3 text-xs',
+        lg: 'h-[var(--density-control-height-lg)] rounded-md px-8',
+        icon: 'h-[var(--density-control-height)] w-[var(--density-control-height)]',
       },
     },
     defaultVariants: { variant: 'default', size: 'default' },

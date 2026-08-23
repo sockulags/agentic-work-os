@@ -160,8 +160,8 @@ function Row({
           className={cn(
             'rounded px-1 py-px text-[9px] normal-case tracking-normal',
             origin === 'shared' && 'bg-muted text-muted-foreground',
-            origin === 'local' && 'bg-amber-500/10 text-amber-500',
-            origin === 'environment' && 'bg-sky-500/10 text-sky-500',
+            origin === 'local' && 'bg-state-stale-surface text-state-stale',
+            origin === 'environment' && 'bg-state-waiting-surface text-state-waiting',
             origin === 'default' && 'text-muted-foreground/60',
           )}
           title={ORIGIN_TITLE[origin]}
@@ -191,7 +191,7 @@ function Problems({ problems }: { problems: WorkspaceProblem[] }): React.JSX.Ele
           {problem.severity === 'error' ? (
             <XCircle className="mt-0.5 h-3 w-3 shrink-0 text-destructive" />
           ) : (
-            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-amber-500" />
+            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-state-stale" />
           )}
           <span className="min-w-0">
             <span className="font-mono text-[10px] text-muted-foreground">

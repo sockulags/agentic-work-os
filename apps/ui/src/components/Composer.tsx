@@ -63,9 +63,9 @@ export function Composer(): React.JSX.Element {
   };
 
   return (
-    <div className="border-t border-border bg-background px-6 py-3">
-      <div className="mx-auto max-w-3xl space-y-2">
-        <div className="flex items-center gap-1.5">
+    <div className="border-t border-border bg-surface-sunken px-[var(--density-shell-gutter)] py-3">
+      <div className="mx-auto flex max-w-3xl flex-col gap-2">
+        <div className="awos-scroll flex min-w-0 items-center gap-1.5 overflow-x-auto pb-px">
           {profiles.map((probe) => {
             const id = probe.profileId;
             const style = getAgentStyle(id, probe.label);
@@ -78,11 +78,13 @@ export function Composer(): React.JSX.Element {
                 type="button"
                 onClick={() => void h.setAgent(id)}
                 title={probe?.detail ?? ''}
+                style={style.cssVars}
                 className={cn(
-                  'flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors',
+                  style.root,
+                  'awos-focus-ring flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-2.5 py-1 text-xs font-medium transition-colors duration-[var(--motion-fast)]',
                   selected
                     ? cn(style.bg, style.border, style.text)
-                    : 'border-transparent text-muted-foreground hover:bg-accent',
+                    : 'border-transparent text-muted-foreground hover:bg-surface-interactive',
                   missing && 'opacity-50',
                 )}
               >
@@ -101,7 +103,7 @@ export function Composer(): React.JSX.Element {
               // In parallel mode Stop means "stop the one I am looking at"; sharing a
               // directory there is only ever one turn to stop anyway.
               onClick={() => void h.interrupt(parallel ? agent : undefined)}
-              className="ml-auto h-7 gap-1.5 text-xs text-muted-foreground"
+              className="ml-auto shrink-0 gap-1.5 text-xs text-muted-foreground"
             >
               <Square className="h-3 w-3 fill-current" />
               Stop
@@ -122,14 +124,14 @@ export function Composer(): React.JSX.Element {
                 ? `${getAgentStyle(blockedBy).label} is working — stop it to send`
                 : `Message ${getAgentStyle(agent, selectedProfile?.label).label}…`
             }
-            className="max-h-60 min-h-[44px] py-3 pr-12"
+            className="max-h-60 py-3 pr-12"
           />
           <Button
             size="icon"
             aria-label="Send"
             onClick={submit}
             disabled={text.trim() === '' || blockedBy !== null || disabled}
-            className="absolute bottom-2 right-2 h-7 w-7"
+            className="absolute bottom-2 right-2"
           >
             <ArrowUp className="h-4 w-4" />
           </Button>
