@@ -107,6 +107,8 @@ function stubHarness(overrides: Partial<Harness>): Harness {
     recordEvidence: vi.fn(),
     retainContext: vi.fn(),
     amendRetained: vi.fn(),
+    startRecovery: vi.fn(),
+    applyRecoveryAction: vi.fn(),
     projectOverview: null,
     openProjectOverview: vi.fn(),
     closeProjectOverview: vi.fn(),

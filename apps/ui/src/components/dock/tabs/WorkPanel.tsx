@@ -25,6 +25,7 @@ import {
 } from '@/components/review/ReviewPatterns';
 import type { RunView } from '@/lib/runs';
 import { cn } from '@/lib/utils';
+import { RecoveryPanel } from '@/components/review/RecoveryPanel';
 
 /**
  * The issue this thread is answering, and what has been run against it.
@@ -58,7 +59,11 @@ export function WorkPanel(): React.JSX.Element {
   }
 
   return (
-    <div className="awos-scroll h-full space-y-3 overflow-y-auto px-4 py-3 text-xs">
+    <div
+      className="awos-scroll h-full space-y-3 overflow-y-auto px-4 py-3 text-xs"
+      role="region"
+      aria-label="Work item and recovery review"
+    >
       {work.item === null ? (
         <AttachForm busy={work.busy} error={work.error} onAttach={attachWorkItem} />
       ) : (
@@ -70,6 +75,7 @@ export function WorkPanel(): React.JSX.Element {
             onDetach={() => void detachWorkItem()}
           />
           {work.error && <Problem error={work.error} />}
+          <RecoveryPanel />
           <Retained items={work.retained} />
           <Gates />
           <Runs item={work.item} />
