@@ -22,11 +22,16 @@ import type {
   GateOverride,
   HumanAuthority,
   PixelCaptureContract,
+  RecoveryAction,
+  RecoveryEscalationReason,
+  RecoveryWorkerContext,
   RequirementResult,
   RetainedKind,
   RunClaim,
+  TransitionFingerprint,
   TypedAnswer,
   TransitionEvaluation,
+  TransitionRefusal,
   VisualEvidence,
   WorkingState,
 } from './evidence.js';
@@ -230,6 +235,10 @@ export interface RunStartedBody {
   context: string;
   /** What the user asked for in this run, without the surrounding context blocks. */
   instruction: string;
+  /** Stable transition identity when this run is an automatic correction. */
+  transitionId?: string | null;
+  /** Full structured blocker delivered to a correction worker, never a scraped summary. */
+  recoveryContext?: RecoveryWorkerContext | null;
 }
 
 /** How a run ended. A narrowing of `TurnStopReason` to what a run can be. */
@@ -393,6 +402,74 @@ export interface TransitionEvaluatedBody {
   evaluation: TransitionEvaluation;
 }
 
+/** A refusal opened one durable, bounded correction cycle. */
+export interface RecoveryCycleStartedBody {
+  kind: 'recovery.cycle.started';
+  cycleId: string;
+  transitionId: string;
+  refusalAttempt: number;
+  expectationSetId: string;
+  sourceStepId: string;
+  targetStepId: string;
+  maxRuns: number;
+  maxEvaluations: number;
+  onExhausted: 'waiting-for-human' | 'blocked';
+  guardrailIds: readonly string[];
+  initialFingerprint: TransitionFingerprint;
+}
+
+/** One reserved correction run; its run id is stable before worker dispatch begins. */
+export interface RecoveryCorrectionStartedBody {
+  kind: 'recovery.correction.started';
+  cycleId: string;
+  transitionId: string;
+  refusalAttempt: number;
+  correctionIndex: number;
+  runId: string;
+  workerProfileId: AgentId;
+  fingerprint: TransitionFingerprint;
+  context: RecoveryWorkerContext;
+}
+
+/** A durable wait that does not consume a correction run. */
+export interface RecoveryCycleWaitingBody {
+  kind: 'recovery.cycle.waiting';
+  cycleId: string;
+  transitionId: string;
+  refusalAttempt: number;
+  reason: 'human-action' | 'worker-unavailable' | 'transient-evaluator';
+  required: TransitionRefusal['required'];
+  authority: 'user';
+  detail: string;
+  workerProfileId?: AgentId | null;
+}
+
+/** An append-only escalation when no safe correction may be started. */
+export interface RecoveryCycleEscalatedBody {
+  kind: 'recovery.cycle.escalated';
+  cycleId: string;
+  transitionId: string;
+  refusalAttempt: number;
+  reason: RecoveryEscalationReason;
+  action: 'waiting-for-human' | 'blocked';
+  detail: string;
+}
+
+/** A typed human action, retained independently of the answer/evidence it may trigger. */
+export interface RecoveryActionRecordedBody {
+  kind: 'recovery.action.recorded';
+  action: RecoveryAction;
+}
+
+/** A cycle is terminally stopped, including when a repin supersedes its transition. */
+export interface RecoveryCycleCancelledBody {
+  kind: 'recovery.cycle.cancelled';
+  cycleId: string;
+  transitionId: string;
+  reason: 'user' | 'repinned' | 'passed';
+  supersededByTransitionId: string | null;
+}
+
 /** A newly pinned immutable expectation set. */
 export interface ExpectationSetCreatedBody {
   kind: 'expectation.set.created';
@@ -554,6 +631,12 @@ export type HarnessEventBody =
   | HumanAttestationRecordedBody
   | GateEvaluatedBody
   | TransitionEvaluatedBody
+  | RecoveryCycleStartedBody
+  | RecoveryCorrectionStartedBody
+  | RecoveryCycleWaitingBody
+  | RecoveryCycleEscalatedBody
+  | RecoveryActionRecordedBody
+  | RecoveryCycleCancelledBody
   | ExpectationSetCreatedBody
   | ExpectationSetSupersededBody
   | ContextRetainedBody

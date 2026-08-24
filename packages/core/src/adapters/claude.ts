@@ -8,7 +8,7 @@ import {
   type PlanItem,
   type ToolKind,
 } from '@awos/protocol';
-import type { WorkerAdapter, AgentCapabilities, AdapterContext } from './agent.js';
+import type { WorkerAdapter, AgentCapabilities, AdapterContext, WorkerTurnOptions } from './agent.js';
 import { spawnCli, type StdioChild } from '../util/spawn.js';
 import { readJsonLines, encodeJsonLine } from '../util/jsonl.js';
 import { createLogger } from '../util/logger.js';
@@ -249,7 +249,7 @@ export class ClaudeAdapter implements WorkerAdapter {
   // Turns
   // -------------------------------------------------------------------------
 
-  async sendTurn(text: string): Promise<void> {
+  async sendTurn(text: string, _options?: WorkerTurnOptions): Promise<void> {
     await this.start();
     const child = this.#child;
     if (!child) throw new Error('Claude Code is not running.');
