@@ -8,6 +8,7 @@ import {
   type ToolKind,
 } from '@awos/protocol';
 import type { WorkerAdapter, AgentCapabilities, AdapterContext } from './agent.js';
+import { CODEX_TURN_TIMEOUT_DEFAULT_MS } from '../config.js';
 import { spawnCli, type StdioChild } from '../util/spawn.js';
 import { readJsonLines, encodeJsonLine } from '../util/jsonl.js';
 import { createLogger } from '../util/logger.js';
@@ -61,6 +62,18 @@ export class CodexAdapter implements WorkerAdapter {
   >();
 
   #turnSettle: { resolve: () => void; reject: (e: Error) => void } | null = null;
+
+  /** Armed for the whole turn; the only thing that bounds the wait for `turn/completed`. */
+  #turnTimer: NodeJS.Timeout | null = null;
+
+  /**
+   * Server turn ids the watchdog gave up on.
+   *
+   * The adapter goes on to accept another turn, so `busy` alone cannot tell a late
+   * completion from the live one — and a stale completion that settled the wrong turn
+   * would report work as finished that has barely started.
+   */
+  readonly #abandonedTurns = new Set<string>();
 
   constructor(ctx: AdapterContext) {
     this.#ctx = ctx;
@@ -237,6 +250,15 @@ export class CodexAdapter implements WorkerAdapter {
     } catch (err) {
       this.#failTurn(err as Error);
       throw err;
+    }
+
+    // Armed here rather than before the request: until the turn is accepted the wait is
+    // already bounded by the request's own timeout, and rejecting `settled` before it is
+    // returned below would be an unhandled rejection. A turn that finished inside that
+    // window needs no watchdog.
+    if (this.#busy) {
+      const deadline = this.#ctx.config.codexTurnTimeoutMs ?? CODEX_TURN_TIMEOUT_DEFAULT_MS;
+      this.#turnTimer = setTimeout(() => this.#timeOutTurn(deadline), deadline);
     }
 
     // turn/start returns as soon as the turn is accepted; completion arrives later
@@ -430,6 +452,19 @@ export class CodexAdapter implements WorkerAdapter {
 
       case CODEX_NOTIFICATIONS.turnCompleted: {
         const p = params as unknown as CodexWire.CodexTurnCompletedParams;
+        const completed = typeof p.turn?.id === 'string' ? p.turn.id : null;
+
+        // Only the turn in flight can end one. A completion the watchdog already gave up
+        // on must not emit a second terminal event, and must not settle the turn that was
+        // started after it.
+        if (completed !== null && this.#abandonedTurns.delete(completed)) {
+          log.debug('completion for an abandoned turn ignored', { turn: completed });
+          return;
+        }
+        if (!this.#busy) {
+          log.debug('completion outside a turn ignored', { turn: completed });
+          return;
+        }
         const usage = p.turn?.usage;
         if (usage) {
           this.#ctx.emit({
@@ -457,6 +492,7 @@ export class CodexAdapter implements WorkerAdapter {
           durationMs: Date.now() - this.#turnStartedAt,
         });
 
+        this.#clearTurnTimer();
         this.#busy = false;
         this.#turnId = null;
         this.#emitStatus('idle', null);
@@ -609,7 +645,44 @@ export class CodexAdapter implements WorkerAdapter {
     });
   }
 
+  /**
+   * The turn outlived its deadline, so nothing is going to end it.
+   *
+   * Approvals are settled first: the server blocks on them, and one left pending would
+   * otherwise sit until its own timer fires against a turn that no longer exists.
+   */
+  #timeOutTurn(deadline: number): void {
+    if (!this.#busy) return;
+    const message = `Codex did not complete the turn within ${deadline}ms.`;
+    log.warn('turn timed out', { turnId: this.#turnId, deadline });
+
+    // Giving up locally does not stop the server, which may still be running this turn in
+    // the thread's directory. Remember its id so a late completion cannot settle the next
+    // turn, and ask it to stop so its output does not land inside that turn either. A
+    // provisional id — no `turn/started` yet — simply never matches anything.
+    if (this.#turnId !== null) this.#abandonedTurns.add(this.#turnId);
+
+    this.#ctx.emit({ kind: 'error', severity: 'turn', turnId: this.#turnId, message });
+    for (const [approvalId] of this.#approvals) this.#settleApproval(approvalId, 'denied', true);
+    if (this.#child && this.#threadId) {
+      void this.#request(CODEX_METHODS.turnInterrupt, { threadId: this.#threadId }).catch((err) => {
+        log.warn('interrupt after a timed-out turn failed', { message: (err as Error).message });
+      });
+    }
+    this.#failTurn(new Error(message));
+    // The process is still alive and can take another turn; say so, or the UI goes on
+    // showing a worker that is busy with nothing.
+    this.#emitStatus('idle', null);
+  }
+
+  #clearTurnTimer(): void {
+    if (this.#turnTimer === null) return;
+    clearTimeout(this.#turnTimer);
+    this.#turnTimer = null;
+  }
+
   #failTurn(err: Error): void {
+    this.#clearTurnTimer();
     if (!this.#busy) return;
     this.#busy = false;
     this.#ctx.emit({

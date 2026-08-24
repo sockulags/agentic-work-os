@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
@@ -121,6 +121,36 @@ describe('codexItemOutput', () => {
   });
 });
 
+/** One machine config for the adapter tests; overrides carry whatever a case is about. */
+function codexTestConfig(
+  dir: string,
+  server: string,
+  overrides: Partial<HarnessConfig> = {},
+): HarnessConfig {
+  return {
+    dataDir: dir,
+    claudeBin: process.execPath,
+    codexBin: process.execPath,
+    claudeBinArgs: [],
+    codexBinArgs: [server],
+    claudeModel: '',
+    codexModel: '',
+    host: '127.0.0.1',
+    port: 0,
+    replayMaxChars: 1_000,
+    replayMaxToolOutput: 1_000,
+    interruptGraceMs: 1_000,
+    approvalTimeoutMs: 1_000,
+    codexInitTimeoutMs: 2_000,
+    laneSetup: '',
+    laneSetupTimeoutMs: 60_000,
+    ghBin: process.execPath,
+    ghBinArgs: [],
+    ghTimeoutMs: 5_000,
+    ...overrides,
+  };
+}
+
 describe('CodexAdapter diff updates', () => {
   test('emits an empty snapshot so it supersedes a previous diff', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'awos-codex-adapter-'));
@@ -157,27 +187,7 @@ process.stdin.on('end', () => process.exit(0));`,
     );
 
     const events: AdapterEvent[] = [];
-    const config: HarnessConfig = {
-      dataDir: dir,
-      claudeBin: process.execPath,
-      codexBin: process.execPath,
-      claudeBinArgs: [],
-      codexBinArgs: [server],
-      claudeModel: '',
-      codexModel: '',
-      host: '127.0.0.1',
-      port: 0,
-      replayMaxChars: 1_000,
-      replayMaxToolOutput: 1_000,
-      interruptGraceMs: 1_000,
-      approvalTimeoutMs: 1_000,
-      codexInitTimeoutMs: 2_000,
-    laneSetup: '',
-    laneSetupTimeoutMs: 60_000,
-    ghBin: process.execPath,
-    ghBinArgs: [],
-    ghTimeoutMs: 5_000,
-    };
+    const config = codexTestConfig(dir, server);
     const adapter = new CodexAdapter({
       threadId: 'thread-1',
       cwd: dir,
@@ -199,6 +209,130 @@ process.stdin.on('end', () => process.exit(0));`,
         diffs.map((event) => event.patch),
         ['diff --git a/a.ts b/a.ts', ''],
       );
+    } finally {
+      await adapter.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('CodexAdapter turn watchdog', () => {
+  test('fails a turn whose completion never arrives and takes the next one', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-codex-watchdog-'));
+    const server = join(dir, 'server.mjs');
+    // Accepts the first turn and never ends it, which is the drift the watchdog exists
+    // for: a completion renamed, reshaped, or simply never sent. That completion then
+    // turns up while the *second* turn is in flight — a server that was slow rather than
+    // dead — so a stale completion settling the wrong turn is exercised by the same case.
+    writeFileSync(
+      server,
+      String.raw`import { writeFileSync } from 'node:fs';
+
+const emit = (value) => process.stdout.write(JSON.stringify(value) + '\n');
+let buffer = '';
+let turns = 0;
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  for (;;) {
+    const newline = buffer.indexOf('\n');
+    if (newline < 0) break;
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    const message = JSON.parse(line);
+    if (message.method === 'initialize') emit({ id: message.id, result: {} });
+    if (message.method === 'thread/start') {
+      emit({ id: message.id, result: { thread: { id: 'thread-1' } } });
+    }
+    if (message.method === 'turn/interrupt') {
+      // Recorded, and deliberately not acted on: a server that ignores the interrupt is
+      // the case the abandoned-turn bookkeeping still has to survive.
+      writeFileSync(new URL('interrupted', import.meta.url), '');
+      emit({ id: message.id, result: {} });
+    }
+    if (message.method === 'turn/start') {
+      turns += 1;
+      const turnId = 'turn-' + turns;
+      emit({ id: message.id, result: { turn: { id: turnId } } });
+      if (turns === 1) {
+        emit({ method: 'turn/started', params: { turn: { id: turnId } } });
+        emit({
+          id: 9001,
+          method: 'item/permissions/requestApproval',
+          params: { itemId: 'item-1', type: 'exec', command: ['echo', 'hi'] },
+        });
+      } else {
+        // Turn 1 finally reports in, after the next turn has been accepted and before it
+        // has even been given its own id.
+        emit({ method: 'turn/completed', params: { turn: { id: 'turn-1', status: 'completed' } } });
+        emit({ method: 'turn/started', params: { turn: { id: turnId } } });
+        emit({
+          method: 'turn/completed',
+          params: { turn: { id: turnId, status: 'completed', usage: { inputTokens: 7 } } },
+        });
+      }
+    }
+  }
+});
+process.stdin.on('end', () => process.exit(0));`,
+      'utf8',
+    );
+
+    const events: AdapterEvent[] = [];
+    const config = codexTestConfig(dir, server, { codexTurnTimeoutMs: 120 });
+    const adapter = new CodexAdapter({
+      threadId: 'thread-1',
+      cwd: dir,
+      config,
+      permissionMode: 'default',
+      permissionBridge: {} as AdapterContext['permissionBridge'],
+      resumeSessionId: null,
+      emit: (event) => events.push(event),
+      onSessionId: () => {},
+    });
+
+    const of = <K extends AdapterEvent['kind']>(
+      kind: K,
+    ): Array<Extract<AdapterEvent, { kind: K }>> =>
+      events.filter(
+        (event): event is Extract<AdapterEvent, { kind: K }> => event.kind === kind,
+      );
+
+    try {
+      const startedAt = Date.now();
+      await assert.rejects(
+        adapter.sendTurn('hang forever'),
+        /did not complete the turn within 120ms/,
+      );
+      // The wait came from this deadline rather than the ten-minute default; spawning the
+      // fake server accounts for most of what is left of this window.
+      const elapsed = Date.now() - startedAt;
+      assert.ok(elapsed < 2_000, `the turn should fail on its own deadline, took ${elapsed}ms`);
+
+      assert.equal(of('error').length, 1);
+      assert.equal(of('error')[0]?.severity, 'turn');
+
+      // The turn is recorded as a failure, never as a completion.
+      assert.equal(of('turn.completed').length, 1);
+      assert.equal(of('turn.completed')[0]?.reason, 'error');
+      assert.match(of('turn.completed')[0]?.error ?? '', /did not complete the turn/);
+
+      // The approval the server is blocked on is released with the turn that owns it.
+      assert.equal(of('approval.resolved').length, 1);
+      assert.equal(of('approval.resolved')[0]?.behavior, 'deny');
+      assert.equal(of('approval.resolved')[0]?.auto, true);
+
+      assert.equal(adapter.busy, false);
+
+      // The next turn starts before the abandoned one reports in. What must settle it is
+      // its own completion — carrying the usage only it sends — and not turn 1's, which
+      // lands in the middle of it.
+      await adapter.sendTurn('and now a normal one');
+      assert.equal(of('usage').length, 1);
+      assert.equal(of('usage')[0]?.inputTokens, 7);
+      assert.equal(of('turn.completed').length, 2);
+      assert.equal(of('turn.completed')[1]?.reason, 'completed');
+      assert.ok(existsSync(join(dir, 'interrupted')), 'the abandoned turn should be interrupted');
     } finally {
       await adapter.stop();
       rmSync(dir, { recursive: true, force: true });
