@@ -20,8 +20,9 @@ import type {
   IssueOpenResult,
   ProjectOverview,
   ProjectIssueDetail,
+  RecoveryActionRequest,
 } from '@awos/protocol';
-import type { ClientRequest } from '@awos/protocol';
+import type { ClientRequest, ServerResponseBody } from '@awos/protocol';
 import { HarnessClient, resolveClientOptions, type ConnectionStatus } from '@/lib/client';
 import { TranscriptFolder } from '@/lib/transcript';
 import { foldArtifacts } from '@/lib/artifacts';
@@ -573,6 +574,70 @@ export function useHarness() {
   );
 
   /**
+   * Adopt the core's typed recovery reply without projecting a second local state
+   * machine. Push events remain the durable update path; this makes the synchronous RPC
+   * reply visible immediately when the panel is used against a quiet connection.
+   */
+  const handleRecoveryResponse = useCallback((threadId: string, response: ServerResponseBody) => {
+    if (response.type === 'recovery.conflict') {
+      setNotice({ level: 'warn', message: response.conflict.detail });
+      return;
+    }
+    if (response.type !== 'recovery' || response.threadId !== threadId || response.cycle === null) return;
+    const cycle = response.cycle;
+    setRuntime((previous) => {
+      if (previous?.threadId !== threadId) return previous;
+      const recovery = [
+        ...previous.recovery.filter((previousCycle) => previousCycle.cycleId !== cycle.cycleId),
+        cycle,
+      ];
+      return { ...previous, recovery };
+    });
+  }, []);
+
+  /** Ask the core to reserve the next recovery worker run at the displayed log head. */
+  const startRecovery = useCallback(
+    async (input: {
+      transitionId: string;
+      expectedAttempt: number;
+      expectedHead: number;
+      agent: AgentId;
+      cycleId?: string;
+    }) => {
+      const threadId = activeThreadRef.current;
+      if (threadId === null) return;
+      try {
+        const response = await client.request({ type: 'recovery.start', threadId, ...input });
+        handleRecoveryResponse(threadId, response);
+      } catch (error) {
+        setNotice({
+          level: 'warn',
+          message: error instanceof Error ? error.message : 'The recovery worker could not be started.',
+        });
+      }
+    },
+    [client, handleRecoveryResponse],
+  );
+
+  /** Submit one typed human recovery action; the core validates legality and freshness. */
+  const applyRecoveryAction = useCallback(
+    async (action: RecoveryActionRequest) => {
+      const threadId = activeThreadRef.current;
+      if (threadId === null) return;
+      try {
+        const response = await client.request({ type: 'recovery.action', threadId, action });
+        handleRecoveryResponse(threadId, response);
+      } catch (error) {
+        setNotice({
+          level: 'warn',
+          message: error instanceof Error ? error.message : 'The recovery action was not accepted by the core.',
+        });
+      }
+    },
+    [client, handleRecoveryResponse],
+  );
+
+  /**
    * Ask what the gate would decide about a lane right now.
    *
    * Explicit, because the answer moves whenever the lane does and nothing pushes that.
@@ -865,6 +930,8 @@ export function useHarness() {
     recordEvidence,
     retainContext,
     amendRetained,
+    startRecovery,
+    applyRecoveryAction,
     dismissNotice: () => setNotice(null),
     openThread,
     createThread,
