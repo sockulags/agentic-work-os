@@ -19,6 +19,7 @@ function effective(overrides: Partial<EffectiveWorkspace> = {}): EffectiveWorksp
     roles: [],
     steps: [],
     routes: [],
+    guardrails: [],
     origins: {
       name: 'shared',
       repository: 'shared',
@@ -30,6 +31,7 @@ function effective(overrides: Partial<EffectiveWorkspace> = {}): EffectiveWorksp
       roles: 'default',
       steps: 'default',
       routes: 'default',
+      guardrails: 'default',
     },
     sources: ['.awos/workspace.json', '.awos/local/workspace.json'],
     ...overrides,
@@ -131,7 +133,33 @@ describe('WorkspacePanel', () => {
     // The override is the one anybody hunting a surprising value needs to find.
     expect(screen.getAllByText('shared').length).toBeGreaterThan(0);
     expect(screen.getByText('local')).toBeTruthy();
-    expect(screen.getByText('default')).toBeTruthy();
+    expect(screen.getAllByText('default').length).toBeGreaterThan(0);
+  });
+
+  test('shows guardrail ids, attachments, references, and shared origin without an editor', () => {
+    render({
+      status: 'ok',
+      problems: [],
+      workspace: effective({
+        guardrails: [{
+          id: 'visual-rubric',
+          kind: 'model-rubric',
+          attach: { from: 'implement', to: 'review' },
+          enforcement: 'required',
+          allowOverride: false,
+          parameters: { expectationItem: 'prototype.dashboard', evaluatorProfile: 'independent-model-rubric' },
+          correction: { maxRuns: 2, onExhausted: 'waiting-for-human' },
+        }],
+        origins: { ...effective().origins, guardrails: 'shared' },
+      }),
+    });
+
+    expect(screen.getByText('visual-rubric')).toBeTruthy();
+    expect(screen.getByText(/implement → review/)).toBeTruthy();
+    expect(screen.getByText(/prototype\.dashboard/)).toBeTruthy();
+    expect(screen.getByText(/evaluator capability: independent-model-rubric/)).toBeTruthy();
+    expect(screen.getAllByText('shared').length).toBeGreaterThan(0);
+    expect(screen.queryByRole('textbox')).toBeNull();
   });
 
   test('shows unresolved values without hiding the settings that did resolve', () => {
@@ -170,6 +198,23 @@ describe('WorkspacePanel', () => {
     expect(screen.getByText(/Schema version 99/)).toBeTruthy();
     // The location is half the fix: which file, and where in it.
     expect(screen.getByText(/\.awos\/workspace\.json · version/)).toBeTruthy();
+  });
+
+  test('keeps invalid schema-v3 guardrails visible instead of silently resolving', () => {
+    render({
+      status: 'invalid',
+      root: CWD,
+      problems: [{
+        severity: 'error',
+        file: '.awos/workspace.json',
+        path: 'guardrails[0].parameters.expectationItem',
+        message: 'No pinned expectation registry is available to validate "scope". Supply the concrete expectation item registry before resolving this guardrail.',
+      }],
+    });
+
+    expect(screen.getByText(/does not load/)).toBeTruthy();
+    expect(screen.getByText(/guardrails\[0\]\.parameters\.expectationItem/)).toBeTruthy();
+    expect(screen.getByText(/No pinned expectation registry/)).toBeTruthy();
   });
 
   test('an undeclared directory is told what a declaration looks like', () => {

@@ -3,6 +3,7 @@ import {
   WORKSPACE_FILE,
   WORKSPACE_SCHEMA_VERSION,
   type EffectiveWorkspace,
+  type WorkspaceGuardrail,
   type WorkspaceOrigin,
   type WorkspaceProblem,
 } from '@awos/protocol';
@@ -149,6 +150,22 @@ function Settings({ workspace }: { workspace: EffectiveWorkspace }): React.JSX.E
         )}
       </Row>
 
+      <Row label="Guardrails" origin={workspace.origins.guardrails}>
+        {workspace.guardrails.length === 0 ? (
+          <span className="text-muted-foreground">none declared</span>
+        ) : (
+          <ul className="space-y-1">
+            {workspace.guardrails.map((guardrail) => (
+              <li key={guardrail.id}>
+                <span className="font-mono">{guardrail.id}</span> · {guardrail.kind} · {guardrail.enforcement}
+                <span className="block text-muted-foreground">{attachmentText(guardrail)}</span>
+                <span className="block text-muted-foreground">{referenceText(guardrail)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Row>
+
       <Row label="Context" origin={workspace.origins.context}>
         {workspace.context.references.length === 0 && workspace.context.notes.trim() === '' ? (
           <span className="text-muted-foreground">none declared</span>
@@ -165,6 +182,20 @@ function Settings({ workspace }: { workspace: EffectiveWorkspace }): React.JSX.E
       </Row>
     </dl>
   );
+}
+
+function attachmentText(guardrail: WorkspaceGuardrail): string {
+  return 'step' in guardrail.attach
+    ? `step ${guardrail.attach.step}`
+    : `${guardrail.attach.from} → ${guardrail.attach.to}`;
+}
+
+function referenceText(guardrail: WorkspaceGuardrail): string {
+  if ('checks' in guardrail.parameters) return `checks: ${guardrail.parameters.checks.join(', ')}`;
+  if ('evaluatorProfile' in guardrail.parameters) {
+    return `expectation: ${guardrail.parameters.expectationItem}; evaluator capability: ${guardrail.parameters.evaluatorProfile}`;
+  }
+  return `expectation: ${guardrail.parameters.expectationItem}`;
 }
 
 /**

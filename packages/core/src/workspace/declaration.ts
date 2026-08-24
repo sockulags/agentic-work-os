@@ -1,11 +1,21 @@
-import { AGENT_IDS, WORKSPACE_SCHEMA_VERSION } from '@awos/protocol';
+import {
+  AGENT_IDS,
+  WORKSPACE_LEGACY_INTEGRATION_GUARDRAIL_ID,
+  WORKSPACE_SCHEMA_VERSION,
+} from '@awos/protocol';
 import type {
   AgentId,
+  EvidenceKind,
   VerifyCommand,
   WorkspaceProblem,
   WorkspaceRole,
   WorkspaceRoute,
   WorkspaceStep,
+  WorkspaceGuardrailAttachment,
+  WorkspaceGuardrailConfig,
+  WorkspaceGuardrailKind,
+  WorkspaceGuardrailParameters,
+  WorkspacePixelCaptureContract,
 } from '@awos/protocol';
 
 /**
@@ -34,6 +44,7 @@ export interface WorkspaceDeclaration {
   roles?: WorkspaceRole[];
   steps?: WorkspaceStep[];
   routes?: WorkspaceRoute[];
+  guardrails?: WorkspaceGuardrailConfig[];
 }
 
 export interface ParsedDeclaration {
@@ -54,6 +65,10 @@ export interface ParseOptions {
    * identity would just be a second place for that identity to drift.
    */
   standalone: boolean;
+  /** Known pinned expectation ids; required when a guardrail selects an expectation item. */
+  expectationItemIds?: readonly string[];
+  /** Registered independent evaluator capability ids; required by model-rubric guardrails. */
+  evaluatorProfileIds?: readonly string[];
 }
 
 const TOP_LEVEL_KEYS = [
@@ -68,6 +83,7 @@ const TOP_LEVEL_KEYS = [
   'roles',
   'steps',
   'routes',
+  'guardrails',
 ] as const;
 
 const MAX_NAME_CHARS = 80;
@@ -76,8 +92,22 @@ const MAX_REFERENCES = 20;
 /** Lowercase and hyphenated, because later gates will name these on a command line. */
 const STABLE_ID_RE = /^[a-z0-9][a-z0-9-]*$/;
 const VERIFY_NAME_RE = STABLE_ID_RE;
+const EXPECTATION_ID_RE = /^[a-z0-9][a-z0-9.-]*$/;
 const GITHUB_REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
-const SUPPORTED_SCHEMA_VERSIONS = [1, WORKSPACE_SCHEMA_VERSION] as const;
+const SUPPORTED_SCHEMA_VERSIONS = [1, 2, WORKSPACE_SCHEMA_VERSION] as const;
+const ROUTING_SCHEMA_VERSIONS = [2, WORKSPACE_SCHEMA_VERSION] as const;
+const GUARDRAIL_KINDS = [
+  'verification',
+  'evidence-present',
+  'mandatory-answer',
+  'human-attestation',
+  'pixel-diff',
+  'model-rubric',
+] as const satisfies readonly WorkspaceGuardrailKind[];
+const GUARDRAIL_DEFAULT_MAX_RUNS = 2;
+const GUARDRAIL_MAX_RUNS = 5;
+const GUARDRAIL_DEFAULT_ON_EXHAUSTED = 'waiting-for-human' as const;
+const EVIDENCE_KINDS = ['command', 'diff', 'artifact', 'approval', 'link', 'note'] as const satisfies readonly EvidenceKind[];
 
 export function parseDeclaration(raw: string, options: ParseOptions): ParsedDeclaration {
   const problems: WorkspaceProblem[] = [];
@@ -121,7 +151,7 @@ export function parseDeclaration(raw: string, options: ParseOptions): ParsedDecl
     fail(
       'version',
       `Schema version ${version} is not supported. This build understands version ` +
-        `${SUPPORTED_SCHEMA_VERSIONS.join(' and ')}; upgrade Agentic Work OS or lower the version.`,
+        `${formatNaturalList(SUPPORTED_SCHEMA_VERSIONS)}; upgrade Agentic Work OS or lower the version.`,
     );
   } else {
     declaration.version = version;
@@ -246,7 +276,9 @@ export function parseDeclaration(raw: string, options: ParseOptions): ParsedDecl
   }
 
   const integration = parsed['integration'];
-  if (integration !== undefined) {
+  if (integration !== undefined && !options.standalone && version === WORKSPACE_SCHEMA_VERSION) {
+    fail('integration', 'Local schema-v3 declarations cannot override integration guardrail policy.');
+  } else if (integration !== undefined) {
     if (!isRecord(integration)) {
       fail('integration', '"integration" must be an object.');
     } else {
@@ -337,7 +369,8 @@ export function parseDeclaration(raw: string, options: ParseOptions): ParsedDecl
     }
   }
 
-  parseRouting(parsed, declaration, version === WORKSPACE_SCHEMA_VERSION, options, fail);
+  parseRouting(parsed, declaration, version === 2 || version === WORKSPACE_SCHEMA_VERSION, options, fail);
+  parseGuardrails(parsed, declaration, version === WORKSPACE_SCHEMA_VERSION, options, fail);
 
   return {
     declaration: problems.some((problem) => problem.severity === 'error') ? null : declaration,
@@ -350,7 +383,7 @@ export function parseDeclaration(raw: string, options: ParseOptions): ParsedDecl
 function parseRouting(
   parsed: Record<string, unknown>,
   declaration: WorkspaceDeclaration,
-  version2: boolean,
+  routingEnabled: boolean,
   options: ParseOptions,
   fail: (path: string, message: string) => void,
 ): void {
@@ -358,10 +391,10 @@ function parseRouting(
   const hasRouting = routingKeys.some((key) => parsed[key] !== undefined);
   if (!hasRouting) return;
 
-  if (!version2) {
+  if (!routingEnabled) {
     for (const key of routingKeys) {
       if (parsed[key] !== undefined) {
-        fail(key, `"${key}" is only supported by schema version ${WORKSPACE_SCHEMA_VERSION}.`);
+        fail(key, `"${key}" is only supported by schema versions ${formatNaturalList(ROUTING_SCHEMA_VERSIONS)}.`);
       }
     }
     return;
@@ -393,6 +426,395 @@ function parseRouting(
     const routes = parseRoutes(parsed.routes, stepIds, fail);
     if (routes !== undefined) declaration.routes = routes;
   }
+}
+
+function parseGuardrails(
+  parsed: Record<string, unknown>,
+  declaration: WorkspaceDeclaration,
+  schema3: boolean,
+  options: ParseOptions,
+  fail: (path: string, message: string) => void,
+): void {
+  const raw = parsed.guardrails;
+  if (raw === undefined) return;
+
+  if (!schema3) {
+    fail('guardrails', `"guardrails" is only supported by schema version ${WORKSPACE_SCHEMA_VERSION}.`);
+    return;
+  }
+  if (!options.standalone) {
+    fail('guardrails', 'Local overrides cannot define "guardrails"; guardrails belong to the shared workspace declaration.');
+    return;
+  }
+  if (!Array.isArray(raw)) {
+    fail('guardrails', '"guardrails" must be an array of guardrail objects.');
+    return;
+  }
+
+  const steps = new Map((declaration.steps ?? []).map((step) => [step.id, step]));
+  const verifyNames = new Set((declaration.verify ?? []).map((entry) => entry.name));
+  const seenIds = new Set<string>();
+  const seenAttachments = new Set<string>();
+  const guardrails: WorkspaceGuardrailConfig[] = [];
+
+  raw.forEach((entry, index) => {
+    const at = `guardrails[${index}]`;
+    if (!isRecord(entry)) {
+      fail(at, 'Each guardrail must be an object with "id", "kind", "attach", "enforcement", and "parameters".');
+      return;
+    }
+
+    rejectUnknown(entry, ['id', 'kind', 'attach', 'enforcement', 'allowOverride', 'parameters', 'correction'], at, fail);
+    const id = parseStableId(entry.id, `${at}.id`, 'guardrail', fail);
+    const duplicateId = id !== null && seenIds.has(id);
+    if (duplicateId) fail(`${at}.id`, `Two guardrails are both called "${id}".`);
+    else if (id !== null) seenIds.add(id);
+    if (id === WORKSPACE_LEGACY_INTEGRATION_GUARDRAIL_ID) {
+      fail(`${at}.id`, `"${id}" is reserved for legacy integration verification and cannot be declared explicitly.`);
+    }
+
+    const kindValue = entry.kind;
+    let kind: WorkspaceGuardrailKind | null = null;
+    if (typeof kindValue !== 'string' || !(GUARDRAIL_KINDS as readonly string[]).includes(kindValue)) {
+      fail(`${at}.kind`, `Unknown guardrail kind "${String(kindValue)}". Known kinds: ${GUARDRAIL_KINDS.join(', ')}.`);
+    } else {
+      kind = kindValue as WorkspaceGuardrailKind;
+    }
+
+    const attach = parseGuardrailAttachment(entry.attach, steps, `${at}.attach`, fail);
+    if (attach !== null) {
+      const attachmentKey = guardrailAttachmentKey(attach);
+      if (seenAttachments.has(attachmentKey)) {
+        fail(`${at}.attach`, `The attachment ${formatGuardrailAttachment(attach)} is already used by another guardrail.`);
+      } else {
+        seenAttachments.add(attachmentKey);
+      }
+    }
+    const enforcement = parseEnforcement(entry.enforcement, `${at}.enforcement`, fail);
+
+    let allowOverride = false;
+    if (entry.allowOverride !== undefined) {
+      if (typeof entry.allowOverride !== 'boolean') {
+        fail(`${at}.allowOverride`, '"allowOverride" must be true or false.');
+      } else {
+        allowOverride = entry.allowOverride;
+      }
+    }
+    if (allowOverride && enforcement !== null && enforcement !== 'required') {
+      fail(`${at}.allowOverride`, 'Only a required guardrail may allow an explicit override; advisory and absolute guardrails cannot be overridden.');
+    }
+
+    const producingProfiles = profilesForAttachments(attach, steps);
+    const parameters = kind === null
+      ? null
+      : parseGuardrailParameters(
+          kind,
+          entry.parameters,
+          `${at}.parameters`,
+          verifyNames,
+          producingProfiles,
+          options,
+          fail,
+        );
+    if (kind === 'model-rubric' && enforcement === 'absolute') {
+      fail(`${at}.enforcement`, 'A model-rubric guardrail can be advisory or required, never absolute.');
+    }
+    if (kind === 'pixel-diff' && enforcement === 'absolute' && parameters !== null) {
+      if (!('capture' in parameters) || parameters.capture === undefined) {
+        fail(`${at}.parameters.capture`, 'An absolute pixel-diff guardrail needs a complete pinned capture contract.');
+      }
+    }
+
+    const correction = parseGuardrailCorrection(entry.correction, `${at}.correction`, fail);
+    if (id === null || duplicateId || kind === null || attach === null || enforcement === null || parameters === null || correction === null) {
+      return;
+    }
+    guardrails.push({ id, kind, attach, enforcement, allowOverride, parameters, correction });
+  });
+
+  declaration.guardrails = guardrails;
+}
+
+function parseGuardrailAttachment(
+  raw: unknown,
+  steps: Map<string, WorkspaceStep>,
+  at: string,
+  fail: (path: string, message: string) => void,
+): WorkspaceGuardrailAttachment | null {
+  if (!isRecord(raw)) {
+    fail(at, '"attach" must be exactly one step or transition object, not an array or another value.');
+    return null;
+  }
+
+  rejectUnknown(raw, ['step', 'from', 'to'], at, fail);
+
+  const hasStep = raw.step !== undefined;
+  const hasTransition = raw.from !== undefined || raw.to !== undefined;
+  if (hasStep && hasTransition) {
+    fail(at, 'An attachment must name exactly one step or exactly one transition, not both.');
+    return null;
+  }
+
+  if (hasStep) {
+    const step = parseStableId(raw.step, `${at}.step`, 'attachment step', fail);
+    if (step === null) return null;
+    if (!steps.has(step)) {
+      fail(`${at}.step`, `Unknown step "${step}". Declare it under "steps" first.`);
+      return null;
+    }
+    return { step };
+  }
+
+  const from = parseStableId(raw.from, `${at}.from`, 'transition source step', fail);
+  const to = parseStableId(raw.to, `${at}.to`, 'transition target step', fail);
+  if (from === null || to === null) return null;
+  if (!steps.has(from)) fail(`${at}.from`, `Unknown step "${from}". Declare it under "steps" first.`);
+  if (!steps.has(to)) fail(`${at}.to`, `Unknown step "${to}". Declare it under "steps" first.`);
+  if (from === to) fail(`${at}.to`, 'A transition attachment cannot go from a step to itself.');
+  if (!steps.has(from) || !steps.has(to) || from === to) return null;
+  return { from, to };
+}
+
+function profilesForAttachments(
+  attachment: WorkspaceGuardrailAttachment | null,
+  steps: Map<string, WorkspaceStep>,
+): Set<string> {
+  const profiles = new Set<string>();
+  const ids = attachment === null
+    ? []
+    : 'step' in attachment
+      ? [attachment.step]
+      : [attachment.from, attachment.to];
+  for (const id of ids) {
+    for (const worker of steps.get(id)?.workers ?? []) profiles.add(worker);
+  }
+  return profiles;
+}
+
+function guardrailAttachmentKey(attachment: WorkspaceGuardrailAttachment): string {
+  return 'step' in attachment ? `step:${attachment.step}` : `transition:${attachment.from}->${attachment.to}`;
+}
+
+function formatGuardrailAttachment(attachment: WorkspaceGuardrailAttachment): string {
+  return 'step' in attachment
+    ? `step "${attachment.step}"`
+    : `transition "${attachment.from}" -> "${attachment.to}"`;
+}
+
+function parseEnforcement(
+  value: unknown,
+  path: string,
+  fail: (path: string, message: string) => void,
+): WorkspaceGuardrailConfig['enforcement'] | null {
+  if (value === 'advisory' || value === 'required' || value === 'absolute') return value;
+  fail(path, '"enforcement" must be advisory, required, or absolute.');
+  return null;
+}
+
+function parseGuardrailParameters(
+  kind: WorkspaceGuardrailKind,
+  raw: unknown,
+  at: string,
+  verifyNames: Set<string>,
+  producingProfiles: Set<string>,
+  options: ParseOptions,
+  fail: (path: string, message: string) => void,
+): WorkspaceGuardrailParameters | null {
+  if (!isRecord(raw)) {
+    fail(at, '"parameters" must be an object for the selected guardrail kind.');
+    return null;
+  }
+
+  if (kind === 'verification') {
+    rejectUnknown(raw, ['checks'], at, fail);
+    const checks = raw.checks;
+    if (!Array.isArray(checks) || checks.length === 0) {
+      fail(`${at}.checks`, 'Verification guardrails need a non-empty array of named checks.');
+      return null;
+    }
+    const seen = new Set<string>();
+    let valid = true;
+    const names: string[] = [];
+    checks.forEach((entry, index) => {
+      const path = `${at}.checks[${index}]`;
+      if (typeof entry !== 'string' || !VERIFY_NAME_RE.test(entry)) {
+        fail(path, 'Each verification guardrail check must be a lowercase verification name.');
+        valid = false;
+        return;
+      }
+      if (!verifyNames.has(entry)) {
+        fail(path, `Unknown verification check "${entry}". Declare it under "verify" first.`);
+        valid = false;
+      }
+      if (seen.has(entry)) {
+        fail(path, `Verification check "${entry}" is listed more than once.`);
+        valid = false;
+        return;
+      }
+      seen.add(entry);
+      names.push(entry);
+    });
+    return valid ? { checks: names } : null;
+  }
+
+  const allowed = kind === 'mandatory-answer'
+    ? ['expectationItem', 'authority']
+    : kind === 'human-attestation'
+      ? ['expectationItem', 'authority']
+      : kind === 'pixel-diff'
+        ? ['expectationItem', 'capture']
+        : kind === 'model-rubric'
+          ? ['expectationItem', 'evaluatorProfile']
+          : kind === 'evidence-present'
+            ? ['expectationItem', 'evidenceKind']
+          : ['expectationItem'];
+  rejectUnknown(raw, allowed, at, fail);
+
+  const expectationItem = parseExpectationItem(raw.expectationItem, `${at}.expectationItem`, options, fail);
+  if (expectationItem === null) return null;
+
+  if (kind === 'evidence-present') {
+    if (raw.evidenceKind === undefined) return { expectationItem };
+    if (!(EVIDENCE_KINDS as readonly string[]).includes(raw.evidenceKind as string)) {
+      fail(`${at}.evidenceKind`, `Unknown evidence kind "${String(raw.evidenceKind)}". Known kinds: ${EVIDENCE_KINDS.join(', ')}.`);
+      return null;
+    }
+    return { expectationItem, evidenceKind: raw.evidenceKind as EvidenceKind };
+  }
+
+  if (kind === 'mandatory-answer') {
+    const authority = raw.authority;
+    if (authority !== undefined && authority !== 'user') {
+      fail(`${at}.authority`, 'A mandatory-answer authority must be "user".');
+      return null;
+    }
+    return authority === undefined ? { expectationItem } : { expectationItem, authority };
+  }
+
+  if (kind === 'human-attestation') {
+    if (raw.authority !== 'user') {
+      fail(`${at}.authority`, 'A human-attestation guardrail must name the authorized "user" authority.');
+      return null;
+    }
+    return { expectationItem, authority: 'user' };
+  }
+
+  if (kind === 'pixel-diff') {
+    if (raw.capture === undefined) return { expectationItem };
+    const capture = parsePixelCapture(raw.capture, `${at}.capture`, fail);
+    return capture === null ? null : { expectationItem, capture };
+  }
+
+  const evaluatorProfile = parseStableId(raw.evaluatorProfile, `${at}.evaluatorProfile`, 'evaluator profile', fail);
+  if (evaluatorProfile === null) return null;
+  if (options.evaluatorProfileIds === undefined) {
+    fail(
+      `${at}.evaluatorProfile`,
+      `No evaluator capability registry is available to validate "${evaluatorProfile}". ` +
+        'Supply registered independent evaluator capabilities before resolving this guardrail.',
+    );
+    return null;
+  }
+  if (!options.evaluatorProfileIds.includes(evaluatorProfile)) {
+    fail(`${at}.evaluatorProfile`, `Unknown evaluator profile "${evaluatorProfile}". Use a registered independent evaluator capability.`);
+    return null;
+  }
+  if (isWorkerOrModelSelector(evaluatorProfile) || producingProfiles.has(evaluatorProfile)) {
+    fail(`${at}.evaluatorProfile`, 'A model-rubric evaluator must be an independent evaluator capability, not a producing worker profile.');
+    return null;
+  }
+  return { expectationItem, evaluatorProfile };
+}
+
+function isWorkerOrModelSelector(value: string): boolean {
+  if ((AGENT_IDS as readonly string[]).includes(value)) return true;
+  return /^(openai-compatible|openai|anthropic|google|claude|codex|qwen|llama|gemini|gpt|o[1-9])(?:[-.]|$)/i.test(value);
+}
+
+function parseExpectationItem(
+  value: unknown,
+  path: string,
+  options: ParseOptions,
+  fail: (path: string, message: string) => void,
+): string | null {
+  if (typeof value !== 'string' || !EXPECTATION_ID_RE.test(value)) {
+    fail(path, 'An expectation item reference must be a lowercase stable id.');
+    return null;
+  }
+  if (options.expectationItemIds === undefined) {
+    fail(
+      path,
+      `No pinned expectation registry is available to validate "${value}". ` +
+        'Supply the concrete expectation item registry before resolving this guardrail.',
+    );
+    return null;
+  }
+  if (!options.expectationItemIds.includes(value)) {
+    fail(path, `Unknown expectation item "${value}". It is not registered in the pinned expectation set.`);
+    return null;
+  }
+  return value;
+}
+
+function parsePixelCapture(
+  raw: unknown,
+  at: string,
+  fail: (path: string, message: string) => void,
+): WorkspacePixelCaptureContract | null {
+  if (!isRecord(raw)) {
+    fail(at, 'A pixel capture contract must be an object.');
+    return null;
+  }
+  rejectUnknown(raw, ['browser', 'runtime', 'viewport', 'dpr', 'fonts', 'data', 'animation', 'region'], at, fail);
+  let valid = true;
+  const textFields = ['browser', 'runtime', 'viewport', 'fonts', 'data', 'animation', 'region'] as const;
+  const values = {} as Record<(typeof textFields)[number], string>;
+  for (const field of textFields) {
+    const value = raw[field];
+    if (typeof value !== 'string' || value.trim() === '') {
+      fail(`${at}.${field}`, `A pixel capture contract needs a non-empty ${field} identity.`);
+      valid = false;
+    } else {
+      values[field] = value.trim();
+    }
+  }
+  const dpr = raw.dpr;
+  if (typeof dpr !== 'number' || !Number.isFinite(dpr) || dpr <= 0) {
+    fail(`${at}.dpr`, 'A pixel capture DPR must be a positive number.');
+    valid = false;
+  }
+  if (typeof values.viewport === 'string' && !/^\d+x\d+$/.test(values.viewport)) {
+    fail(`${at}.viewport`, 'A pixel capture viewport must use WIDTHxHEIGHT, such as 1440x900.');
+    valid = false;
+  }
+  return valid ? { ...values, dpr: dpr as number } : null;
+}
+
+function parseGuardrailCorrection(
+  raw: unknown,
+  at: string,
+  fail: (path: string, message: string) => void,
+): { maxRuns: number; onExhausted: 'waiting-for-human' | 'blocked' } | null {
+  if (raw === undefined) return { maxRuns: GUARDRAIL_DEFAULT_MAX_RUNS, onExhausted: GUARDRAIL_DEFAULT_ON_EXHAUSTED };
+  if (!isRecord(raw)) {
+    fail(at, '"correction" must be an object.');
+    return null;
+  }
+  rejectUnknown(raw, ['maxRuns', 'onExhausted'], at, fail);
+  const maxRuns = raw.maxRuns === undefined ? GUARDRAIL_DEFAULT_MAX_RUNS : raw.maxRuns;
+  const onExhausted = raw.onExhausted === undefined ? GUARDRAIL_DEFAULT_ON_EXHAUSTED : raw.onExhausted;
+  let valid = true;
+  if (typeof maxRuns !== 'number' || !Number.isInteger(maxRuns) || maxRuns < 0 || maxRuns > GUARDRAIL_MAX_RUNS) {
+    fail(`${at}.maxRuns`, `"maxRuns" must be a whole number from 0 through ${GUARDRAIL_MAX_RUNS}.`);
+    valid = false;
+  }
+  if (onExhausted !== 'waiting-for-human' && onExhausted !== 'blocked') {
+    fail(`${at}.onExhausted`, '"onExhausted" must be waiting-for-human or blocked.');
+    valid = false;
+  }
+  return valid
+    ? { maxRuns: maxRuns as number, onExhausted: onExhausted as 'waiting-for-human' | 'blocked' }
+    : null;
 }
 
 function parseRoles(
@@ -655,4 +1077,10 @@ function relativePathProblem(value: unknown): string | null {
   }
   if (path.split('/').includes('..')) return 'Must stay inside the workspace root.';
   return null;
+}
+
+function formatNaturalList(values: readonly number[]): string {
+  if (values.length <= 1) return values.join('');
+  if (values.length === 2) return `${values[0]} and ${values[1]}`;
+  return `${values.slice(0, -1).join(', ')} and ${values[values.length - 1]}`;
 }

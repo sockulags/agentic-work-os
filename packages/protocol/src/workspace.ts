@@ -16,6 +16,7 @@
  * the shape both ends agree on.
  */
 
+import type { EvidenceKind, Enforcement } from './evidence.js';
 import type { AgentId, WorkerProfileId } from './events.js';
 
 /**
@@ -26,13 +27,16 @@ import type { AgentId, WorkerProfileId } from './events.js';
  * valid to an older validator, and silently running with half a contract is worse than
  * saying which build you need.
  */
-export const WORKSPACE_SCHEMA_VERSION = 2;
+export const WORKSPACE_SCHEMA_VERSION = 3;
 
 /** Path of the shared declaration, relative to the workspace root. */
 export const WORKSPACE_FILE = '.awos/workspace.json';
 
 /** Path of the local override, relative to the workspace root. Never committed. */
 export const WORKSPACE_LOCAL_FILE = '.awos/local/workspace.json';
+
+/** Stable identity used when legacy integration checks are projected into v3. */
+export const WORKSPACE_LEGACY_INTEGRATION_GUARDRAIL_ID = 'workspace-integration';
 
 /** How much of `context.notes` a turn's prompt will carry. */
 export const WORKSPACE_NOTES_MAX_CHARS = 2_000;
@@ -109,6 +113,102 @@ export interface WorkspaceRoute {
   step: string;
 }
 
+/** The closed set of guardrails a workspace may select. */
+export type WorkspaceGuardrailKind =
+  | 'verification'
+  | 'evidence-present'
+  | 'mandatory-answer'
+  | 'human-attestation'
+  | 'pixel-diff'
+  | 'model-rubric';
+
+/** Where a guardrail applies without creating a workflow edge. */
+export type WorkspaceGuardrailAttachment =
+  | { step: string }
+  | { from: string; to: string };
+
+export type WorkspaceGuardrailExhaustedAction = 'waiting-for-human' | 'blocked';
+
+/** The bounded correction setting carried by an effective guardrail. */
+export interface WorkspaceGuardrailCorrection {
+  maxRuns: number;
+  onExhausted: WorkspaceGuardrailExhaustedAction;
+}
+
+/** Capture inputs that must be fixed for an exact-pixel guardrail. */
+export interface WorkspacePixelCaptureContract {
+  browser: string;
+  runtime: string;
+  viewport: string;
+  dpr: number;
+  fonts: string;
+  data: string;
+  animation: string;
+  region: string;
+}
+
+export interface WorkspaceVerificationParameters {
+  checks: string[];
+}
+
+export interface WorkspaceExpectationParameters {
+  expectationItem: string;
+}
+
+export interface WorkspaceEvidencePresentParameters extends WorkspaceExpectationParameters {
+  /** Optional evidence type selector; the expectation item remains the pinned identity. */
+  evidenceKind?: EvidenceKind;
+}
+
+export interface WorkspaceMandatoryAnswerParameters extends WorkspaceExpectationParameters {
+  authority?: 'user';
+}
+
+export interface WorkspaceHumanAttestationParameters extends WorkspaceExpectationParameters {
+  authority: 'user';
+}
+
+export interface WorkspacePixelDiffParameters extends WorkspaceExpectationParameters {
+  capture?: WorkspacePixelCaptureContract;
+}
+
+export interface WorkspaceModelRubricParameters extends WorkspaceExpectationParameters {
+  /** A stable registered evaluator capability, never a worker/provider/model selector. */
+  evaluatorProfile: string;
+}
+
+/** Closed, typed parameters for one built-in guardrail kind. */
+export type WorkspaceGuardrailParameters =
+  | WorkspaceVerificationParameters
+  | WorkspaceExpectationParameters
+  | WorkspaceEvidencePresentParameters
+  | WorkspaceMandatoryAnswerParameters
+  | WorkspaceHumanAttestationParameters
+  | WorkspacePixelDiffParameters
+  | WorkspaceModelRubricParameters;
+
+/** A normalized guardrail exposed by workspace resolution. */
+export interface WorkspaceGuardrail {
+  id: string;
+  kind: WorkspaceGuardrailKind;
+  attach: WorkspaceGuardrailAttachment;
+  enforcement: Enforcement;
+  allowOverride: boolean;
+  parameters: WorkspaceGuardrailParameters;
+  correction: WorkspaceGuardrailCorrection;
+}
+
+/** Declaration form; omitted policy fields receive safe defaults during parsing/resolution. */
+export interface WorkspaceGuardrailConfig {
+  id: string;
+  kind: WorkspaceGuardrailKind;
+  attach: WorkspaceGuardrailAttachment;
+  enforcement: Enforcement;
+  allowOverride?: boolean;
+  parameters: WorkspaceGuardrailParameters;
+  correction?: { maxRuns?: number; onExhausted?: WorkspaceGuardrailExhaustedAction };
+}
+
 /**
  * Something wrong with a declaration, addressed to whoever has to fix it.
  *
@@ -143,7 +243,8 @@ export type WorkspaceField =
   | 'context'
   | 'roles'
   | 'steps'
-  | 'routes';
+  | 'routes'
+  | 'guardrails';
 
 /** A declaration resolved through every layer, with the provenance of each field. */
 export interface EffectiveWorkspace {
@@ -160,6 +261,7 @@ export interface EffectiveWorkspace {
   roles: WorkspaceRole[];
   steps: WorkspaceStep[];
   routes: WorkspaceRoute[];
+  guardrails: WorkspaceGuardrail[];
   origins: Record<WorkspaceField, WorkspaceOrigin>;
   /** Files that contributed, in the order they were applied. */
   sources: string[];

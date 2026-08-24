@@ -1,5 +1,5 @@
 import { WORKSPACE_FILE, WORKSPACE_NOTES_MAX_CHARS } from '@awos/protocol';
-import type { WorkspaceResolution } from '@awos/protocol';
+import type { WorkspaceGuardrail, WorkspaceResolution } from '@awos/protocol';
 
 /**
  * The workspace as the agents see it.
@@ -49,6 +49,12 @@ export function buildWorkspaceBlock(resolution: WorkspaceResolution): string | n
   if (workspace.context.references.length > 0) {
     lines.push(`Worth reading before you change things: ${workspace.context.references.join(', ')}`);
   }
+  if (workspace.guardrails.length > 0) {
+    lines.push(
+      'Guardrails:',
+      ...workspace.guardrails.map((guardrail) => `- ${describeGuardrail(guardrail)}`),
+    );
+  }
 
   const notes = workspace.context.notes.trim();
   if (notes !== '') {
@@ -66,6 +72,20 @@ export function buildWorkspaceBlock(resolution: WorkspaceResolution): string | n
     'rather than something to acknowledge back.';
 
   return [OPEN_TAG, header, lines.join('\n'), CLOSE_TAG].join('\n\n');
+}
+
+function describeGuardrail(guardrail: WorkspaceGuardrail): string {
+  const override = guardrail.allowOverride ? '; required override permitted' : '';
+  const attachment = 'step' in guardrail.attach
+    ? `step ${guardrail.attach.step}`
+    : `${guardrail.attach.from} → ${guardrail.attach.to}`;
+  const reference = 'checks' in guardrail.parameters
+    ? `checks: ${guardrail.parameters.checks.join(', ')}`
+    : 'expectationItem' in guardrail.parameters
+      ? `expectation: ${guardrail.parameters.expectationItem}` +
+        ('evaluatorProfile' in guardrail.parameters ? `; evaluator capability: ${guardrail.parameters.evaluatorProfile}` : '')
+      : 'no reference';
+  return `${guardrail.id} (${guardrail.kind}, ${guardrail.enforcement}${override}) on ${attachment}; ${reference}`;
 }
 
 /** Prepend the block to a prompt, ahead of the pinned notes. */

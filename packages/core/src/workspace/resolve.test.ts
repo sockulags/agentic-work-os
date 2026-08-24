@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import {
   WORKSPACE_FILE,
+  WORKSPACE_LEGACY_INTEGRATION_GUARDRAIL_ID,
   WORKSPACE_LOCAL_FILE,
   WORKSPACE_SCHEMA_VERSION,
   type EffectiveWorkspace,
@@ -98,6 +99,171 @@ describe('resolveWorkspace', () => {
     assert.equal(workspace.origins.roles, 'shared');
     assert.equal(workspace.origins.steps, 'shared');
     assert.equal(workspace.origins.routes, 'shared');
+  });
+
+  test('resolves a shared v3 catalog with shared guardrail provenance', () => {
+    const root = tempDir();
+    shared(root, {
+      agents: ['codex'],
+      verify: [{ name: 'test', command: 'npm test' }],
+      roles: [{ id: 'developer', label: 'Developer' }],
+      steps: [{ id: 'implement', action: 'Implement', role: 'developer', workers: ['codex'] }],
+      guardrails: [{
+        id: 'checks',
+        kind: 'verification',
+        attach: { step: 'implement' },
+        enforcement: 'required',
+        parameters: { checks: ['test'] },
+      }],
+    });
+
+    const workspace = ok(resolveWorkspace(root));
+    assert.deepEqual(workspace.guardrails, [{
+      id: 'checks',
+      kind: 'verification',
+      attach: { step: 'implement' },
+      enforcement: 'required',
+      allowOverride: false,
+      parameters: { checks: ['test'] },
+      correction: { maxRuns: 2, onExhausted: 'waiting-for-human' },
+    }]);
+    assert.equal(workspace.origins.guardrails, 'shared');
+  });
+
+  test('fails closed when a v3 expectation guardrail has no pinned registry', () => {
+    const root = tempDir();
+    shared(root, {
+      agents: ['codex'],
+      roles: [{ id: 'developer', label: 'Developer' }],
+      steps: [{ id: 'implement', action: 'Implement', role: 'developer', workers: ['codex'] }],
+      guardrails: [{
+        id: 'evidence', kind: 'evidence-present', attach: { step: 'implement' },
+        enforcement: 'required', parameters: { expectationItem: 'scope' },
+      }],
+    });
+
+    const resolution = resolveWorkspace(root);
+    assert.equal(resolution.status, 'invalid');
+    assert.equal(resolution.status === 'invalid' ? resolution.problems[0]?.path : null, 'guardrails[0].parameters.expectationItem');
+    assert.match(resolution.status === 'invalid' ? resolution.problems[0]?.message ?? '' : '', /No pinned expectation registry/);
+  });
+
+  test('fails closed when a v3 model guardrail has no evaluator capability registry', () => {
+    const root = tempDir();
+    shared(root, {
+      agents: ['codex'],
+      roles: [{ id: 'reviewer', label: 'Reviewer' }],
+      steps: [{ id: 'review', action: 'Review', role: 'reviewer', workers: ['codex'] }],
+      guardrails: [{
+        id: 'rubric', kind: 'model-rubric', attach: { step: 'review' },
+        enforcement: 'required', parameters: { expectationItem: 'scope', evaluatorProfile: 'independent-model' },
+      }],
+    });
+
+    const resolution = resolveWorkspace(root, { expectationItemIds: ['scope'] });
+    assert.equal(resolution.status, 'invalid');
+    assert.equal(resolution.status === 'invalid' ? resolution.problems[0]?.path : null, 'guardrails[0].parameters.evaluatorProfile');
+    assert.match(resolution.status === 'invalid' ? resolution.problems[0]?.message ?? '' : '', /No evaluator capability registry/);
+  });
+
+  test('resolves registry-backed expectation and evaluator references when supplied', () => {
+    const root = tempDir();
+    shared(root, {
+      agents: ['codex'],
+      roles: [{ id: 'reviewer', label: 'Reviewer' }],
+      steps: [{ id: 'review', action: 'Review', role: 'reviewer', workers: ['codex'] }],
+      guardrails: [{
+        id: 'rubric', kind: 'model-rubric', attach: { step: 'review' },
+        enforcement: 'required', parameters: { expectationItem: 'scope', evaluatorProfile: 'independent-model' },
+      }],
+    });
+
+    const resolution = resolveWorkspace(root, {
+      expectationItemIds: ['scope'],
+      evaluatorProfileIds: ['independent-model'],
+    });
+    assert.equal(resolution.status, 'ok');
+  });
+
+  test('rejects an explicit lane-to-workspace guardrail when legacy integration normalizes the same attachment', () => {
+    const root = tempDir();
+    shared(root, {
+      verify: [{ name: 'test', command: 'npm test' }],
+      integration: { requires: ['test'] },
+      agents: ['codex'],
+      roles: [
+        { id: 'lane-owner', label: 'Lane owner' },
+        { id: 'workspace-owner', label: 'Workspace owner' },
+      ],
+      steps: [
+        { id: 'lane', action: 'Lane', role: 'lane-owner', workers: ['codex'] },
+        { id: 'workspace', action: 'Workspace', role: 'workspace-owner', workers: ['codex'] },
+      ],
+      guardrails: [{
+        id: 'explicit-integration', kind: 'verification', attach: { from: 'lane', to: 'workspace' },
+        enforcement: 'required', parameters: { checks: ['test'] },
+      }],
+    });
+
+    const resolution = resolveWorkspace(root);
+    assert.equal(resolution.status, 'invalid');
+    assert.equal(resolution.status === 'invalid' ? resolution.problems[0]?.path : null, 'guardrails[0].attach');
+    assert.match(resolution.status === 'invalid' ? resolution.problems[0]?.message ?? '' : '', /reserved legacy integration guardrail/);
+  });
+
+  test('keeps explicit noncolliding guardrails and legacy integration normalization separate', () => {
+    const root = tempDir();
+    shared(root, {
+      verify: [
+        { name: 'test', command: 'npm test' },
+        { name: 'typecheck', command: 'npm run typecheck' },
+      ],
+      integration: { requires: ['test'] },
+      agents: ['codex'],
+      roles: [{ id: 'developer', label: 'Developer' }],
+      steps: [{ id: 'implement', action: 'Implement', role: 'developer', workers: ['codex'] }],
+      guardrails: [{
+        id: 'checks', kind: 'verification', attach: { step: 'implement' },
+        enforcement: 'required', parameters: { checks: ['typecheck'] },
+      }],
+    });
+
+    const workspace = ok(resolveWorkspace(root));
+    assert.equal(workspace.guardrails.length, 2);
+    assert.deepEqual(workspace.guardrails[0]?.parameters, { checks: ['typecheck'] });
+    assert.deepEqual(workspace.guardrails[1], {
+      id: WORKSPACE_LEGACY_INTEGRATION_GUARDRAIL_ID,
+      kind: 'verification',
+      attach: { from: 'lane', to: 'workspace' },
+      enforcement: 'required',
+      allowOverride: false,
+      parameters: { checks: ['test'] },
+      correction: { maxRuns: 2, onExhausted: 'waiting-for-human' },
+    });
+    assert.deepEqual(workspace.integration.requires, ['test']);
+  });
+
+  test('projects legacy integration into one reserved verification guardrail', () => {
+    const root = tempDir();
+    shared(root, {
+      version: 2,
+      verify: [{ name: 'test', command: 'npm test' }, { name: 'typecheck', command: 'npm run typecheck' }],
+      integration: { requires: ['test', 'typecheck'], allowOverride: true },
+    });
+
+    const workspace = ok(resolveWorkspace(root));
+    assert.equal(workspace.guardrails.length, 1);
+    assert.deepEqual(workspace.guardrails[0], {
+      id: WORKSPACE_LEGACY_INTEGRATION_GUARDRAIL_ID,
+      kind: 'verification',
+      attach: { from: 'lane', to: 'workspace' },
+      enforcement: 'required',
+      allowOverride: true,
+      parameters: { checks: ['test', 'typecheck'] },
+      correction: { maxRuns: 2, onExhausted: 'waiting-for-human' },
+    });
+    assert.equal(workspace.origins.guardrails, 'shared');
+    assert.deepEqual(workspace.integration.requires, ['test', 'typecheck']);
   });
 
   test('resolves from a subdirectory, so a thread anywhere in the repo finds it', () => {
@@ -208,6 +374,116 @@ describe('resolveWorkspace', () => {
         resolution.status === 'invalid' && resolution.problems[0]?.path,
         'roles',
       );
+    });
+
+    test('a local v3 declaration cannot replace or weaken shared guardrails', () => {
+      const root = tempDir();
+      shared(root, {
+        agents: ['codex'],
+        verify: [{ name: 'test', command: 'npm test' }],
+        roles: [{ id: 'developer', label: 'Developer' }],
+        steps: [{ id: 'implement', action: 'Implement', role: 'developer', workers: ['codex'] }],
+        guardrails: [{
+          id: 'checks', kind: 'verification', attach: { step: 'implement' },
+          enforcement: 'absolute', parameters: { checks: ['test'] },
+        }],
+      });
+      write(root, WORKSPACE_LOCAL_FILE, {
+        version: 3,
+        guardrails: [],
+      });
+
+      const resolution = resolveWorkspace(root);
+      assert.equal(resolution.status, 'invalid');
+      assert.deepEqual(
+        resolution.status === 'invalid' ? resolution.problems.map((problem) => problem.path) : [],
+        ['guardrails'],
+      );
+    });
+
+    test('a local declaration cannot change a command selected by a shared v3 verification guardrail', () => {
+      const root = tempDir();
+      shared(root, {
+        verify: [{ name: 'test', command: 'npm test' }],
+        agents: ['codex'],
+        roles: [{ id: 'developer', label: 'Developer' }],
+        steps: [{ id: 'implement', action: 'Implement', role: 'developer', workers: ['codex'] }],
+        guardrails: [{
+          id: 'checks', kind: 'verification', attach: { step: 'implement' },
+          enforcement: 'required', parameters: { checks: ['test'] },
+        }],
+      });
+      write(root, WORKSPACE_LOCAL_FILE, {
+        version: WORKSPACE_SCHEMA_VERSION,
+        verify: [{ name: 'test', command: 'pnpm test' }],
+      });
+
+      const resolution = resolveWorkspace(root);
+      assert.equal(resolution.status, 'invalid');
+      assert.equal(resolution.status === 'invalid' ? resolution.problems[0]?.path : null, 'verify[0].command');
+      assert.match(resolution.status === 'invalid' ? resolution.problems[0]?.message ?? '' : '', /cannot change shared check/);
+    });
+
+    test('a local declaration cannot remove a command selected by a shared v3 guardrail', () => {
+      const root = tempDir();
+      shared(root, {
+        verify: [{ name: 'test', command: 'npm test' }],
+        agents: ['codex'],
+        roles: [{ id: 'developer', label: 'Developer' }],
+        steps: [{ id: 'implement', action: 'Implement', role: 'developer', workers: ['codex'] }],
+        guardrails: [{
+          id: 'checks', kind: 'verification', attach: { step: 'implement' },
+          enforcement: 'required', parameters: { checks: ['test'] },
+        }],
+      });
+      write(root, WORKSPACE_LOCAL_FILE, { version: WORKSPACE_SCHEMA_VERSION, verify: [] });
+
+      const resolution = resolveWorkspace(root);
+      assert.equal(resolution.status, 'invalid');
+      assert.equal(resolution.status === 'invalid' ? resolution.problems[0]?.path : null, 'verify');
+      assert.match(resolution.status === 'invalid' ? resolution.problems[0]?.message ?? '' : '', /cannot remove shared check/);
+    });
+
+    test('a local declaration cannot change a normalized legacy integration command under v3', () => {
+      const root = tempDir();
+      shared(root, {
+        verify: [{ name: 'test', command: 'npm test' }],
+        integration: { requires: ['test'] },
+      });
+      write(root, WORKSPACE_LOCAL_FILE, {
+        version: 2,
+        verify: [{ name: 'test', command: 'pnpm test' }],
+      });
+
+      const resolution = resolveWorkspace(root);
+      assert.equal(resolution.status, 'invalid');
+      assert.equal(resolution.status === 'invalid' ? resolution.problems[0]?.path : null, 'verify[0].command');
+    });
+
+    test('a local verification change is harmless when no shared v3 guardrail selects it', () => {
+      const root = tempDir();
+      shared(root, { verify: [{ name: 'unrelated', command: 'npm test' }] });
+      write(root, WORKSPACE_LOCAL_FILE, {
+        version: WORKSPACE_SCHEMA_VERSION,
+        verify: [{ name: 'unrelated', command: 'pnpm test' }],
+      });
+
+      const workspace = ok(resolveWorkspace(root));
+      assert.deepEqual(workspace.verify, [{ name: 'unrelated', command: 'pnpm test' }]);
+      assert.equal(workspace.origins.verify, 'local');
+    });
+
+    test('a legacy local integration cannot override a schema-v3 workspace policy', () => {
+      const root = tempDir();
+      shared(root, { integration: { requires: ['test'] }, verify: [{ name: 'test', command: 'npm test' }] });
+      write(root, WORKSPACE_LOCAL_FILE, {
+        version: 2,
+        integration: { requires: [], allowOverride: true },
+      });
+
+      const resolution = resolveWorkspace(root);
+      assert.equal(resolution.status, 'invalid');
+      assert.equal(resolution.status === 'invalid' ? resolution.problems[0]?.path : null, 'integration');
     });
 
     test('a local override alone does not make a directory a workspace', () => {

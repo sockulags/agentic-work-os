@@ -47,9 +47,10 @@ function workspace(
     roles,
     steps,
     routes,
+    guardrails: [],
     origins: {
       name: 'shared', repository: 'shared', agents: 'shared', setup: 'default', verify: 'default',
-      integration: 'default', context: 'default', roles: 'shared', steps: 'shared', routes: 'shared',
+      integration: 'default', context: 'default', roles: 'shared', steps: 'shared', routes: 'shared', guardrails: 'default',
     },
     sources: ['.awos/workspace.json'],
   };

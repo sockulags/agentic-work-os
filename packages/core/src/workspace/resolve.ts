@@ -2,12 +2,15 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 import {
   AGENT_IDS,
+  WORKSPACE_LEGACY_INTEGRATION_GUARDRAIL_ID,
   WORKSPACE_FILE,
   WORKSPACE_LOCAL_FILE,
+  WORKSPACE_SCHEMA_VERSION,
 } from '@awos/protocol';
 import type {
   AgentId,
   EffectiveWorkspace,
+  WorkspaceGuardrail,
   WorkspaceField,
   WorkspaceOrigin,
   WorkspaceProblem,
@@ -40,6 +43,10 @@ export interface ResolveOptions {
    * declared should not lose the setup command it already had.
    */
   laneSetup?: string;
+  /** Concrete pinned expectation ids; absent means expectation guardrails fail closed. */
+  expectationItemIds?: readonly string[];
+  /** Registered independent evaluator capability ids; absent means model guardrails fail closed. */
+  evaluatorProfileIds?: readonly string[];
 }
 
 export function resolveWorkspace(cwd: string, options: ResolveOptions = {}): WorkspaceResolution {
@@ -48,8 +55,23 @@ export function resolveWorkspace(cwd: string, options: ResolveOptions = {}): Wor
   if (root === null) return { status: 'none', searchedFrom: from };
 
   const problems: WorkspaceProblem[] = [];
-  const shared = readLayer(root, WORKSPACE_FILE, true, problems);
-  const local = readLayer(root, WORKSPACE_LOCAL_FILE, false, problems);
+  const shared = readLayer(root, WORKSPACE_FILE, true, problems, options);
+  const local = readLayer(root, WORKSPACE_LOCAL_FILE, false, problems, options);
+
+  if (
+    shared?.declaration.version === WORKSPACE_SCHEMA_VERSION &&
+    local?.declaration.version !== WORKSPACE_SCHEMA_VERSION &&
+    local?.declaration.integration !== undefined
+  ) {
+    problems.push({
+      severity: 'error',
+      file: WORKSPACE_LOCAL_FILE,
+      path: 'integration',
+      message: 'A local legacy integration declaration cannot override schema-v3 guardrail policy.',
+    });
+  }
+  validateLegacyIntegrationAttachmentCollision(shared, problems);
+  validateSharedV3VerificationPolicy(shared, local, problems);
 
   if (problems.some((problem) => problem.severity === 'error')) {
     return { status: 'invalid', root, problems };
@@ -100,6 +122,7 @@ function readLayer(
   file: string,
   standalone: boolean,
   problems: WorkspaceProblem[],
+  options: ResolveOptions,
 ): Layer | null {
   const path = join(root, file);
   if (!existsSync(path)) return null;
@@ -119,9 +142,85 @@ function readLayer(
     return null;
   }
 
-  const parsed = parseDeclaration(raw, { file, standalone });
+  const parsed = parseDeclaration(raw, {
+    file,
+    standalone,
+    ...(options.expectationItemIds === undefined ? {} : { expectationItemIds: options.expectationItemIds }),
+    ...(options.evaluatorProfileIds === undefined ? {} : { evaluatorProfileIds: options.evaluatorProfileIds }),
+  });
   problems.push(...parsed.problems);
   return parsed.declaration === null ? null : { declaration: parsed.declaration, file };
+}
+
+/**
+ * A local verify field may customize unrelated checks, but it cannot change a command that
+ * a shared v3 verification guardrail selected. This check runs before merge so the local
+ * declaration never becomes an effective weakened policy.
+ */
+function validateSharedV3VerificationPolicy(
+  shared: Layer | null,
+  local: Layer | null,
+  problems: WorkspaceProblem[],
+): void {
+  if (shared?.declaration.version !== WORKSPACE_SCHEMA_VERSION || local?.declaration.verify === undefined) return;
+
+  const sharedCommands = new Map<string, string>();
+  for (const guardrail of shared.declaration.guardrails ?? []) {
+    if (guardrail.kind !== 'verification' || !('checks' in guardrail.parameters)) continue;
+    for (const check of guardrail.parameters.checks) {
+      const command = shared.declaration.verify?.find((entry) => entry.name === check)?.command;
+      if (command !== undefined) sharedCommands.set(check, command);
+    }
+  }
+  for (const check of shared.declaration.integration?.requires ?? []) {
+    const command = shared.declaration.verify?.find((entry) => entry.name === check)?.command;
+    if (command !== undefined) sharedCommands.set(check, command);
+  }
+
+  for (const [name, command] of sharedCommands) {
+    const localIndex = local.declaration.verify.findIndex((entry) => entry.name === name);
+    const localEntry = local.declaration.verify[localIndex];
+    if (localEntry === undefined) {
+      problems.push({
+        severity: 'error',
+        file: WORKSPACE_LOCAL_FILE,
+        path: 'verify',
+        message: `Local verification cannot remove shared check "${name}" selected by a schema-v3 guardrail. Keep it with command "${command}".`,
+      });
+      continue;
+    }
+    if (localEntry.command !== command) {
+      problems.push({
+        severity: 'error',
+        file: WORKSPACE_LOCAL_FILE,
+        path: `verify[${localIndex}].command`,
+        message: `Local verification cannot change shared check "${name}" selected by a schema-v3 guardrail. Keep command "${command}".`,
+      });
+    }
+  }
+}
+
+/** The legacy integration projection owns the lane-to-workspace attachment. */
+function validateLegacyIntegrationAttachmentCollision(
+  shared: Layer | null,
+  problems: WorkspaceProblem[],
+): void {
+  if (
+    shared?.declaration.version !== WORKSPACE_SCHEMA_VERSION ||
+    (shared.declaration.integration?.requires?.length ?? 0) === 0
+  ) return;
+
+  for (const [index, guardrail] of (shared.declaration.guardrails ?? []).entries()) {
+    const attachment = guardrail.attach;
+    if ('from' in attachment && attachment.from === 'lane' && attachment.to === 'workspace') {
+      problems.push({
+        severity: 'error',
+        file: WORKSPACE_FILE,
+        path: `guardrails[${index}].attach`,
+        message: `Guardrail "${guardrail.id}" collides with the reserved legacy integration guardrail on transition "lane" -> "workspace". Remove the explicit attachment or integration.requires.`,
+      });
+    }
+  }
 }
 
 function merge(
@@ -141,6 +240,7 @@ function merge(
     roles: 'default',
     steps: 'default',
     routes: 'default',
+    guardrails: 'default',
   };
 
   const workspace: EffectiveWorkspace = {
@@ -157,6 +257,7 @@ function merge(
     roles: [],
     steps: [],
     routes: [],
+    guardrails: [],
     origins,
     sources: [shared.file],
   };
@@ -222,10 +323,46 @@ function merge(
       workspace.routes = d.routes;
       origins.routes = origin;
     }
+    if (origin === 'shared' && d.guardrails !== undefined) {
+      workspace.guardrails = d.guardrails.map(normalizeGuardrail);
+      origins.guardrails = origin;
+    }
   }
 
+  normalizeLegacyIntegration(workspace);
   applyEnvironment(workspace, options);
   return workspace;
+}
+
+/** Keep the pre-v3 integration contract visible as one reserved verification guardrail. */
+function normalizeLegacyIntegration(workspace: EffectiveWorkspace): void {
+  if (workspace.integration.requires.length === 0) return;
+
+  workspace.guardrails.push({
+    id: WORKSPACE_LEGACY_INTEGRATION_GUARDRAIL_ID,
+    kind: 'verification',
+    attach: { from: 'lane', to: 'workspace' },
+    enforcement: 'required',
+    allowOverride: workspace.integration.allowOverride,
+    parameters: { checks: [...workspace.integration.requires] },
+    correction: { maxRuns: 2, onExhausted: 'waiting-for-human' },
+  });
+  workspace.origins.guardrails = workspace.origins.integration;
+}
+
+function normalizeGuardrail(input: NonNullable<WorkspaceDeclaration['guardrails']>[number]): WorkspaceGuardrail {
+  return {
+    id: input.id,
+    kind: input.kind,
+    attach: input.attach,
+    enforcement: input.enforcement,
+    allowOverride: input.allowOverride ?? false,
+    parameters: input.parameters,
+    correction: {
+      maxRuns: input.correction?.maxRuns ?? 2,
+      onExhausted: input.correction?.onExhausted ?? 'waiting-for-human',
+    },
+  };
 }
 
 /**
