@@ -17,7 +17,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -27,6 +29,18 @@
     ],
     "resources": {
       "../../../packages/core/dist-bundle/": "core/"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNDQTFEOEFCQTg4NEJBMkIKUldRcnVvU29xOWloUEthNGJacHI0NzZiT1pJY3lySmJWTjZWMm9hT2NscEoyTlp0Y1pjMDZGbnYK",
+      "endpoints": [
+        "https://github.com/sockulags/agentic-work-os/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

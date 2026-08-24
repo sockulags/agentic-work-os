@@ -16,3 +16,6 @@ data/
 # tauri
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/
+
+# Vendored build inputs (downloaded, never committed)
+.cache/

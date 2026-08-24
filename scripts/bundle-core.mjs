@@ -12,13 +12,17 @@
 //     node_modules/
 //       ws/                 (pure JS, zero deps)
 //       @awos/protocol/     (workspace package: its dist + package.json)
+//     runtime/
+//       node(.exe)          (pinned, vendored — see vendor-node.mjs)
 //
-// Node's module resolution walks up from core/main.js and finds both here, so the app
-// needs nothing on disk except Node itself on PATH — already a project requirement.
+// Node's module resolution walks up from core/main.js and finds the dependencies here,
+// and the shell prefers the vendored runtime over whatever is on PATH, so a packaged app
+// needs nothing installed on the machine.
 
-import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { chmodSync, cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { vendorNode } from './vendor-node.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const coreDist = join(root, 'packages', 'core', 'dist');
@@ -57,5 +61,13 @@ const protocolOut = join(nm, '@awos', 'protocol');
 mkdirSync(protocolOut, { recursive: true });
 cpSync(protocolDist, join(protocolOut, 'dist'), { recursive: true });
 cpSync(join(root, 'packages', 'protocol', 'package.json'), join(protocolOut, 'package.json'));
+
+// 3. The Node runtime itself. Development still runs on PATH; only the bundle carries one.
+const vendored = await vendorNode();
+const runtime = join(out, 'runtime', basename(vendored));
+mkdirSync(dirname(runtime), { recursive: true });
+cpSync(vendored, runtime);
+// cpSync preserves mode on POSIX, but the Windows download arrives without one.
+chmodSync(runtime, 0o755);
 
 console.log(`bundle-core: assembled self-contained core at ${out}`);
