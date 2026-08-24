@@ -1,6 +1,9 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+/** Process-only name for the credential that authorizes human-owned records. */
+export const HUMAN_AUTH_TOKEN_ENV = 'AWOS_HUMAN_AUTH_TOKEN';
+
 /**
  * Every tunable in one place, all overridable by env so you can tune a running
  * install without a rebuild.
@@ -29,6 +32,8 @@ export interface HarnessConfig {
   qwenApiKey?: string;
   qwenBin?: string;
   qwenTurnTimeoutMs?: number;
+  /** Distinct credential for human answer and attestation writes. Never given to workers. */
+  humanAuthorityToken?: string;
   /** WebSocket bind. Port 0 asks the OS for a free one. */
   host: string;
   port: number;
@@ -104,6 +109,7 @@ export function loadConfig(): HarnessConfig {
     qwenApiKey: envStr('AWOS_QWEN_API_KEY', 'local-placeholder'),
     qwenBin: envStr('AWOS_QWEN_BIN', ''),
     qwenTurnTimeoutMs: envInt('AWOS_QWEN_TURN_TIMEOUT_MS', 600_000),
+    humanAuthorityToken: process.env[HUMAN_AUTH_TOKEN_ENV] || undefined,
     host: envStr('AWOS_HOST', '127.0.0.1'),
     port: envInt('AWOS_PORT', 4319),
     replayMaxChars: envInt('AWOS_REPLAY_MAX_CHARS', 24_000),

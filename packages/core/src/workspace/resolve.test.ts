@@ -185,7 +185,7 @@ describe('resolveWorkspace', () => {
     assert.equal(resolution.status, 'ok');
   });
 
-  test('rejects an explicit lane-to-workspace guardrail when legacy integration normalizes the same attachment', () => {
+  test('keeps an explicit lane-to-workspace guardrail alongside reserved legacy verification', () => {
     const root = tempDir();
     shared(root, {
       verify: [{ name: 'test', command: 'npm test' }],
@@ -205,10 +205,12 @@ describe('resolveWorkspace', () => {
       }],
     });
 
-    const resolution = resolveWorkspace(root);
-    assert.equal(resolution.status, 'invalid');
-    assert.equal(resolution.status === 'invalid' ? resolution.problems[0]?.path : null, 'guardrails[0].attach');
-    assert.match(resolution.status === 'invalid' ? resolution.problems[0]?.message ?? '' : '', /reserved legacy integration guardrail/);
+    const resolution = resolveWorkspace(root, { expectationItemIds: ['scope'] });
+    assert.equal(resolution.status, 'ok');
+    assert.deepEqual(
+      resolution.status === 'ok' ? resolution.workspace.guardrails.map((guardrail) => guardrail.id) : [],
+      ['explicit-integration', WORKSPACE_LEGACY_INTEGRATION_GUARDRAIL_ID],
+    );
   });
 
   test('keeps explicit noncolliding guardrails and legacy integration normalization separate', () => {

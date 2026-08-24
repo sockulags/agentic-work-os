@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { AdapterEvent, ModelTarget, PermissionMode } from '@awos/protocol';
 import type { Query } from '@qwen-code/sdk';
+import { HUMAN_AUTH_TOKEN_ENV } from '../config.js';
 import type { HarnessConfig } from '../config.js';
 import type { AdapterContext } from './agent.js';
 import {
@@ -81,6 +82,35 @@ describe('Qwen Code policy', () => {
 });
 
 describe('QwenCodeAdapter', () => {
+  test('passes ordinary bearer context but strips every human-token casing from SDK tools', async () => {
+    resetQwenInferenceSlotForTests();
+    const humanEnvKeys = [HUMAN_AUTH_TOKEN_ENV, HUMAN_AUTH_TOKEN_ENV.toLowerCase(), 'AwOs_HuMaN_AuTh_ToKeN'];
+    const savedOrdinary = process.env['AWOS_TOKEN'];
+    const savedHuman = new Map(humanEnvKeys.map((key) => [key, process.env[key]]));
+    const options: { env?: Record<string, string> } = {};
+    process.env['AWOS_TOKEN'] = 'ordinary-qwen-tool-token';
+    humanEnvKeys.forEach((key, index) => { process.env[key] = `human-qwen-tool-token-${index}`; });
+    try {
+      const adapter = new QwenCodeAdapter(context([]), target, {
+        query: (args) => {
+          options.env = args.options.env as Record<string, string> | undefined;
+          return fakeQuery([]);
+        },
+      });
+      await adapter.sendTurn('inspect environment');
+      assert.equal(options.env?.AWOS_TOKEN, 'ordinary-qwen-tool-token');
+      assert.equal(Object.keys(options.env ?? {}).some((key) => key.toLowerCase() === HUMAN_AUTH_TOKEN_ENV.toLowerCase()), false);
+    } finally {
+      if (savedOrdinary === undefined) delete process.env['AWOS_TOKEN'];
+      else process.env['AWOS_TOKEN'] = savedOrdinary;
+      for (const key of humanEnvKeys) {
+        delete process.env[key];
+        const value = savedHuman.get(key);
+        if (value !== undefined) process.env[key] = value;
+      }
+    }
+  });
+
   test('accepts an approval resolved synchronously from approval.requested emission', async () => {
     resetQwenInferenceSlotForTests();
     const events: AdapterEvent[] = [];

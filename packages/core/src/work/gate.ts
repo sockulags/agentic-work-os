@@ -6,6 +6,7 @@ import type {
   EvaluatorFactState,
   EvidenceItem,
   ExpectationSet,
+  HarnessEvent,
   ReferenceIdentity,
   RequirementEnforcement,
   RequirementResult,
@@ -17,12 +18,16 @@ import type {
   TransitionVerdict,
   VerifyCommand,
   WorkspaceIntegration,
+  WorkspaceGuardrail,
 } from '@awos/protocol';
 import {
   createExpectationSet,
   createTransitionEvaluation,
   isCurrentPinnedEvaluatorFact,
+  isUserFinalAuthority,
 } from '@awos/protocol';
+import { coreExpectationManifestEntry } from '../workspace/manifest.js';
+import { evaluateGuardrails, evaluateVerificationChecks } from './evaluators.js';
 
 /**
  * The existing integration input. It remains small and is still useful to callers that only
@@ -65,6 +70,15 @@ export interface IntegrationTransitionInput extends GateInput {
   invalidOverrideReason?: string;
   /** Set when replay or another boundary found an invalid transition input. */
   invalidAttemptReason?: string;
+  /** Effective schema-v3 guardrails attached to lane -> workspace, including the reserved check. */
+  guardrails?: readonly WorkspaceGuardrail[];
+  /** Append-only records used by human and evidence evaluators. */
+  events?: readonly HarnessEvent[];
+}
+
+export interface GuardrailExpectationSetResult {
+  expectationSet: ExpectationSet;
+  conflicts: readonly string[];
 }
 
 /** Full decision returned by the generalized gate for a guarded transition. */
@@ -72,6 +86,14 @@ export interface TransitionDecision extends GateDecision {
   evaluation: TransitionEvaluation;
   verdict: TransitionVerdict;
   refusal: TransitionRefusal | null;
+}
+
+/** Inputs for a transition whose facts come from the closed core evaluator registry. */
+export interface GuardedTransitionInput extends Omit<TransitionInput, 'facts'> {
+  guardrails: readonly WorkspaceGuardrail[];
+  verify: readonly VerifyCommand[];
+  evidence: readonly EvidenceItem[];
+  events: readonly HarnessEvent[];
 }
 
 /**
@@ -85,7 +107,12 @@ export interface TransitionDecision extends GateDecision {
 export function evaluateTransition(input: TransitionInput): TransitionEvaluation {
   const enforcement = input.enforcement
     ? [...input.enforcement]
-    : input.expectationSet.items.map((item) => ({ requirementId: item.id, enforcement: item.enforcement }));
+    : input.expectationSet.items.map((item) => ({
+        requirementId: item.id,
+        enforcement: item.enforcement,
+        allowOverride: item.allowOverride,
+        ...(item.authority === undefined ? {} : { authority: item.authority }),
+      }));
   const facts = normalizeFacts(input);
   const provenance = facts.map((fact) => fact.provenance);
   const base = {
@@ -111,9 +138,10 @@ export function evaluateTransition(input: TransitionInput): TransitionEvaluation
     return item.enforcement !== 'advisory' && state !== 'satisfied';
   });
   const unknown = states.filter(({ fact }) => factState(fact) === 'unknown');
-  const absoluteUnmet = unmet.filter(({ item }) => item.enforcement === 'absolute');
+  const absoluteUnmet = unmet.filter(({ item }) => item.enforcement === 'absolute' || isUserFinalAuthority(item));
   const hasAbsoluteUncertainty = absoluteUnmet.some(({ fact }) => factState(fact) === 'unknown');
   const requiredUnmet = unmet.filter(({ item }) => item.enforcement === 'required');
+  const nonOverridableRequired = requiredUnmet.filter(({ item }) => item.allowOverride !== true || isUserFinalAuthority(item));
   const advisoryUncertainty = unknown.some(({ item }) => item.enforcement === 'advisory');
 
   // An override is a legal escape only for a current, pinned, known required failure. It
@@ -129,7 +157,8 @@ export function evaluateTransition(input: TransitionInput): TransitionEvaluation
       requiredUnmet.length > 0 &&
       requiredUnmet.every(({ fact }) =>
         factState(fact) === 'failed' && isCurrentPinnedEvaluatorFact(fact, input.attempt),
-      );
+      ) &&
+      requiredUnmet.every(({ item }) => item.allowOverride === true && !isUserFinalAuthority(item));
     if (
       hasRequiredItem &&
       absoluteUnmet.length === 0 &&
@@ -143,11 +172,13 @@ export function evaluateTransition(input: TransitionInput): TransitionEvaluation
         override: input.override,
       });
     }
-    if (!hasRequiredItem || absoluteUnmet.length > 0) {
+    if (!hasRequiredItem || absoluteUnmet.length > 0 || nonOverridableRequired.length > 0) {
       return refused(base, 'blocked', {
         unmetRequirementIds: [...new Set(unmet.map(({ item }) => item.id))],
-        reason: absoluteUnmet.length > 0
-          ? 'An absolute expectation cannot be overridden.'
+        reason: absoluteUnmet.length > 0 || nonOverridableRequired.length > 0
+          ? absoluteUnmet.length > 0
+            ? 'An absolute expectation cannot be overridden.'
+            : 'A required expectation does not permit an explicit override.'
           : 'An override is only valid for a required expectation.',
         required: evidenceRequirement(unmet.map(({ item }) => item.id), 'Provide evidence for the unmet expectation before requesting an override.'),
         responsibleActor: input.attempt.actor,
@@ -167,6 +198,23 @@ export function evaluateTransition(input: TransitionInput): TransitionEvaluation
     }
   }
 
+  const humanAnswer = requiredUnmet.find(({ item, fact }) =>
+    (item.kind === 'mandatory-question' || item.kind === 'human-attestation' || isUserFinalAuthority(item)) &&
+    factState(fact) === 'unknown',
+  );
+  // A user-owned answer is non-overridable, but its absence is still a request for the
+  // user rather than a terminal policy failure. An attempted override was handled above.
+  if (humanAnswer) {
+    return refused(base, 'waiting-for-human', refusalFor(
+      requiredUnmet,
+      'A required planning answer is missing or not pinned as authorized evidence.',
+      'provide-answer',
+      true,
+      'user',
+      humanAnswer.item.id,
+    ));
+  }
+
   if (absoluteUnmet.length > 0) {
     return refused(base, 'blocked', refusalFor(
       absoluteUnmet,
@@ -178,19 +226,6 @@ export function evaluateTransition(input: TransitionInput): TransitionEvaluation
   }
 
   if (requiredUnmet.length > 0) {
-    const humanAnswer = requiredUnmet.find(({ item, fact }) =>
-      item.kind === 'mandatory-question' && factState(fact) === 'unknown',
-    );
-    if (humanAnswer) {
-      return refused(base, 'waiting-for-human', refusalFor(
-        requiredUnmet,
-        'A required planning answer is missing or not pinned as authorized evidence.',
-        'provide-answer',
-        true,
-        'user',
-        humanAnswer.item.id,
-      ));
-    }
     return refused(base, 'retry', refusalFor(
       requiredUnmet,
       requiredUnmet.some(({ fact }) => factState(fact) === 'unknown')
@@ -222,12 +257,34 @@ export function evaluateTransition(input: TransitionInput): TransitionEvaluation
   });
 }
 
+/** Evaluate configured guardrails, then let the core transition function choose the verdict. */
+export function evaluateGuardedTransition(input: GuardedTransitionInput): TransitionEvaluation {
+  return evaluateTransition({
+    ...input,
+    facts: uniqueFacts(evaluateGuardrails({
+      guardrails: input.guardrails,
+      expectationSet: input.expectationSet,
+      candidate: input.attempt.candidate,
+      verify: input.verify,
+      evidence: input.evidence,
+      events: input.events,
+    })),
+  });
+}
+
 /**
  * The legacy pure integration gate, now used as the evaluator adapter for the reserved
  * verification transition. Its observable result remains unchanged for existing callers.
  */
 export function evaluateGate(input: GateInput): GateDecision {
-  const requirements = input.integration.requires.map((name) => evaluateOne(name, input));
+  const verification = evaluateVerificationChecks({
+    checkNames: input.integration.requires,
+    verify: input.verify,
+    evidence: input.evidence,
+    candidate: candidateIdentity(input.candidateTree),
+    expectationSetId: 'legacy-integration-gate',
+  });
+  const requirements = verification.requirements;
   return {
     allowed: requirements.every((requirement) => requirement.state === 'satisfied'),
     requirements,
@@ -236,15 +293,35 @@ export function evaluateGate(input: GateInput): GateDecision {
 
 /** Evaluate the shared transition contract while retaining the old requirement projection. */
 export function evaluateIntegrationTransition(input: IntegrationTransitionInput): TransitionDecision {
-  const decision = evaluateGate(input);
-  const facts = factsFromRequirements(decision.requirements, input);
-  const evaluation = evaluateTransition({
-    attempt: input.attempt,
-    expectationSet: input.expectationSet,
-    facts,
-    timestamp: input.timestamp,
-    ...(input.override === undefined ? {} : { override: input.override }),
+  const verification = evaluateVerificationChecks({
+    checkNames: input.integration.requires,
+    verify: input.verify,
+    evidence: input.evidence,
+    candidate: input.attempt.candidate,
+    expectationSetId: input.expectationSet.expectationSetId,
   });
+  const decision: GateDecision = {
+    allowed: verification.requirements.every((requirement) => requirement.state === 'satisfied'),
+    requirements: verification.requirements,
+  };
+  const evaluation = input.guardrails === undefined
+    ? evaluateTransition({
+        attempt: input.attempt,
+        expectationSet: input.expectationSet,
+        facts: verification.facts,
+        timestamp: input.timestamp,
+        ...(input.override === undefined ? {} : { override: input.override }),
+      })
+    : evaluateGuardedTransition({
+        attempt: input.attempt,
+        expectationSet: input.expectationSet,
+        timestamp: input.timestamp,
+        ...(input.override === undefined ? {} : { override: input.override }),
+        guardrails: input.guardrails,
+        verify: input.verify,
+        evidence: input.evidence,
+        events: input.events ?? [],
+      });
   const invalidReason = input.invalidAttemptReason ?? input.invalidOverrideReason;
   const finalEvaluation = invalidReason === undefined
     ? evaluation
@@ -282,7 +359,11 @@ export function buildIntegrationExpectationSet(
   integration: WorkspaceIntegration,
   verify: readonly VerifyCommand[],
   source: ReferenceIdentity,
+  guardrails?: readonly WorkspaceGuardrail[],
 ): ExpectationSet {
+  if (guardrails !== undefined) {
+    return buildGuardrailExpectationSet(integration, verify, source, guardrails).expectationSet;
+  }
   assertCanonicalIntegrationSource(source);
   const sourceReference = { ...source };
   const manifest = JSON.stringify({
@@ -300,6 +381,7 @@ export function buildIntegrationExpectationSet(
       kind: 'requirement',
       name,
       enforcement: 'required',
+      allowOverride: integration.allowOverride,
       reference: { ...sourceReference, selector: `integration.requires:${name}` },
     })),
     authority: { sourceOwner: 'workspace', pinnedBy: 'user' },
@@ -344,73 +426,6 @@ export function candidateIdentity(tree: string | null, commit: string | null = n
   };
 }
 
-function evaluateOne(name: string, input: GateInput): RequirementResult {
-  const command = input.verify.find((entry) => entry.name === name)?.command ?? '';
-  const base = { name, command };
-
-  // The most recent result for this check decides it. An earlier failure that was fixed
-  // is history, not a veto; an earlier pass that was later broken must not be one either.
-  const latest = [...input.evidence]
-    .filter((item) => item.check?.name === name)
-    .sort((a, b) => a.at - b.at)
-    .pop();
-
-  if (latest === undefined) {
-    return { ...base, state: 'missing', evidenceId: null, evidenceTree: null };
-  }
-
-  const evidenceTree = latest.state.tree;
-  if (latest.check?.passed !== true) {
-    return { ...base, state: 'failed', evidenceId: latest.id, evidenceTree };
-  }
-
-  // No candidate tree means the working copy is not a git repository, so nothing can be
-  // shown to be about this content. Refusing beats claiming a match nobody established.
-  if (input.candidateTree === null || evidenceTree === null || evidenceTree !== input.candidateTree) {
-    return { ...base, state: 'stale', evidenceId: latest.id, evidenceTree };
-  }
-
-  return { ...base, state: 'satisfied', evidenceId: latest.id, evidenceTree };
-}
-
-function factsFromRequirements(
-  requirements: readonly RequirementResult[],
-  input: IntegrationTransitionInput,
-): EvaluatorFact[] {
-  const byName = new Map(input.expectationSet.items.map((item) => [item.id, item]));
-  return requirements.map((requirement) => {
-    const state: EvaluatorFactState = requirement.state === 'satisfied'
-      ? 'satisfied'
-      : requirement.state === 'failed'
-        ? 'failed'
-        : 'unknown';
-    const evidenceIds = requirement.evidenceId === null ? [] : [requirement.evidenceId];
-    const validity = state === 'satisfied'
-      ? 'current'
-      : requirement.state === 'stale'
-        ? 'stale'
-        : requirement.state === 'missing'
-          ? 'unavailable'
-          : 'current';
-    return {
-      requirementId: requirement.name,
-      state,
-      evidenceIds,
-      provenance: {
-        evaluatorId: 'integration-gate',
-        evaluatorVersion: '1',
-        evaluatorClass: 'deterministic',
-        expectationSetId: input.expectationSet.expectationSetId,
-        candidate: input.attempt.candidate,
-        evidenceIds,
-        validity,
-        detail: byName.get(requirement.name)?.reference.locator ?? null,
-      },
-      detail: requirement.state,
-    };
-  });
-}
-
 function normalizeFacts(input: TransitionInput): EvaluatorFact[] {
   const supplied = new Map<string, EvaluatorFact>();
   for (const fact of input.facts) {
@@ -448,9 +463,11 @@ function unknownFact(requirementId: string, input: TransitionInput): EvaluatorFa
   return {
     requirementId,
     state: 'unknown',
+    observation: 'unknown',
     evidenceIds: [],
     provenance: {
       evaluatorId: 'core',
+      evaluatorKind: 'core',
       evaluatorVersion: '1',
       evaluatorClass: 'deterministic',
       expectationSetId: input.expectationSet.expectationSetId,
@@ -460,7 +477,131 @@ function unknownFact(requirementId: string, input: TransitionInput): EvaluatorFa
       detail: 'No current evaluator fact was supplied.',
     },
     detail: 'unknown',
+    diagnostics: ['No current evaluator fact was supplied.'],
   };
+}
+
+/** Build the pinned expectation set used by the real schema-v3 integration transition. */
+export function buildGuardrailExpectationSet(
+  integration: WorkspaceIntegration,
+  verify: readonly VerifyCommand[],
+  source: ReferenceIdentity,
+  guardrails: readonly WorkspaceGuardrail[],
+  scope: { workItemId: string | null; sourceStepId: string; targetStepId: string } = {
+    workItemId: null,
+    sourceStepId: 'lane',
+    targetStepId: 'workspace',
+  },
+): GuardrailExpectationSetResult {
+  assertCanonicalIntegrationSource(source);
+  const effective = [...guardrails];
+  if (
+    integration.requires.length > 0 &&
+    !effective.some((guardrail) => guardrail.id === 'workspace-integration')
+  ) {
+    effective.push({
+      id: 'workspace-integration',
+      kind: 'verification',
+      attach: { from: 'lane', to: 'workspace' },
+      enforcement: 'required',
+      allowOverride: integration.allowOverride,
+      parameters: { checks: [...integration.requires] },
+      correction: { maxRuns: 2, onExhausted: 'waiting-for-human' },
+    });
+  }
+
+  const attached = effective.filter((guardrail) =>
+    'step' in guardrail.attach
+      ? guardrail.attach.step === scope.targetStepId
+      : guardrail.attach.from === scope.sourceStepId && guardrail.attach.to === scope.targetStepId,
+  );
+  const items = new Map<string, ExpectationSet['items'][number]>();
+  const conflicts = new Set<string>();
+  for (const guardrail of attached) {
+    const parameters = guardrail.parameters;
+    const checks = guardrail.kind === 'verification' && isRecord(parameters) && Array.isArray(parameters.checks)
+      ? parameters.checks.filter((check): check is string => typeof check === 'string')
+      : [];
+    const expectationIds = guardrail.kind === 'verification'
+      ? checks
+      : [isRecord(parameters) && typeof parameters.expectationItem === 'string'
+          ? parameters.expectationItem
+          : guardrail.id];
+    for (const expectationId of expectationIds) {
+      const manifestEntry = coreExpectationManifestEntry(expectationId);
+      if (guardrail.kind === 'verification') {
+        if (!verify.some((check) => check.name === expectationId)) {
+          conflicts.add(expectationId);
+          continue;
+        }
+      } else if (manifestEntry === null) {
+        // Non-verification expectations must come from the immutable core manifest. Do
+        // not create a placeholder item that could later be treated as real policy.
+        conflicts.add(expectationId);
+        continue;
+      }
+      const authority = guardrail.kind === 'human-attestation' ||
+        (guardrail.kind === 'mandatory-answer' && isRecord(parameters) && parameters.authority === 'user')
+        ? 'user' as const
+        : undefined;
+      const itemKind = guardrail.kind === 'verification' ? 'requirement' as const : manifestEntry?.kind;
+      const itemName = guardrail.kind === 'verification' ? expectationId : manifestEntry?.name;
+      if (itemKind === undefined || itemName === undefined) {
+        conflicts.add(expectationId);
+        continue;
+      }
+      const item = {
+        id: expectationId,
+        kind: itemKind,
+        name: itemName,
+        enforcement: guardrail.enforcement,
+        allowOverride: guardrail.allowOverride,
+        reference: {
+          ...source,
+          selector: guardrail.kind === 'verification'
+            ? `verification:check:${expectationId}`
+            : `guardrail:${guardrail.id}:expectation:${expectationId}`,
+        },
+        ...(authority === undefined ? {} : { authority }),
+      } as ExpectationSet['items'][number];
+      const prior = items.get(item.id);
+      if (prior === undefined) items.set(item.id, item);
+      else if (JSON.stringify(prior) !== JSON.stringify(item)) conflicts.add(item.id);
+    }
+    if (expectationIds.length === 0) {
+      conflicts.add(guardrail.id);
+    }
+  }
+
+  const manifest = JSON.stringify({
+    integration,
+    verify: verify.map(({ name, command }) => ({ name, command })),
+    guardrails: attached,
+    source,
+    items: [...items.values()],
+  });
+  const digest = createHash('sha256').update(manifest).digest('hex');
+  return {
+    expectationSet: createExpectationSet({
+      expectationSetId: `workspace-integration:${digest}`,
+      manifestDigest: digest,
+      items: [...items.values()],
+      authority: { sourceOwner: 'workspace', pinnedBy: 'user' },
+      scope,
+      supersedes: null,
+    }),
+    conflicts: [...conflicts],
+  };
+}
+
+function uniqueFacts(facts: readonly EvaluatorFact[]): EvaluatorFact[] {
+  const byId = new Map<string, EvaluatorFact>();
+  for (const fact of facts) if (!byId.has(fact.requirementId)) byId.set(fact.requirementId, fact);
+  return [...byId.values()];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function validateTransitionInput(
@@ -481,6 +622,8 @@ function validateTransitionInput(
     input.expectationSet.items.some((item) =>
       item.id.trim() === '' ||
       item.name.trim() === '' ||
+      typeof item.allowOverride !== 'boolean' ||
+      (item.allowOverride && item.enforcement !== 'required') ||
       item.reference.locator.trim() === '' ||
       item.reference.nativeRevision.trim() === '' ||
       item.reference.contentDigest.trim() === '',
@@ -513,11 +656,16 @@ function validateTransitionInput(
   if (new Set(input.facts.map((fact) => fact.requirementId)).size !== input.facts.length) {
     return invalidRefusal('Each requirement may have only one evaluator fact per attempt.', input.attempt.actor);
   }
-  const byId = new Map(enforcement.map((entry) => [entry.requirementId, entry.enforcement]));
+  const byId = new Map(enforcement.map((entry) => [entry.requirementId, entry]));
   if (enforcement.some((entry) => !requiredIds.has(entry.requirementId))) {
     return invalidRefusal('Enforcement may only name requirements in the pinned expectation set.', input.attempt.actor);
   }
-  if (input.expectationSet.items.some((item) => byId.get(item.id) !== item.enforcement)) {
+  if (input.expectationSet.items.some((item) => {
+    const entry = byId.get(item.id);
+    return entry?.enforcement !== item.enforcement ||
+      entry?.allowOverride !== item.allowOverride ||
+      entry?.authority !== item.authority;
+  })) {
     return invalidRefusal('Evaluator enforcement must match the immutable expectation set.', input.attempt.actor);
   }
   const override = input.override;

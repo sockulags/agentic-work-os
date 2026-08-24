@@ -215,6 +215,22 @@ export class HarnessServer {
         };
       }
 
+      case 'transition.plan': {
+        const decision = await orchestrator.evaluatePlanningTransition(msg.threadId, {
+          sourceStepId: msg.sourceStepId,
+          targetStepId: msg.targetStepId,
+          candidate: msg.candidate,
+          ...(msg.transitionId === undefined ? {} : { transitionId: msg.transitionId }),
+        });
+        return {
+          type: 'transition',
+          threadId: msg.threadId,
+          allowed: decision.allowed,
+          verdict: decision.verdict,
+          evaluation: decision.evaluation,
+        };
+      }
+
       case 'verify.run':
         // Not awaited: a project's test suite is minutes of work, and its result arrives
         // as an event like everything else that takes time here.
@@ -277,6 +293,38 @@ export class HarnessServer {
           ref: msg.ref,
           summary: msg.summary,
           ...(msg.evidenceId === undefined ? {} : { evidenceId: msg.evidenceId }),
+          ...(msg.expectationSetId === undefined ? {} : { expectationSetId: msg.expectationSetId }),
+          ...(msg.expectationItemId === undefined ? {} : { expectationItemId: msg.expectationItemId }),
+        });
+        return { type: 'ok' };
+
+      case 'answer.record':
+        if (msg.humanCredential === this.token) {
+          throw new Error('A distinct human-authority credential is required for this write.');
+        }
+        orchestrator.recordAnswer(msg.threadId, {
+          expectationItemId: msg.expectationItemId,
+          expectationSetId: msg.expectationSetId,
+          answer: msg.answer,
+          candidate: msg.candidate,
+          ...(msg.humanCredential === undefined ? {} : { humanCredential: msg.humanCredential }),
+          ...(msg.evidenceIds === undefined ? {} : { evidenceIds: msg.evidenceIds }),
+          ...(msg.answerId === undefined ? {} : { answerId: msg.answerId }),
+        });
+        return { type: 'ok' };
+
+      case 'attestation.record':
+        if (msg.humanCredential === this.token) {
+          throw new Error('A distinct human-authority credential is required for this write.');
+        }
+        orchestrator.recordAttestation(msg.threadId, {
+          expectationItemId: msg.expectationItemId,
+          expectationSetId: msg.expectationSetId,
+          statement: msg.statement,
+          candidate: msg.candidate,
+          ...(msg.humanCredential === undefined ? {} : { humanCredential: msg.humanCredential }),
+          evidenceIds: msg.evidenceIds,
+          ...(msg.attestationId === undefined ? {} : { attestationId: msg.attestationId }),
         });
         return { type: 'ok' };
 

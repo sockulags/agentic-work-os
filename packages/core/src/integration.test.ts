@@ -694,7 +694,7 @@ describe('workspace contract', () => {
     assert.match(lastReceivedBy(orch, thread.id, 'claude'), /<workspace>/);
   });
 
-  test('orchestrator refuses to silently resolve an expectation guardrail without a registry', async () => {
+  test('orchestrator resolves a core expectation guardrail from the immutable manifest', async () => {
     const { orch } = await boot(makeConfig());
     declare(workDir, {
       agents: ['codex'],
@@ -707,12 +707,12 @@ describe('workspace contract', () => {
     });
 
     const resolution = orch.workspace(workDir);
-    assert.equal(resolution.status, 'invalid');
-    assert.equal(resolution.status === 'invalid' ? resolution.problems[0]?.path : null, 'guardrails[0].parameters.expectationItem');
-    assert.match(resolution.status === 'invalid' ? resolution.problems[0]?.message ?? '' : '', /No pinned expectation registry/);
+    assert.equal(resolution.status, 'ok');
+    const guardrailParameters = resolution.status === 'ok' ? resolution.workspace.guardrails[0]?.parameters : undefined;
+    assert.equal(guardrailParameters !== undefined && 'expectationItem' in guardrailParameters ? guardrailParameters.expectationItem : null, 'scope');
   });
 
-  test('orchestrator does not silently resolve a model guardrail before registry wiring', async () => {
+  test('orchestrator keeps unsupported model guardrails invalid without a provider registry', async () => {
     const { orch } = await boot(makeConfig());
     declare(workDir, {
       agents: ['codex'],
@@ -726,8 +726,63 @@ describe('workspace contract', () => {
 
     const resolution = orch.workspace(workDir);
     assert.equal(resolution.status, 'invalid');
-    assert.equal(resolution.status === 'invalid' ? resolution.problems[0]?.path : null, 'guardrails[0].parameters.expectationItem');
-    assert.match(resolution.status === 'invalid' ? resolution.problems[0]?.message ?? '' : '', /No pinned expectation registry/);
+    assert.equal(resolution.status === 'invalid' ? resolution.problems[0]?.path : null, 'guardrails[0].parameters.evaluatorProfile');
+    assert.match(resolution.status === 'invalid' ? resolution.problems[0]?.message ?? '' : '', /Unknown evaluator profile/);
+  });
+
+  test('only an authorized typed answer opens a recorded planning transition', async () => {
+    const { orch } = await boot(makeConfig({ humanAuthorityToken: 'planning-human-secret' }));
+    declare(workDir, {
+      agents: ['codex'],
+      roles: [{ id: 'planner', label: 'Planner' }, { id: 'reviewer', label: 'Reviewer' }],
+      steps: [
+        { id: 'plan', action: 'Plan', role: 'planner', workers: ['codex'] },
+        { id: 'review', action: 'Review', role: 'reviewer', workers: ['codex'] },
+      ],
+      guardrails: [{
+        id: 'scope-answer',
+        kind: 'mandatory-answer',
+        attach: { step: 'review' },
+        enforcement: 'required',
+        parameters: { expectationItem: 'question.scope', authority: 'user' },
+      }],
+    });
+    const thread = orch.createThread({ cwd: workDir });
+    const candidate = {
+      kind: 'working-tree' as const,
+      id: 'planning-tree',
+      revision: 'planning-commit',
+      digest: 'planning-tree',
+      pinned: true,
+    };
+    const first = await orch.evaluatePlanningTransition(thread.id, {
+      sourceStepId: 'plan', targetStepId: 'review', candidate, transitionId: 'planning-scope',
+    });
+    assert.equal(first.verdict, 'waiting-for-human');
+    assert.ok(first.evaluation.expectationSetId);
+
+    orch.store.append(thread.id, 'codex', { kind: 'message.completed', itemId: 'worker-message', text: 'keep it' });
+    orch.store.append(thread.id, 'codex', {
+      kind: 'approval.resolved', approvalId: 'generic-approval', optionId: 'allow', behavior: 'allow', auto: false,
+    });
+    const workerOnly = await orch.evaluatePlanningTransition(thread.id, {
+      sourceStepId: 'plan', targetStepId: 'review', candidate, transitionId: 'planning-scope',
+    });
+    assert.equal(workerOnly.verdict, 'waiting-for-human');
+
+    orch.recordAnswer(thread.id, {
+      expectationItemId: 'question.scope',
+      expectationSetId: first.evaluation.expectationSetId,
+      answer: { type: 'choice', value: 'keep' },
+      candidate,
+      answerId: 'planning-answer',
+      humanCredential: 'planning-human-secret',
+    });
+    const opened = await orch.evaluatePlanningTransition(thread.id, {
+      sourceStepId: 'plan', targetStepId: 'review', candidate, transitionId: 'planning-scope',
+    });
+    assert.equal(opened.verdict, 'passed');
+    assert.equal(orch.store.events(thread.id).filter((event) => event.kind === 'transition.evaluated').length, 3);
   });
 
   test('refuses a turn to an agent the project does not allow', async () => {
@@ -1479,6 +1534,103 @@ describe('the integration gate', () => {
   function gateEvents(orch: Orchestrator, threadId: string) {
     return orch.store.events(threadId).filter((e) => e.kind === 'gate.evaluated');
   }
+
+  test('evaluates attached schema-v3 guardrails together with reserved verification during integration', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    mkdirSync(join(cwd, '.awos'), { recursive: true });
+    writeFileSync(join(cwd, WORKSPACE_FILE), JSON.stringify({
+      version: WORKSPACE_SCHEMA_VERSION,
+      name: 'v3-integration',
+      verify: [{ name: 'test', command: TEST_COMMAND }],
+      integration: { requires: ['test'], allowOverride: false },
+      roles: [
+        { id: 'lane-owner', label: 'Lane owner' },
+        { id: 'workspace-owner', label: 'Workspace owner' },
+      ],
+      steps: [
+        { id: 'lane', action: 'Lane', role: 'lane-owner', workers: ['codex'] },
+        { id: 'workspace', action: 'Workspace', role: 'workspace-owner', workers: ['codex'] },
+      ],
+      guardrails: [{
+        id: 'evidence',
+        kind: 'evidence-present',
+        attach: { from: 'lane', to: 'workspace' },
+        enforcement: 'required',
+        parameters: { expectationItem: 'scope', evidenceKind: 'command' },
+      }],
+    }), 'utf8');
+    execFileSync('git', ['add', WORKSPACE_FILE], { cwd });
+    execFileSync('git', ['commit', '-qm', 'workspace guardrails'], { cwd });
+
+    const { thread } = await laneWithWork(orch, cwd);
+    await orch.runCheck(thread.id, 'claude', 'test');
+    const result = await orch.integrateLane(thread.id, 'claude');
+    assert.equal(result.ok, true, result.detail);
+    const evaluated = orch.store.events(thread.id).find((event) => event.kind === 'gate.evaluated');
+    assert.ok(evaluated?.kind === 'gate.evaluated');
+    assert.equal(evaluated.evaluation?.verdict, 'passed');
+    assert.deepEqual(
+      evaluated.evaluation?.facts.map((fact) => [fact.requirementId, fact.provenance.evaluatorKind]),
+      [['scope', 'evidence-present'], ['test', 'verification']],
+    );
+    assert.ok(evaluated.evaluation?.facts.every((fact) => fact.provenance.expectationSetId === evaluated.evaluation?.expectationSetId));
+    const set = orch.store.events(thread.id).find((event) => event.kind === 'expectation.set.created');
+    assert.ok(set?.kind === 'expectation.set.created');
+    assert.ok(set.expectationSet.items.every((item) => item.reference.locator.includes(resolvePath(cwd, WORKSPACE_FILE))));
+  });
+
+  test('a schema-v3 guardrail can deny an override allowed by legacy integration policy', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    mkdirSync(join(cwd, '.awos'), { recursive: true });
+    writeFileSync(join(cwd, WORKSPACE_FILE), JSON.stringify({
+      version: WORKSPACE_SCHEMA_VERSION,
+      name: 'v3-override-policy',
+      verify: [
+        { name: 'test', command: TEST_COMMAND },
+        { name: 'fail', command: FAIL_COMMAND },
+      ],
+      integration: { requires: ['test'], allowOverride: true },
+      roles: [
+        { id: 'lane-owner', label: 'Lane owner' },
+        { id: 'workspace-owner', label: 'Workspace owner' },
+      ],
+      steps: [
+        { id: 'lane', action: 'Lane', role: 'lane-owner', workers: ['codex'] },
+        { id: 'workspace', action: 'Workspace', role: 'workspace-owner', workers: ['codex'] },
+      ],
+      guardrails: [{
+        id: 'locked-check',
+        kind: 'verification',
+        attach: { from: 'lane', to: 'workspace' },
+        enforcement: 'required',
+        allowOverride: false,
+        parameters: { checks: ['fail'] },
+      }],
+    }), 'utf8');
+    execFileSync('git', ['add', WORKSPACE_FILE], { cwd });
+    execFileSync('git', ['commit', '-qm', 'workspace override policy'], { cwd });
+
+    const { thread } = await laneWithWork(orch, cwd);
+    await orch.runCheck(thread.id, 'claude', 'test');
+    await orch.runCheck(thread.id, 'claude', 'fail');
+    const result = await orch.integrateLane(thread.id, 'claude', {
+      actor: 'user',
+      reason: 'reviewed the failing check',
+    });
+
+    assert.equal(result.ok, false);
+    const evaluated = orch.store.events(thread.id).find((event) => event.kind === 'gate.evaluated');
+    assert.ok(evaluated?.kind === 'gate.evaluated');
+    assert.equal(evaluated.evaluation?.verdict, 'blocked');
+    assert.match(evaluated.evaluation?.refusal?.reason ?? '', /does not permit/);
+    assert.deepEqual(
+      evaluated.evaluation?.enforcement.map((entry) => [entry.requirementId, entry.allowOverride]),
+      [['fail', false], ['test', true]],
+    );
+    assert.equal(existsSync(join(cwd, 'from-the-lane.txt')), false, 'the refused override applies nothing');
+  });
 
   test('an unverified lane is refused, and the target directory is untouched', async () => {
     const { orch } = await boot(makeConfig());

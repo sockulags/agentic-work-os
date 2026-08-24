@@ -27,6 +27,7 @@ const expectationSet: ExpectationSet = createExpectationSet({
     kind: 'requirement',
     name: 'test',
     enforcement: 'required',
+    allowOverride: true,
     reference: {
       sourceKind: 'repository-file',
       locator: 'checks/test.txt',
@@ -91,7 +92,7 @@ const common = {
   ...attempt,
   facts: [fact],
   provenance: [provenance],
-  enforcement: [{ requirementId: 'test', enforcement: 'required' as const }],
+  enforcement: [{ requirementId: 'test', enforcement: 'required' as const, allowOverride: true }],
   timestamp: 1,
 };
 
@@ -172,6 +173,39 @@ test('constructors reject missing override authority and reasons', () => {
   );
 });
 
+test('constructors reject an override that bypasses an explicit non-overridable policy', () => {
+  assert.throws(
+    () => createTransitionEvaluation({
+      ...common,
+      facts: [failedFact],
+      provenance: [failedFact.provenance],
+      enforcement: [{ requirementId: 'test', enforcement: 'required', allowOverride: false }],
+      verdict: 'passed',
+      refusal: null,
+      override: createRequiredTransitionOverride({
+        permissionGranted: true,
+        authorizedUserId: 'user',
+        reason: 'explicitly reviewed',
+      }),
+    }),
+    /does not permit/,
+  );
+});
+
+test('expectation sets reject override permission on advisory and absolute items', () => {
+  for (const enforcement of ['advisory', 'absolute'] as const) {
+    assert.throws(
+      () => createExpectationSet({
+        ...expectationSet,
+        expectationSetId: `set-${enforcement}`,
+        items: [{ ...expectationSet.items[0]!, enforcement, allowOverride: true }],
+      }),
+      /Only required expectation items/,
+      enforcement,
+    );
+  }
+});
+
 test('constructors reject invalid attempts relative to the previous evaluation', () => {
   const previous = createTransitionEvaluation({
     ...common,
@@ -206,7 +240,7 @@ test('an absolute override cannot hide duplicate satisfied and failed facts', ()
   const absoluteSet = createExpectationSet({
     ...expectationSet,
     expectationSetId: 'set-absolute',
-    items: [{ ...expectationSet.items[0]!, enforcement: 'absolute' }],
+    items: [{ ...expectationSet.items[0]!, enforcement: 'absolute', allowOverride: false }],
   });
   const absoluteAttempt = { ...attempt, expectationSetId: absoluteSet.expectationSetId };
   const absoluteProvenance = {
@@ -232,7 +266,7 @@ test('an absolute override cannot hide duplicate satisfied and failed facts', ()
       ...absoluteAttempt,
       facts: [satisfied, failed],
       provenance: [satisfied.provenance, failed.provenance],
-      enforcement: [{ requirementId: 'test', enforcement: 'absolute' }],
+    enforcement: [{ requirementId: 'test', enforcement: 'absolute', allowOverride: false }],
       timestamp: 1,
       verdict: 'passed',
       refusal: null,

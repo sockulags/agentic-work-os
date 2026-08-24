@@ -2,12 +2,17 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   createExpectationSet,
+  createRequiredTransitionOverride,
   createTransitionEvaluation,
   type HarnessEvent,
   type TransitionEvaluation,
 } from '@awos/protocol';
 import {
   foldEvidence,
+  foldAnswers,
+  foldAttestations,
+  foldTypedAnswerConflicts,
+  foldHumanAttestationConflicts,
   foldExpectationSetConflicts,
   foldExpectationSets,
   foldExpectationSetHistory,
@@ -134,6 +139,51 @@ describe('foldEvidence', () => {
 
     assert.equal(item?.ref.url, 'https://example.com/run/9');
     assert.equal(item?.ref.eventId, null);
+  });
+});
+
+describe('immutable human records', () => {
+  test('replay keeps the first answer definition and exposes conflicting identity reuse', () => {
+    const first = event({
+      kind: 'answer.recorded', answerId: 'answer-1', expectationItemId: 'question-a', expectationSetId: 'set-a',
+      actor: 'user', authority: 'user', answer: { type: 'choice', value: 'keep' },
+      candidate: { kind: 'working-tree', id: 'tree-a', revision: 'commit-a', digest: 'tree-a', pinned: true },
+      evidenceIds: [], recordedAt: 10,
+    });
+    const identical = event({ ...first, id: 'replayed-answer', seq: 99, ts: 99, recordedAt: 99 });
+    const conflict = event({
+      ...first,
+      id: 'conflicting-answer', seq: 100, ts: 100, recordedAt: 100,
+      expectationItemId: 'question-b', expectationSetId: 'set-b', actor: 'codex',
+      answer: { type: 'choice', value: 'change' },
+      candidate: { kind: 'working-tree', id: 'tree-b', revision: 'commit-b', digest: 'tree-b', pinned: true },
+    });
+    const events = [first, identical, conflict];
+    assert.equal(foldAnswers(events)[0]?.expectationItemId, 'question-a');
+    assert.equal(foldAnswers(events)[0]?.answer.value, 'keep');
+    assert.equal(foldTypedAnswerConflicts(events).get('answer-1')?.length, 1);
+    assert.equal(foldAnswers([...events])[0]?.candidate.id, 'tree-a', 'restart replay has the same authority');
+  });
+
+  test('replay keeps the first attestation and exposes actor, authority, expectation, and candidate conflicts', () => {
+    const first = event({
+      kind: 'human.attestation.recorded', attestationId: 'attestation-1', expectationItemId: 'review-a', expectationSetId: 'set-a',
+      actor: 'user', authority: 'user', statement: 'reviewed',
+      candidate: { kind: 'working-tree', id: 'tree-a', revision: 'commit-a', digest: 'tree-a', pinned: true },
+      evidenceIds: ['evidence-a'], recordedAt: 10,
+    });
+    const conflict = event({
+      ...first,
+      id: 'conflicting-attestation', seq: 101, ts: 101, recordedAt: 101,
+      expectationItemId: 'review-b', expectationSetId: 'set-b', actor: 'codex', authority: 'user',
+      statement: 'different',
+      candidate: { kind: 'working-tree', id: 'tree-b', revision: 'commit-b', digest: 'tree-b', pinned: true },
+      evidenceIds: ['evidence-b'],
+    });
+    const events = [first, conflict];
+    assert.equal(foldAttestations(events)[0]?.expectationItemId, 'review-a');
+    assert.equal(foldHumanAttestationConflicts(events).get('attestation-1')?.[0]?.actor, 'codex');
+    assert.equal(foldAttestations([...events])[0]?.candidate.id, 'tree-a');
   });
 });
 
@@ -273,7 +323,7 @@ describe('transition and expectation folds', () => {
       ...evaluation(2, 'passed', null, 'transition-c'),
       facts: [],
       provenance: [],
-      enforcement: [{ requirementId: 'test', enforcement: 'required' as const }],
+      enforcement: [{ requirementId: 'test', enforcement: 'required' as const, allowOverride: true }],
     } as TransitionEvaluation;
     const events = [
       event({ kind: 'transition.evaluated', evaluation: first }),
@@ -290,6 +340,82 @@ describe('transition and expectation folds', () => {
       foldTransitionEvaluationConflicts(events).get('transition-c')?.map((entry) => entry.attempt),
       [2],
     );
+  });
+
+  test('replay rejects a passed evaluation whose override policy differs from the pinned set', () => {
+    const set = createExpectationSet({
+      expectationSetId: 'set-policy',
+      manifestDigest: 'manifest-policy',
+      items: [{
+        id: 'test',
+        kind: 'requirement',
+        name: 'test',
+        enforcement: 'required',
+        allowOverride: false,
+        reference: {
+          sourceKind: 'repository-file',
+          locator: 'C:/workspace/checks.txt',
+          nativeRevision: 'commit-policy',
+          contentDigest: 'digest-policy',
+          selector: null,
+        },
+      }],
+      authority: { sourceOwner: 'project', pinnedBy: 'user' },
+      supersedes: null,
+    });
+    const candidate = {
+      kind: 'working-tree' as const,
+      id: 'tree-policy',
+      revision: 'commit-policy',
+      digest: 'tree-policy',
+      pinned: true,
+    };
+    const provenance = {
+      evaluatorId: 'test-evaluator',
+      evaluatorVersion: '1',
+      evaluatorClass: 'deterministic' as const,
+      expectationSetId: set.expectationSetId,
+      candidate,
+      evidenceIds: ['evidence-policy'],
+      validity: 'current' as const,
+      detail: null,
+    };
+    const evaluation = createTransitionEvaluation({
+      transitionId: 'policy-transition',
+      attempt: 1,
+      runId: null,
+      actor: 'user',
+      sourceStepId: 'draft',
+      targetStepId: 'approved',
+      expectationSetId: set.expectationSetId,
+      candidate,
+      evidenceIds: ['evidence-policy'],
+      facts: [{
+        requirementId: 'test',
+        state: 'failed',
+        evidenceIds: ['evidence-policy'],
+        provenance,
+        detail: null,
+      }],
+      provenance: [provenance],
+      enforcement: [{ requirementId: 'test', enforcement: 'required', allowOverride: true }],
+      timestamp: 10,
+      supersedesTransitionId: null,
+      verdict: 'passed',
+      refusal: null,
+      override: createRequiredTransitionOverride({
+        permissionGranted: true,
+        authorizedUserId: 'user',
+        reason: 'reviewed',
+      }),
+    });
+    const events = [
+      event({ kind: 'expectation.set.created', expectationSet: set }),
+      event({ kind: 'transition.evaluated', evaluation }),
+    ];
+
+    assert.equal(foldTransitionEvaluations(events).has('policy-transition'), false);
+    assert.equal(foldTransitionEvaluationConflicts(events).get('policy-transition')?.length, 1);
   });
 
   test('rejects a replay that starts above the first attempt', () => {

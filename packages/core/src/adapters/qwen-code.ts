@@ -16,6 +16,8 @@ import type { ToolKind, PermissionMode, ModelTarget } from '@awos/protocol';
 import type { WorkerAdapter, AgentCapabilities, AdapterContext } from './agent.js';
 import { resolveWorkspace } from '../workspace/resolve.js';
 import type { HarnessConfig } from '../config.js';
+import { workerEnvironment } from '../util/spawn.js';
+import { CORE_EXPECTATION_ITEM_IDS, CORE_EVALUATOR_PROFILE_IDS } from '../workspace/manifest.js';
 
 export const QWEN_CORE_TOOLS = [
   'read_file',
@@ -238,7 +240,11 @@ export class QwenCodeAdapter implements WorkerAdapter {
     this.#target = target;
     this.#sessionId = ctx.resumeSessionId;
     this.#queryFactory = deps.query ?? ((args) => query(args));
-    const workspace = resolveWorkspace(ctx.cwd, { laneSetup: ctx.config.laneSetup });
+    const workspace = resolveWorkspace(ctx.cwd, {
+      laneSetup: ctx.config.laneSetup,
+      expectationItemIds: CORE_EXPECTATION_ITEM_IDS,
+      evaluatorProfileIds: CORE_EVALUATOR_PROFILE_IDS,
+    });
     this.#verifyCommands = workspace.status === 'ok' ? workspace.workspace.verify.map((entry) => entry.command) : [];
   }
 
@@ -298,14 +304,14 @@ export class QwenCodeAdapter implements WorkerAdapter {
           cwd: this.#ctx.cwd,
           model: this.#target.model,
           pathToQwenExecutable: this.#ctx.config.qwenBin || undefined,
-          env: {
+          env: workerEnvironment({
             OPENAI_BASE_URL: this.#target.endpoint ?? qwenBaseUrl(this.#ctx.config),
             OPENAI_MODEL: this.#target.model,
             OPENAI_API_KEY: qwenApiKey(this.#ctx.config),
             // Keep read-only Git commands from launching a configured pager.
             GIT_PAGER: '',
             PAGER: '',
-          },
+          }),
           authType: 'openai',
           permissionMode: qwenPermissionMode(this.#ctx.permissionMode),
           canUseTool: this.#canUseTool,
