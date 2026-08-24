@@ -694,6 +694,42 @@ describe('workspace contract', () => {
     assert.match(lastReceivedBy(orch, thread.id, 'claude'), /<workspace>/);
   });
 
+  test('orchestrator refuses to silently resolve an expectation guardrail without a registry', async () => {
+    const { orch } = await boot(makeConfig());
+    declare(workDir, {
+      agents: ['codex'],
+      roles: [{ id: 'developer', label: 'Developer' }],
+      steps: [{ id: 'implement', action: 'Implement', role: 'developer', workers: ['codex'] }],
+      guardrails: [{
+        id: 'evidence', kind: 'evidence-present', attach: { step: 'implement' },
+        enforcement: 'required', parameters: { expectationItem: 'scope' },
+      }],
+    });
+
+    const resolution = orch.workspace(workDir);
+    assert.equal(resolution.status, 'invalid');
+    assert.equal(resolution.status === 'invalid' ? resolution.problems[0]?.path : null, 'guardrails[0].parameters.expectationItem');
+    assert.match(resolution.status === 'invalid' ? resolution.problems[0]?.message ?? '' : '', /No pinned expectation registry/);
+  });
+
+  test('orchestrator does not silently resolve a model guardrail before registry wiring', async () => {
+    const { orch } = await boot(makeConfig());
+    declare(workDir, {
+      agents: ['codex'],
+      roles: [{ id: 'reviewer', label: 'Reviewer' }],
+      steps: [{ id: 'review', action: 'Review', role: 'reviewer', workers: ['codex'] }],
+      guardrails: [{
+        id: 'rubric', kind: 'model-rubric', attach: { step: 'review' },
+        enforcement: 'required', parameters: { expectationItem: 'scope', evaluatorProfile: 'independent-model' },
+      }],
+    });
+
+    const resolution = orch.workspace(workDir);
+    assert.equal(resolution.status, 'invalid');
+    assert.equal(resolution.status === 'invalid' ? resolution.problems[0]?.path : null, 'guardrails[0].parameters.expectationItem');
+    assert.match(resolution.status === 'invalid' ? resolution.problems[0]?.message ?? '' : '', /No pinned expectation registry/);
+  });
+
   test('refuses a turn to an agent the project does not allow', async () => {
     const { orch } = await boot(makeConfig());
     declare(workDir, { agents: ['codex'] });
@@ -1393,7 +1429,7 @@ describe('the integration gate', () => {
     writeFileSync(
       join(root, WORKSPACE_FILE),
       JSON.stringify({
-        version: WORKSPACE_SCHEMA_VERSION,
+        version: 2,
         name: 'under-test',
         verify: [
           { name: 'test', command: TEST_COMMAND },
@@ -1409,7 +1445,7 @@ describe('the integration gate', () => {
     mkdirSync(join(root, dirname(WORKSPACE_LOCAL_FILE)), { recursive: true });
     writeFileSync(
       join(root, WORKSPACE_LOCAL_FILE),
-      JSON.stringify({ version: WORKSPACE_SCHEMA_VERSION, ...declaration }),
+      JSON.stringify({ version: 2, ...declaration }),
       'utf8',
     );
   }

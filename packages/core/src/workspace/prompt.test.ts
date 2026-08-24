@@ -19,6 +19,7 @@ function workspace(overrides: Partial<EffectiveWorkspace> = {}): WorkspaceResolu
       roles: [],
       steps: [],
       routes: [],
+      guardrails: [],
       origins: {
         name: 'shared',
         repository: 'shared',
@@ -30,6 +31,7 @@ function workspace(overrides: Partial<EffectiveWorkspace> = {}): WorkspaceResolu
         roles: 'default',
         steps: 'default',
         routes: 'default',
+        guardrails: 'default',
       },
       sources: ['.awos/workspace.json'],
       ...overrides,
@@ -53,6 +55,54 @@ describe('buildWorkspaceBlock', () => {
     assert.match(block, /npm install/);
     assert.match(block, /test — npm test/);
     assert.match(block, /ARCHITECTURE\.md/);
+  });
+
+  test('carries effective guardrail ids and stable references without evaluator internals', () => {
+    const block = buildWorkspaceBlock(workspace({
+      guardrails: [
+        {
+          id: 'implementation-checks',
+          kind: 'verification',
+          attach: { from: 'implement', to: 'review' },
+          enforcement: 'required',
+          allowOverride: false,
+          parameters: { checks: ['typecheck', 'test'] },
+          correction: { maxRuns: 2, onExhausted: 'waiting-for-human' },
+        },
+        {
+          id: 'visual-rubric',
+          kind: 'model-rubric',
+          attach: { step: 'review' },
+          enforcement: 'required',
+          allowOverride: false,
+          parameters: { expectationItem: 'prototype.dashboard', evaluatorProfile: 'independent-model-rubric' },
+          correction: { maxRuns: 2, onExhausted: 'waiting-for-human' },
+        },
+        {
+          id: 'pixel-review',
+          kind: 'pixel-diff',
+          attach: { step: 'review' },
+          enforcement: 'required',
+          allowOverride: false,
+          parameters: {
+            expectationItem: 'prototype.dashboard',
+            capture: {
+              browser: 'chromium-1', runtime: 'runtime-1', viewport: '1440x900', dpr: 1,
+              fonts: 'fonts-v1', data: 'fixture-v1', animation: 'disabled', region: 'main',
+            },
+          },
+          correction: { maxRuns: 2, onExhausted: 'waiting-for-human' },
+        },
+      ],
+    })) ?? '';
+
+    assert.match(block, /implementation-checks/);
+    assert.match(block, /typecheck, test/);
+    assert.match(block, /visual-rubric/);
+    assert.match(block, /prototype\.dashboard/);
+    assert.match(block, /independent-model-rubric/);
+    assert.match(block, /pixel-review/);
+    assert.doesNotMatch(block, /chromium-1|runtime-1|fonts-v1|fixture-v1/);
   });
 
   test('names reference files rather than inlining them', () => {

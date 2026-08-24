@@ -38,9 +38,10 @@ const workspace: Extract<WorkspaceResolution, { status: 'ok' }> = {
     roles: [{ id: 'implementer', label: 'Implementer' }],
     steps: [{ id: 'implement', action: 'Implement issue', role: 'implementer', workers: ['claude'] }],
     routes: [{ id: 'bug', match: { anyLabels: ['bug'] }, step: 'implement' }],
+    guardrails: [],
     origins: {
       name: 'shared', repository: 'shared', agents: 'shared', setup: 'default', verify: 'default',
-      integration: 'default', context: 'default', roles: 'shared', steps: 'shared', routes: 'shared',
+      integration: 'default', context: 'default', roles: 'shared', steps: 'shared', routes: 'shared', guardrails: 'default',
     },
     sources: ['.awos/workspace.json'],
   },
