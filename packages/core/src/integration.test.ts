@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { HarnessEvent, ThreadRuntimeState } from '@awos/protocol';
-import { RETAINED_FILE, WORKSPACE_FILE, WORKSPACE_SCHEMA_VERSION } from '@awos/protocol';
-import { foldEvidence, foldOutcomes, foldRetained } from './work/ledger.js';
+import { RETAINED_FILE, WORKSPACE_FILE, WORKSPACE_LOCAL_FILE, WORKSPACE_SCHEMA_VERSION } from '@awos/protocol';
+import { foldEvidence, foldOutcomes, foldRetained, foldTransitionEvaluations } from './work/ledger.js';
 import { Orchestrator } from './orchestrator.js';
 import type { HarnessConfig } from './config.js';
 
@@ -509,7 +509,7 @@ describe('cross-agent handoff', () => {
     assert.notEqual(state.lanes.claude, state.lanes.codex, 'the lanes are separate directories');
   });
 
-  test('integrating a lane moves its work into the thread directory', async () => {
+  test('refuses to integrate a lane without a canonical workspace source', async () => {
     const { orch } = await boot(makeConfig());
     const cwd = makeRepo();
     const thread = orch.createThread({ cwd });
@@ -523,14 +523,15 @@ describe('cross-agent handoff', () => {
     assert.equal(existsSync(join(cwd, 'from-the-lane.txt')), false, 'not there before');
 
     const result = await orch.integrateLane(thread.id, 'claude');
-    assert.equal(result.ok, true, result.detail);
-    assert.equal(readFileSync(join(cwd, 'from-the-lane.txt'), 'utf8'), 'work\n');
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /canonical integration source/);
+    assert.equal(existsSync(join(cwd, 'from-the-lane.txt')), false, 'missing source cannot pass');
 
     // The transcript is the record: an integration is part of the conversation.
-    const integrated = orch.store
+    const refused = orch.store
       .events(thread.id)
-      .find((e) => e.kind === 'lane.updated' && e.status === 'integrated');
-    assert.ok(integrated, 'the integration is in the log');
+      .find((e) => e.kind === 'lane.updated' && e.status === 'refused');
+    assert.ok(refused, 'the refusal is in the log');
   });
 
   test('refuses to leave parallel mode while a lane holds unintegrated work', async () => {
@@ -1378,6 +1379,9 @@ describe('outcomes, evidence and retained context', () => {
 });
 
 describe('the integration gate', () => {
+  const TEST_COMMAND = `node -e "require('fs').writeFileSync('ran-test.txt','yes')"`;
+  const FAIL_COMMAND = 'node -e "process.exit(1)"';
+
   /**
    * A workspace whose checks are node one-liners.
    *
@@ -1392,13 +1396,35 @@ describe('the integration gate', () => {
         version: WORKSPACE_SCHEMA_VERSION,
         name: 'under-test',
         verify: [
-          { name: 'test', command: `node -e "require('fs').writeFileSync('ran-test.txt','yes')"` },
-          { name: 'fail', command: 'node -e "process.exit(1)"' },
+          { name: 'test', command: TEST_COMMAND },
+          { name: 'fail', command: FAIL_COMMAND },
         ],
         integration,
       }),
       'utf8',
     );
+  }
+
+  function declareLocal(root: string, declaration: Record<string, unknown>): void {
+    mkdirSync(join(root, dirname(WORKSPACE_LOCAL_FILE)), { recursive: true });
+    writeFileSync(
+      join(root, WORKSPACE_LOCAL_FILE),
+      JSON.stringify({ version: WORKSPACE_SCHEMA_VERSION, ...declaration }),
+      'utf8',
+    );
+  }
+
+  function expectationSet(orch: Orchestrator, threadId: string) {
+    const created = orch.store.events(threadId).find((event) => event.kind === 'expectation.set.created');
+    assert.ok(created?.kind === 'expectation.set.created');
+    return created.expectationSet;
+  }
+
+  function sourceReference(orch: Orchestrator, threadId: string) {
+    const set = expectationSet(orch, threadId);
+    const reference = set.items[0]?.reference;
+    assert.ok(reference);
+    return { set, reference };
   }
 
   /** A thread in lanes mode with a lane provisioned for Claude and work in it. */
@@ -1437,6 +1463,153 @@ describe('the integration gate', () => {
     assert.equal(evaluated.requirements[0]?.state, 'missing');
     // The record names the content it judged, not just the moment it judged it.
     assert.match(evaluated.candidate.tree ?? '', /^[0-9a-f]{40}$/);
+  });
+
+  test('records the shared transition evaluation before applying the lane patch', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    const { thread } = await laneWithWork(orch, cwd);
+    const target = join(cwd, 'from-the-lane.txt');
+    let targetExistedWhenEvaluated: boolean | null = null;
+    orch.on('event', (event: HarnessEvent) => {
+      if (event.kind === 'gate.evaluated') {
+        targetExistedWhenEvaluated = existsSync(target);
+        assert.ok(event.evaluation, 'new integration events carry the shared evaluation');
+        assert.equal(event.evaluation.verdict, 'retry');
+        assert.equal(event.evaluation.attempt, 1);
+        assert.equal(event.evaluation.sourceStepId, 'lane');
+        assert.equal(event.evaluation.targetStepId, 'workspace');
+      }
+    });
+
+    const result = await orch.integrateLane(thread.id, 'claude');
+
+    assert.equal(result.ok, false);
+    assert.equal(targetExistedWhenEvaluated, false);
+    assert.equal(existsSync(target), false);
+    const latest = [...foldTransitionEvaluations(orch.store.events(thread.id)).values()][0];
+    assert.equal(latest?.verdict, 'retry');
+    assert.equal(latest?.refusal?.nextAction, 'provide-evidence');
+  });
+
+  test('refuses when the lane changes after a passing evaluation, before applying anything', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    const { thread, lane } = await laneWithWork(orch, cwd);
+    await orch.runCheck(thread.id, 'claude', 'test');
+    const target = join(cwd, 'from-the-lane.txt');
+    let changed = false;
+    orch.on('event', (event: HarnessEvent) => {
+      if (event.kind !== 'gate.evaluated' || changed) return;
+      changed = true;
+      writeFileSync(join(lane, 'from-the-lane.txt'), 'changed after evaluation\n');
+    });
+
+    const result = await orch.integrateLane(thread.id, 'claude');
+
+    assert.equal(result.ok, false);
+    assert.equal(changed, true);
+    assert.match(result.detail, /changed after evaluation/);
+    assert.equal(existsSync(target), false, 'the target stayed untouched after the mismatch');
+    assert.equal(readFileSync(join(lane, 'from-the-lane.txt'), 'utf8'), 'changed after evaluation\n');
+    assert.equal(gateEvents(orch, thread.id).at(-1)?.kind, 'gate.evaluated');
+  });
+
+  test('pins base-only integration and verification to the base declaration', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    const { thread } = await laneWithWork(orch, cwd);
+    await orch.runCheck(thread.id, 'claude', 'test');
+
+    assert.equal((await orch.integrateLane(thread.id, 'claude')).ok, true);
+    const { set, reference } = sourceReference(orch, thread.id);
+    assert.equal(reference.locator, resolvePath(cwd, WORKSPACE_FILE));
+    assert.match(reference.nativeRevision, /origins:integration=shared,verify=shared/);
+    assert.match(reference.contentDigest, /^[0-9a-f]{40}$/);
+    assert.notEqual(reference.nativeRevision, set.manifestDigest);
+    assert.notEqual(reference.contentDigest, set.manifestDigest);
+  });
+
+  test('pins local-only effective integration and verification to the local declaration', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['fail'] });
+    declareLocal(cwd, {
+      verify: [{ name: 'test', command: TEST_COMMAND }],
+      integration: { requires: ['test'] },
+    });
+    const { thread } = await laneWithWork(orch, cwd);
+    await orch.runCheck(thread.id, 'claude', 'test');
+
+    assert.equal((await orch.integrateLane(thread.id, 'claude')).ok, true);
+    const { reference } = sourceReference(orch, thread.id);
+    assert.equal(reference.locator, resolvePath(cwd, WORKSPACE_LOCAL_FILE));
+    assert.match(reference.nativeRevision, /origins:integration=local,verify=local/);
+  });
+
+  test('records both sources for a genuinely combined effective contract', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    declareLocal(cwd, {
+      verify: [{ name: 'test', command: TEST_COMMAND }],
+    });
+    const { thread } = await laneWithWork(orch, cwd);
+    await orch.runCheck(thread.id, 'claude', 'test');
+
+    assert.equal((await orch.integrateLane(thread.id, 'claude')).ok, true);
+    const { reference } = sourceReference(orch, thread.id);
+    assert.equal(
+      reference.locator,
+      `${resolvePath(cwd, WORKSPACE_FILE)}|${resolvePath(cwd, WORKSPACE_LOCAL_FILE)}`,
+    );
+    assert.match(reference.nativeRevision, /origins:integration=shared,verify=local/);
+    assert.match(reference.nativeRevision, /sources:[0-9a-f]{40},[0-9a-f]{40}/);
+  });
+
+  test('keeps source and manifest identity stable across unchanged resolution', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    const { thread } = await laneWithWork(orch, cwd);
+    await orch.runCheck(thread.id, 'claude', 'test');
+
+    assert.equal((await orch.integrateLane(thread.id, 'claude')).ok, true);
+    const first = sourceReference(orch, thread.id);
+    assert.equal((await orch.integrateLane(thread.id, 'claude')).ok, true);
+    const second = sourceReference(orch, thread.id);
+
+    assert.deepEqual(second, first);
+    assert.equal(
+      orch.store.events(thread.id).filter((event) => event.kind === 'expectation.set.created').length,
+      1,
+    );
+  });
+
+  test('replays the latest transition result and pinned expectation after restart', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    const { thread } = await laneWithWork(orch, cwd);
+    await orch.integrateLane(thread.id, 'claude');
+
+    const before = foldTransitionEvaluations(orch.store.events(thread.id)).values().next().value;
+    assert.ok(before);
+    await orch.stop();
+    orchestrator = null;
+
+    const revived = new Orchestrator(makeConfig());
+    await revived.start();
+    orchestrator = revived;
+    const after = foldTransitionEvaluations(revived.store.events(thread.id)).values().next().value;
+
+    assert.deepEqual(after, before);
+    assert.equal(after?.attempt, 1);
+    assert.equal(after?.expectationSetId, before.expectationSetId);
+    assert.equal(after?.refusal?.reason, before.refusal?.reason);
   });
 
   test('a verified lane integrates, all of it', async () => {
@@ -1553,13 +1726,18 @@ describe('the integration gate', () => {
         /does not permit overriding/,
       );
       assert.equal(existsSync(join(cwd, 'from-the-lane.txt')), false);
+      const evaluated = gateEvents(orch, thread.id).pop();
+      assert.equal(evaluated?.kind === 'gate.evaluated' ? evaluated.evaluation?.verdict : null, 'failed');
+      assert.equal(evaluated?.kind === 'gate.evaluated' ? evaluated.evaluation?.refusal?.retryable : null, true);
     });
 
     test('where permitted, it applies the work and records who said what', async () => {
       const { orch } = await boot(makeConfig());
       const cwd = makeRepo();
-      declare(cwd, { requires: ['test'], allowOverride: true });
+      declare(cwd, { requires: ['fail'], allowOverride: true });
       const { thread } = await laneWithWork(orch, cwd);
+      const check = await orch.runCheck(thread.id, 'claude', 'fail');
+      assert.equal(check.passed, false);
 
       const result = await orch.integrateLane(thread.id, 'claude', {
         actor: 'user',
@@ -1575,7 +1753,7 @@ describe('the integration gate', () => {
       assert.equal(evaluated.override?.actor, 'user');
       assert.match(evaluated.override?.reason ?? '', /broken on main/);
       // What was bypassed is in the same record as the bypass.
-      assert.equal(evaluated.requirements[0]?.state, 'missing');
+      assert.equal(evaluated.requirements[0]?.state, 'failed');
     });
 
     test('has to say why', async () => {

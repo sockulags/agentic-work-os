@@ -1,10 +1,13 @@
 import type {
   ClaimSource,
   EvidenceItem,
+  ExpectationSet,
   HarnessEvent,
   RetainedItem,
   RunOutcome,
+  TransitionEvaluation,
 } from '@awos/protocol';
+import { validateTransitionEvaluation } from '@awos/protocol';
 
 /**
  * Reading outcomes, evidence and retained context back out of the log.
@@ -22,6 +25,10 @@ import type {
 /** `agent: null` on a harness-level event means the person at the keyboard. */
 function sourceOf(event: HarnessEvent): ClaimSource {
   return event.agent ?? 'user';
+}
+
+function sameRecord(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 /** The current outcome of each run, keyed by run id. */
@@ -91,4 +98,128 @@ export function foldRetained(events: readonly HarnessEvent[]): RetainedItem[] {
  */
 export function selectedForContext(items: readonly RetainedItem[]): RetainedItem[] {
   return items.filter((item) => item.selected && !item.retired).sort((a, b) => a.at - b.at);
+}
+
+/**
+ * Immutable expectation sets recorded in this event stream, keyed by stable identity.
+ *
+ * A supersession event only links two identities; it never replaces the old set. That is
+ * what lets a replay explain which target an earlier transition actually used.
+ */
+export function foldExpectationSets(events: readonly HarnessEvent[]): Map<string, ExpectationSet> {
+  const sets = new Map<string, ExpectationSet>();
+  for (const event of events) {
+    if (event.kind !== 'expectation.set.created') continue;
+    // A set identity is immutable. Keep the first definition so a replayed or corrupted
+    // duplicate cannot replace the source against which earlier transitions were judged.
+    if (!sets.has(event.expectationSet.expectationSetId)) {
+      sets.set(event.expectationSet.expectationSetId, event.expectationSet);
+    }
+  }
+  return sets;
+}
+
+/** Conflicting redefinitions are visible to callers while the first set remains authoritative. */
+export function foldExpectationSetConflicts(events: readonly HarnessEvent[]): Map<string, ExpectationSet[]> {
+  const first = new Map<string, ExpectationSet>();
+  const conflicts = new Map<string, ExpectationSet[]>();
+  for (const event of events) {
+    if (event.kind !== 'expectation.set.created') continue;
+    const prior = first.get(event.expectationSet.expectationSetId);
+    if (prior === undefined) {
+      first.set(event.expectationSet.expectationSetId, event.expectationSet);
+      continue;
+    }
+    if (sameRecord(prior, event.expectationSet)) continue;
+    const entries = conflicts.get(event.expectationSet.expectationSetId) ?? [];
+    entries.push(event.expectationSet);
+    conflicts.set(event.expectationSet.expectationSetId, entries);
+  }
+  return conflicts;
+}
+
+/** Every accepted expectation set in first-definition order, including superseded sets. */
+export function foldExpectationSetHistory(events: readonly HarnessEvent[]): ExpectationSet[] {
+  return [...foldExpectationSets(events).values()];
+}
+
+/** Old expectation-set identity to its authorized replacement, without mutating either set. */
+export function foldExpectationSetSupersessions(events: readonly HarnessEvent[]): Map<string, string> {
+  const supersessions = new Map<string, string>();
+  for (const event of events) {
+    if (event.kind !== 'expectation.set.superseded') continue;
+    supersessions.set(event.expectationSetId, event.supersededByExpectationSetId);
+  }
+  return supersessions;
+}
+
+/**
+ * Latest evaluation for each transition identity. Attempt numbers, rather than mutable
+ * process state, decide which record is current after a restart.
+ */
+export function foldTransitionEvaluations(events: readonly HarnessEvent[]): Map<string, TransitionEvaluation> {
+  return foldTransitionRecords(events).latest;
+}
+
+/** Accepted transition history; duplicate, out-of-order, and invalid attempts are excluded. */
+export function foldTransitionEvaluationHistory(events: readonly HarnessEvent[]): Map<string, TransitionEvaluation[]> {
+  return foldTransitionRecords(events).history;
+}
+
+/** Rejected replay records, retained separately so callers can fail closed without rewriting history. */
+export function foldTransitionEvaluationConflicts(
+  events: readonly HarnessEvent[],
+): Map<string, TransitionEvaluation[]> {
+  return foldTransitionRecords(events).conflicts;
+}
+
+interface TransitionFold {
+  latest: Map<string, TransitionEvaluation>;
+  history: Map<string, TransitionEvaluation[]>;
+  conflicts: Map<string, TransitionEvaluation[]>;
+}
+
+function foldTransitionRecords(events: readonly HarnessEvent[]): TransitionFold {
+  const latest = new Map<string, TransitionEvaluation>();
+  const history = new Map<string, TransitionEvaluation[]>();
+  const conflicts = new Map<string, TransitionEvaluation[]>();
+  for (const evaluation of transitionEvaluations(events)) {
+    const invalidReason = validateTransitionEvaluation(evaluation);
+    if (invalidReason !== null) {
+      const entries = conflicts.get(evaluation.transitionId) ?? [];
+      entries.push(evaluation);
+      conflicts.set(evaluation.transitionId, entries);
+      continue;
+    }
+    const previous = latest.get(evaluation.transitionId);
+    if (previous === undefined && evaluation.attempt === 1) {
+      latest.set(evaluation.transitionId, evaluation);
+      history.set(evaluation.transitionId, [evaluation]);
+      continue;
+    }
+    if (previous !== undefined && evaluation.attempt > previous.attempt) {
+      latest.set(evaluation.transitionId, evaluation);
+      const entries = history.get(evaluation.transitionId) ?? [];
+      entries.push(evaluation);
+      history.set(evaluation.transitionId, entries);
+      continue;
+    }
+
+    const entries = conflicts.get(evaluation.transitionId) ?? [];
+    entries.push(evaluation);
+    conflicts.set(evaluation.transitionId, entries);
+  }
+  return { latest, history, conflicts };
+}
+
+function transitionEvaluations(events: readonly HarnessEvent[]): TransitionEvaluation[] {
+  const evaluations: TransitionEvaluation[] = [];
+  for (const event of events) {
+    if (event.kind === 'transition.evaluated') {
+      evaluations.push(event.evaluation);
+    } else if (event.kind === 'gate.evaluated' && event.evaluation !== undefined) {
+      evaluations.push(event.evaluation);
+    }
+  }
+  return evaluations;
 }

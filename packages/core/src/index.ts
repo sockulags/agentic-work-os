@@ -38,9 +38,33 @@ export {
   buildRetainedBlock,
   applyRetained,
 } from './work/prompt.js';
-export { foldEvidence, foldOutcomes, foldRetained, selectedForContext } from './work/ledger.js';
+export {
+  foldEvidence,
+  foldExpectationSets,
+  foldExpectationSetConflicts,
+  foldExpectationSetHistory,
+  foldExpectationSetSupersessions,
+  foldOutcomes,
+  foldRetained,
+  foldTransitionEvaluations,
+  foldTransitionEvaluationConflicts,
+  foldTransitionEvaluationHistory,
+  selectedForContext,
+} from './work/ledger.js';
 export { projectRunEvidence } from './work/runs.js';
-export { evaluateGate, explainGate, type GateInput, type GateDecision } from './work/gate.js';
+export {
+  buildIntegrationExpectationSet,
+  candidateIdentity,
+  evaluateGate,
+  evaluateIntegrationTransition,
+  evaluateTransition,
+  explainGate,
+  type GateInput,
+  type GateDecision,
+  type IntegrationTransitionInput,
+  type TransitionDecision,
+  type TransitionInput,
+} from './work/gate.js';
 export { PermissionBridge } from './permission-bridge.js';
 export { ClaudeAdapter } from './adapters/claude.js';
 export { CodexAdapter } from './adapters/codex.js';

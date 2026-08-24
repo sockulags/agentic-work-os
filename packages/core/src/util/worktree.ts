@@ -1,5 +1,5 @@
 import { rmSync } from 'node:fs';
-import { applyPatch, diffTrees, headTree, snapshotWorkingTree, tryGit } from './git.js';
+import { applyPatch, diffTrees, headCommit, headTree, snapshotWorkingTree, tryGit } from './git.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger('lanes');
@@ -45,6 +45,16 @@ export type LaneResult =
 export type IntegrateResult =
   | { ok: true; patch: string | null }
   | { ok: false; reason: string };
+
+export interface IntegrateOptions {
+  /**
+   * The exact lane tree that was evaluated. `undefined` keeps the legacy unbound utility
+   * behavior; `null` is an evaluated but unidentifiable candidate and therefore refuses.
+   */
+  expectedTree?: string | null;
+  /** The lane revision captured with the evaluated candidate, when available. */
+  expectedRevision?: string | null;
+}
 
 /**
  * Create a lane at `path` seeded from `baseCwd`'s current working tree.
@@ -106,15 +116,47 @@ export async function laneDiff(lane: Lane): Promise<string | null> {
  * user resolves whatever it collided with, and an integration that lands is never offered
  * twice.
  */
-export async function integrateLane(lane: Lane, baseCwd: string): Promise<IntegrateResult> {
-  const patch = await laneDiff(lane);
+export async function integrateLane(
+  lane: Lane,
+  baseCwd: string,
+  options: IntegrateOptions = {},
+): Promise<IntegrateResult> {
+  const evaluatedTree = options.expectedTree;
+  const evaluatedRevision = options.expectedRevision;
+  const [now, revision] = await Promise.all([
+    snapshotWorkingTree(lane.path),
+    evaluatedRevision === undefined ? Promise.resolve(null) : headCommit(lane.path),
+  ]);
+  if (
+    (evaluatedTree !== undefined && now !== evaluatedTree) ||
+    (evaluatedRevision !== undefined && revision !== evaluatedRevision)
+  ) {
+    return { ok: false, reason: 'the lane changed after evaluation; integration was refused' };
+  }
+  if (now === null) return { ok: true, patch: null };
+
+  const patch = await diffTrees(lane.path, lane.baseTree, now);
   if (patch === null) return { ok: true, patch: null };
+
+  // Recheck after constructing the patch and immediately before the first mutation. The
+  // patch is only for the tree that was evaluated; a changed lane must never be applied.
+  const [beforeApply, revisionBeforeApply] = await Promise.all([
+    snapshotWorkingTree(lane.path),
+    evaluatedRevision === undefined ? Promise.resolve(null) : headCommit(lane.path),
+  ]);
+  if (
+    beforeApply !== now ||
+    (evaluatedTree !== undefined && beforeApply !== evaluatedTree) ||
+    (evaluatedRevision !== undefined && revisionBeforeApply !== evaluatedRevision)
+  ) {
+    return { ok: false, reason: 'the lane changed after evaluation; integration was refused' };
+  }
 
   const applied = await applyPatch(baseCwd, patch);
   if (!applied.applied) return { ok: false, reason: applied.reason };
 
-  const now = await snapshotWorkingTree(lane.path);
-  if (now !== null) lane.baseTree = now;
+  const after = await snapshotWorkingTree(lane.path);
+  if (after !== null) lane.baseTree = after;
 
   log.info('lane integrated', { lane: lane.path, chars: patch.length });
   return { ok: true, patch };
