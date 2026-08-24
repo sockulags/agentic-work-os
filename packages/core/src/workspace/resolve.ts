@@ -70,7 +70,6 @@ export function resolveWorkspace(cwd: string, options: ResolveOptions = {}): Wor
       message: 'A local legacy integration declaration cannot override schema-v3 guardrail policy.',
     });
   }
-  validateLegacyIntegrationAttachmentCollision(shared, problems);
   validateSharedV3VerificationPolicy(shared, local, problems);
 
   if (problems.some((problem) => problem.severity === 'error')) {
@@ -195,29 +194,6 @@ function validateSharedV3VerificationPolicy(
         file: WORKSPACE_LOCAL_FILE,
         path: `verify[${localIndex}].command`,
         message: `Local verification cannot change shared check "${name}" selected by a schema-v3 guardrail. Keep command "${command}".`,
-      });
-    }
-  }
-}
-
-/** The legacy integration projection owns the lane-to-workspace attachment. */
-function validateLegacyIntegrationAttachmentCollision(
-  shared: Layer | null,
-  problems: WorkspaceProblem[],
-): void {
-  if (
-    shared?.declaration.version !== WORKSPACE_SCHEMA_VERSION ||
-    (shared.declaration.integration?.requires?.length ?? 0) === 0
-  ) return;
-
-  for (const [index, guardrail] of (shared.declaration.guardrails ?? []).entries()) {
-    const attachment = guardrail.attach;
-    if ('from' in attachment && attachment.from === 'lane' && attachment.to === 'workspace') {
-      problems.push({
-        severity: 'error',
-        file: WORKSPACE_FILE,
-        path: `guardrails[${index}].attach`,
-        message: `Guardrail "${guardrail.id}" collides with the reserved legacy integration guardrail on transition "lane" -> "workspace". Remove the explicit attachment or integration.requires.`,
       });
     }
   }

@@ -19,11 +19,14 @@ import type { ProjectIssueDetail } from './project-issue.js';
 import type {
   EvidenceKind,
   EvidenceRef,
+  CandidateIdentity,
   RequirementResult,
   RetainedItem,
   RetainedKind,
   RunClaim,
+  TypedAnswer,
   WorkingState,
+  TransitionEvaluation,
 } from './evidence.js';
 
 export type PermissionMode =
@@ -137,6 +140,15 @@ export type ClientRequest =
   | { type: 'lane.integrate'; threadId: string; agent: AgentId; override?: { reason: string } }
   /** What the integration gate would decide about a lane right now. */
   | { type: 'gate.get'; threadId: string; agent: AgentId }
+  /** Core-owned planning attempt; the result is recorded before any future state change. */
+  | {
+      type: 'transition.plan';
+      threadId: string;
+      sourceStepId: string;
+      targetStepId: string;
+      candidate: CandidateIdentity;
+      transitionId?: string;
+    }
   /** Run a check the workspace names, where the agent's work is. */
   | { type: 'verify.run'; threadId: string; agent: AgentId; name: string }
   | { type: 'turn.send'; threadId: string; agent: AgentId; text: string }
@@ -194,6 +206,34 @@ export type ClientRequest =
       summary: string;
       /** Pass an existing id to correct that item rather than add another. */
       evidenceId?: string;
+      expectationSetId?: string | null;
+      expectationItemId?: string | null;
+    }
+  /** Record a typed answer through the core-owned human authority boundary. */
+  | {
+      type: 'answer.record';
+      threadId: string;
+      expectationItemId: string;
+      expectationSetId: string;
+      answer: TypedAnswer;
+      candidate: CandidateIdentity;
+      /** Separate human-authority credential; omitted or wrong fails closed. */
+      humanCredential?: string;
+      evidenceIds?: string[];
+      answerId?: string;
+    }
+  /** Record a human attestation through the core-owned authority boundary. */
+  | {
+      type: 'attestation.record';
+      threadId: string;
+      expectationItemId: string;
+      expectationSetId: string;
+      statement: string;
+      candidate: CandidateIdentity;
+      /** Separate human-authority credential; omitted or wrong fails closed. */
+      humanCredential?: string;
+      evidenceIds: string[];
+      attestationId?: string;
     }
   /** Keep a discovery, decision, constraint or open question against the work item. */
   | {
@@ -271,6 +311,13 @@ export type ServerResponseBody =
       allowed: boolean;
       requirements: RequirementResult[];
       candidate: WorkingState;
+    }
+  | {
+      type: 'transition';
+      threadId: string;
+      allowed: boolean;
+      verdict: TransitionEvaluation['verdict'];
+      evaluation: TransitionEvaluation;
     }
   | { type: 'agents.probe'; agents: AgentAvailability[] };
 

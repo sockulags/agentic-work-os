@@ -3,8 +3,10 @@ import type {
   EvidenceItem,
   ExpectationSet,
   HarnessEvent,
+  HumanAttestationRecord,
   RetainedItem,
   RunOutcome,
+  TypedAnswerRecord,
   TransitionEvaluation,
 } from '@awos/protocol';
 import { validateTransitionEvaluation } from '@awos/protocol';
@@ -12,11 +14,10 @@ import { validateTransitionEvaluation } from '@awos/protocol';
 /**
  * Reading outcomes, evidence and retained context back out of the log.
  *
- * Three folds over the same append-only record, all with the same rule: a later record
- * with an id already seen replaces the earlier one. That is the whole correction
- * mechanism. Nothing is rewritten, nothing is deleted, and the log still holds every
- * version in the order it was claimed — which is what makes "who said what, and when did
- * they change their mind" answerable at all.
+ * Folds over the same append-only record deliberately distinguish correction-capable
+ * claims from immutable identities. Answers, attestations and expectation sets keep the
+ * first definition authoritative; a conflicting duplicate is exposed separately instead
+ * of silently changing the policy or human record used by an evaluator.
  *
  * Pure functions over events, so the answer after a restart is the answer the live socket
  * gave: replaying `events.jsonl` through these produces exactly the same result.
@@ -62,11 +63,171 @@ export function foldEvidence(events: readonly HarnessEvent[]): EvidenceItem[] {
       summary: event.summary,
       state: event.state,
       check: event.check,
+      ...(event.expectationSetId === undefined ? {} : { expectationSetId: event.expectationSetId }),
+      ...(event.expectationItemId === undefined ? {} : { expectationItemId: event.expectationItemId }),
       source: sourceOf(event),
       at: event.ts,
     });
   }
   return [...items.values()];
+}
+
+/** Every typed answer, oldest first, with corrections folded by answer identity. */
+export function foldTypedAnswers(events: readonly HarnessEvent[]): TypedAnswerRecord[] {
+  const answers = new Map<string, TypedAnswerRecord>();
+  for (const event of events) {
+    if (event.kind !== 'answer.recorded') continue;
+    const answer = {
+      answerId: event.answerId,
+      expectationItemId: event.expectationItemId,
+      expectationSetId: event.expectationSetId,
+      actor: event.actor,
+      authority: event.authority,
+      answer: event.answer,
+      candidate: event.candidate,
+      evidenceIds: [...event.evidenceIds],
+      threadId: event.threadId,
+      at: finiteRecordTime(event.recordedAt, event.ts),
+    } satisfies TypedAnswerRecord;
+    if (!answers.has(answer.answerId)) answers.set(answer.answerId, answer);
+  }
+  return [...answers.values()].sort((left, right) => left.at - right.at);
+}
+
+/** Conflicting answer definitions keyed by the immutable caller-selected answer id. */
+export function foldTypedAnswerConflicts(events: readonly HarnessEvent[]): Map<string, TypedAnswerRecord[]> {
+  const first = new Map<string, TypedAnswerRecord>();
+  const conflicts = new Map<string, TypedAnswerRecord[]>();
+  for (const event of events) {
+    if (event.kind !== 'answer.recorded') continue;
+    const answer = {
+      answerId: event.answerId,
+      expectationItemId: event.expectationItemId,
+      expectationSetId: event.expectationSetId,
+      actor: event.actor,
+      authority: event.authority,
+      answer: event.answer,
+      candidate: event.candidate,
+      evidenceIds: [...event.evidenceIds],
+      threadId: event.threadId,
+      at: finiteRecordTime(event.recordedAt, event.ts),
+    } satisfies TypedAnswerRecord;
+    const prior = first.get(answer.answerId);
+    if (prior === undefined) {
+      first.set(answer.answerId, answer);
+    } else if (!sameAnswerDefinition(prior, answer)) {
+      const entries = conflicts.get(answer.answerId) ?? [];
+      entries.push(answer);
+      conflicts.set(answer.answerId, entries);
+    }
+  }
+  return conflicts;
+}
+
+/** Alias that keeps the read name short for evaluator callers. */
+export const foldAnswers = foldTypedAnswers;
+
+/** Every human attestation, oldest first, with corrections folded by attestation identity. */
+export function foldHumanAttestations(events: readonly HarnessEvent[]): HumanAttestationRecord[] {
+  const attestations = new Map<string, HumanAttestationRecord>();
+  for (const event of events) {
+    if (event.kind !== 'attestation.recorded' && event.kind !== 'human.attestation.recorded') continue;
+    const attestation = {
+      attestationId: event.attestationId,
+      expectationItemId: event.expectationItemId,
+      expectationSetId: event.expectationSetId,
+      actor: event.actor,
+      authority: event.authority,
+      statement: event.statement,
+      candidate: event.candidate,
+      evidenceIds: [...event.evidenceIds],
+      threadId: event.threadId,
+      at: finiteRecordTime(event.recordedAt, event.ts),
+    } satisfies HumanAttestationRecord;
+    if (!attestations.has(attestation.attestationId)) attestations.set(attestation.attestationId, attestation);
+  }
+  return [...attestations.values()].sort((left, right) => left.at - right.at);
+}
+
+/** Conflicting attestation definitions keyed by the immutable caller-selected id. */
+export function foldHumanAttestationConflicts(events: readonly HarnessEvent[]): Map<string, HumanAttestationRecord[]> {
+  const first = new Map<string, HumanAttestationRecord>();
+  const conflicts = new Map<string, HumanAttestationRecord[]>();
+  for (const event of events) {
+    if (event.kind !== 'attestation.recorded' && event.kind !== 'human.attestation.recorded') continue;
+    const attestation = {
+      attestationId: event.attestationId,
+      expectationItemId: event.expectationItemId,
+      expectationSetId: event.expectationSetId,
+      actor: event.actor,
+      authority: event.authority,
+      statement: event.statement,
+      candidate: event.candidate,
+      evidenceIds: [...event.evidenceIds],
+      threadId: event.threadId,
+      at: finiteRecordTime(event.recordedAt, event.ts),
+    } satisfies HumanAttestationRecord;
+    const prior = first.get(attestation.attestationId);
+    if (prior === undefined) {
+      first.set(attestation.attestationId, attestation);
+    } else if (!sameAttestationDefinition(prior, attestation)) {
+      const entries = conflicts.get(attestation.attestationId) ?? [];
+      entries.push(attestation);
+      conflicts.set(attestation.attestationId, entries);
+    }
+  }
+  return conflicts;
+}
+
+/** Alias that keeps the read name short for evaluator callers. */
+export const foldAttestations = foldHumanAttestations;
+
+function finiteRecordTime(value: number, fallback: number): number {
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function sameAnswerDefinition(left: TypedAnswerRecord, right: TypedAnswerRecord): boolean {
+  return sameRecord({
+    expectationItemId: left.expectationItemId,
+    expectationSetId: left.expectationSetId,
+    actor: left.actor,
+    authority: left.authority,
+    answer: left.answer,
+    candidate: left.candidate,
+    evidenceIds: left.evidenceIds,
+    threadId: left.threadId,
+  }, {
+    expectationItemId: right.expectationItemId,
+    expectationSetId: right.expectationSetId,
+    actor: right.actor,
+    authority: right.authority,
+    answer: right.answer,
+    candidate: right.candidate,
+    evidenceIds: right.evidenceIds,
+    threadId: right.threadId,
+  });
+}
+
+function sameAttestationDefinition(left: HumanAttestationRecord, right: HumanAttestationRecord): boolean {
+  return sameRecord({
+    expectationItemId: left.expectationItemId,
+    expectationSetId: left.expectationSetId,
+    actor: left.actor,
+    authority: left.authority,
+    statement: left.statement,
+    candidate: left.candidate,
+    evidenceIds: left.evidenceIds,
+    threadId: left.threadId,
+  }, {
+    expectationItemId: right.expectationItemId,
+    expectationSetId: right.expectationSetId,
+    actor: right.actor,
+    authority: right.authority,
+    statement: right.statement,
+    candidate: right.candidate,
+    evidenceIds: right.evidenceIds,
+    threadId: right.threadId,
+  });
 }
 
 /** Every retained item, oldest first, each at its latest version. */
@@ -183,8 +344,15 @@ function foldTransitionRecords(events: readonly HarnessEvent[]): TransitionFold 
   const latest = new Map<string, TransitionEvaluation>();
   const history = new Map<string, TransitionEvaluation[]>();
   const conflicts = new Map<string, TransitionEvaluation[]>();
+  const expectationSets = foldExpectationSets(events);
+  const expectationSetConflicts = foldExpectationSetConflicts(events);
   for (const evaluation of transitionEvaluations(events)) {
-    const invalidReason = validateTransitionEvaluation(evaluation);
+    const pinnedExpectationSet = expectationSets.get(evaluation.expectationSetId);
+    const invalidReason = expectationSetConflicts.has(evaluation.expectationSetId)
+      ? 'The evaluation references a conflicting immutable expectation set.'
+      : pinnedExpectationSet === undefined && evaluation.verdict === 'passed' && evaluation.enforcement.length > 0
+        ? 'A passed evaluation with enforced expectations needs its pinned expectation set.'
+        : validateTransitionEvaluation(evaluation, pinnedExpectationSet);
     if (invalidReason !== null) {
       const entries = conflicts.get(evaluation.transitionId) ?? [];
       entries.push(evaluation);

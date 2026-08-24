@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { workerEnvironment } from './spawn.js';
 
 /**
  * Working-tree snapshots for turn-level diffs.
@@ -46,7 +47,7 @@ export async function tryGit(
   try {
     const child = execFileAsync('git', args, {
       cwd,
-      env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+      env: workerEnvironment(extraEnv),
       // A turn can touch a lot of files; a unified diff for all of them is bounded only
       // by the tree size, so give it real headroom rather than truncating mid-patch.
       maxBuffer: 128 * 1024 * 1024,

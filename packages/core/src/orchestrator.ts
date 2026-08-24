@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { exec } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import { promisify } from 'node:util';
@@ -16,6 +16,7 @@ import type {
   EvidenceItem,
   EvidenceKind,
   EvidenceRef,
+  CandidateIdentity,
   GateOverride,
   ExpectationSet,
   TransitionAttempt,
@@ -42,9 +43,12 @@ import type {
   ProjectIssueDetailSource,
   ProjectIssueThreadHistory,
   ReferenceIdentity,
+  TypedAnswer,
+  WorkspaceGuardrail,
 } from '@awos/protocol';
 import {
   AGENT_IDS,
+  createTransitionEvaluation,
   PINNED_CONTEXT_MAX_CHARS,
   RETAINED_FILE,
   RUN_CONTEXT_MAX_CHARS,
@@ -59,6 +63,7 @@ import { PermissionBridge } from './permission-bridge.js';
 import { ThreadStore } from './store/thread-store.js';
 import { ContextStore, applyPinnedContext, buildPinnedContext } from './store/context-store.js';
 import { resolveWorkspace } from './workspace/resolve.js';
+import { CORE_EXPECTATION_ITEM_IDS, CORE_EVALUATOR_PROFILE_IDS } from './workspace/manifest.js';
 import { WorkspaceRoleSelectionStore } from './workspace/role-selection-store.js';
 import { applyWorkspace, buildWorkspaceBlock } from './workspace/prompt.js';
 import { WorkItemStore } from './work/store.js';
@@ -71,6 +76,10 @@ import {
 } from './work/prompt.js';
 import {
   foldEvidence,
+  foldAttestations,
+  foldAnswers,
+  foldHumanAttestationConflicts,
+  foldTypedAnswerConflicts,
   foldExpectationSetConflicts,
   foldExpectationSets,
   foldExpectationSetHistory,
@@ -82,11 +91,14 @@ import {
 import { projectRunEvidence } from './work/runs.js';
 import {
   buildIntegrationExpectationSet,
+  buildGuardrailExpectationSet,
   candidateIdentity,
   evaluateGate,
   evaluateIntegrationTransition,
+  evaluateGuardedTransition,
   explainGate,
   type GateDecision,
+  type TransitionDecision,
 } from './work/gate.js';
 import { fetchIssue, parseIssueRef } from './work/github.js';
 import { explainIssueRoute } from './work/issue-route-presentation.js';
@@ -100,6 +112,7 @@ import { snapshotWorkingTree, diffTrees, headTree, headCommit } from './util/git
 import type { Lane } from './util/worktree.js';
 import { provisionLane, laneDiff, integrateLane, removeLane } from './util/worktree.js';
 import { createLogger } from './util/logger.js';
+import { workerEnvironment } from './util/spawn.js';
 
 const log = createLogger('orchestrator');
 const execAsync = promisify(exec);
@@ -185,6 +198,95 @@ function asRetainedKind(value: unknown): RetainedKind | null {
   return (RETAINED_KINDS as readonly string[]).includes(value as string)
     ? (value as RetainedKind)
     : null;
+}
+
+function validTypedAnswerInput(value: unknown): value is TypedAnswer {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const answer = value as { type?: unknown; value?: unknown };
+  switch (answer.type) {
+    case 'string':
+    case 'choice':
+      return typeof answer.value === 'string' && answer.value.trim() !== '';
+    case 'number':
+      return typeof answer.value === 'number' && Number.isFinite(answer.value);
+    case 'boolean':
+      return typeof answer.value === 'boolean';
+    default:
+      return false;
+  }
+}
+
+function matchesHumanAuthorityCredential(
+  expected: string | undefined,
+  presented: string | undefined,
+  ordinary: string | undefined,
+): boolean {
+  if (
+    expected === undefined ||
+    expected === '' ||
+    presented === undefined ||
+    presented === '' ||
+    (ordinary !== undefined && presented === ordinary)
+  ) return false;
+  const expectedBytes = Buffer.from(expected, 'utf8');
+  const presentedBytes = Buffer.from(presented, 'utf8');
+  return expectedBytes.length === presentedBytes.length && timingSafeEqual(expectedBytes, presentedBytes);
+}
+
+function sameTypedAnswerDefinition(
+  existing: { expectationItemId: string; expectationSetId: string; actor: string; authority: string; answer: TypedAnswer; candidate: CandidateIdentity; evidenceIds: readonly string[] },
+  input: { expectationItemId: string; expectationSetId: string; answer: TypedAnswer; candidate: CandidateIdentity; evidenceIds?: readonly string[] },
+): boolean {
+  return JSON.stringify({
+    expectationItemId: existing.expectationItemId,
+    expectationSetId: existing.expectationSetId,
+    actor: existing.actor,
+    authority: existing.authority,
+    answer: existing.answer,
+    candidate: existing.candidate,
+    evidenceIds: existing.evidenceIds,
+  }) === JSON.stringify({
+    expectationItemId: input.expectationItemId,
+    expectationSetId: input.expectationSetId,
+    actor: 'user',
+    authority: 'user',
+    answer: input.answer,
+    candidate: input.candidate,
+    evidenceIds: input.evidenceIds ?? [],
+  });
+}
+
+function sameHumanAttestationDefinition(
+  existing: { expectationItemId: string; expectationSetId: string; actor: string; authority: string; statement: string; candidate: CandidateIdentity; evidenceIds: readonly string[] },
+  input: { expectationItemId: string; expectationSetId: string; statement: string; candidate: CandidateIdentity; evidenceIds: readonly string[] },
+): boolean {
+  return JSON.stringify({
+    expectationItemId: existing.expectationItemId,
+    expectationSetId: existing.expectationSetId,
+    actor: existing.actor,
+    authority: existing.authority,
+    statement: existing.statement,
+    candidate: existing.candidate,
+    evidenceIds: existing.evidenceIds,
+  }) === JSON.stringify({
+    expectationItemId: input.expectationItemId,
+    expectationSetId: input.expectationSetId,
+    actor: 'user',
+    authority: 'user',
+    statement: input.statement,
+    candidate: input.candidate,
+    evidenceIds: input.evidenceIds,
+  });
+}
+
+function appliesToTransition(
+  guardrail: WorkspaceGuardrail,
+  sourceStepId: string,
+  targetStepId: string,
+): boolean {
+  return 'step' in guardrail.attach
+    ? guardrail.attach.step === targetStepId
+    : guardrail.attach.from === sourceStepId && guardrail.attach.to === targetStepId;
 }
 
 /** How many files a patch touches, for a one-line report of what an integration moved. */
@@ -717,7 +819,17 @@ class Thread {
       evidence: this.evidence(),
       candidateTree: candidate.tree,
     });
-    const configuredSet = buildIntegrationExpectationSet(integration, verify, workspaceSource);
+    const integrationGuardrails = workspace.status === 'ok'
+      ? workspace.workspace.guardrails.filter((guardrail) =>
+          'step' in guardrail.attach
+            ? guardrail.attach.step === 'workspace'
+            : guardrail.attach.from === 'lane' && guardrail.attach.to === 'workspace',
+        )
+      : [];
+    const configuredResult = workspace.status === 'ok'
+      ? buildGuardrailExpectationSet(integration, verify, workspaceSource, integrationGuardrails)
+      : { expectationSet: buildIntegrationExpectationSet(integration, verify, workspaceSource), conflicts: [] as readonly string[] };
+    const configuredSet = configuredResult.expectationSet;
     const currentEvents = this.#store.events(this.id);
     const expectationSets = foldExpectationSets(currentEvents);
     const expectationConflicts = foldExpectationSetConflicts(currentEvents);
@@ -791,6 +903,8 @@ class Thread {
       : null;
     const invalidAttemptReason = expectationConflict !== undefined
       ? 'The pinned expectation set has conflicting immutable definitions and cannot be evaluated.'
+      : configuredResult.conflicts.length > 0
+        ? `The attached guardrails have conflicting definitions for: ${configuredResult.conflicts.join(', ')}.`
       : invalidSourceReason;
     const decision = evaluateIntegrationTransition({
       integration,
@@ -803,6 +917,8 @@ class Thread {
       override: transitionOverride,
       ...(invalidOverrideReason === undefined ? {} : { invalidOverrideReason }),
       ...(invalidAttemptReason === undefined ? {} : { invalidAttemptReason }),
+      guardrails: integrationGuardrails,
+      events: currentEvents,
     });
 
     // Recorded before anything is applied, so the decision exists in the log whether or
@@ -901,7 +1017,11 @@ class Thread {
    * pinned notes, which are re-read for the same reason.
    */
   #workspace(cwd: string): WorkspaceResolution {
-    return resolveWorkspace(cwd, { laneSetup: this.#config.laneSetup });
+    return resolveWorkspace(cwd, {
+      laneSetup: this.#config.laneSetup,
+      expectationItemIds: CORE_EXPECTATION_ITEM_IDS,
+      evaluatorProfileIds: CORE_EVALUATOR_PROFILE_IDS,
+    });
   }
 
   /**
@@ -1009,6 +1129,8 @@ class Thread {
     ref: EvidenceRef;
     summary: string;
     evidenceId?: string;
+    expectationSetId?: string | null;
+    expectationItemId?: string | null;
   }): Promise<void> {
     const started = this.#runStarted(input.runId);
     if (!started) throw new Error(`No run ${input.runId} in this thread.`);
@@ -1023,6 +1145,94 @@ class Thread {
       summary: input.summary,
       state: await this.#workingState(started.agent),
       check: null,
+      ...(input.expectationSetId === undefined ? {} : { expectationSetId: input.expectationSetId }),
+      ...(input.expectationItemId === undefined ? {} : { expectationItemId: input.expectationItemId }),
+    });
+    this.#onState();
+  }
+
+  /** Record a typed user answer; worker messages and tool approvals never enter this path. */
+  recordAnswer(input: {
+    expectationItemId: string;
+    expectationSetId: string;
+    answer: TypedAnswer;
+    candidate: CandidateIdentity;
+    evidenceIds?: readonly string[];
+    answerId?: string;
+  }): void {
+    if (input.expectationItemId.trim() === '' || input.expectationSetId.trim() === '') {
+      throw new Error('A typed answer needs an expectation item and expectation set identity.');
+    }
+    if (input.answerId !== undefined && input.answerId.trim() === '') {
+      throw new Error('A typed answer id must be non-empty when supplied.');
+    }
+    if (!validTypedAnswerInput(input.answer)) {
+      throw new Error('A typed answer must use a supported non-prose value.');
+    }
+    const answerId = input.answerId ?? randomUUID();
+    const events = this.#store.events(this.id);
+    if (foldTypedAnswerConflicts(events).has(answerId)) {
+      throw new Error('The typed answer id already has a conflicting immutable definition.');
+    }
+    const existing = foldAnswers(events).find((answer) => answer.answerId === answerId);
+    if (existing !== undefined) {
+      if (sameTypedAnswerDefinition(existing, input)) return;
+      throw new Error('The typed answer id already has a conflicting immutable definition.');
+    }
+    const recordedAt = Date.now();
+    this.#record(null, {
+      kind: 'answer.recorded',
+      answerId,
+      expectationItemId: input.expectationItemId,
+      expectationSetId: input.expectationSetId,
+      actor: 'user',
+      authority: 'user',
+      answer: input.answer,
+      candidate: { ...input.candidate },
+      evidenceIds: [...(input.evidenceIds ?? [])],
+      recordedAt,
+    });
+    this.#onState();
+  }
+
+  /** Record an explicit user attestation with its immutable transition identities. */
+  recordAttestation(input: {
+    expectationItemId: string;
+    expectationSetId: string;
+    statement: string;
+    candidate: CandidateIdentity;
+    evidenceIds: readonly string[];
+    attestationId?: string;
+  }): void {
+    if (input.expectationItemId.trim() === '' || input.expectationSetId.trim() === '') {
+      throw new Error('An attestation needs an expectation item and expectation set identity.');
+    }
+    if (input.attestationId !== undefined && input.attestationId.trim() === '') {
+      throw new Error('An attestation id must be non-empty when supplied.');
+    }
+    if (input.statement.trim() === '') throw new Error('An attestation needs a non-empty statement.');
+    const attestationId = input.attestationId ?? randomUUID();
+    const events = this.#store.events(this.id);
+    if (foldHumanAttestationConflicts(events).has(attestationId)) {
+      throw new Error('The human attestation id already has a conflicting immutable definition.');
+    }
+    const existing = foldAttestations(events).find((attestation) => attestation.attestationId === attestationId);
+    if (existing !== undefined) {
+      if (sameHumanAttestationDefinition(existing, input)) return;
+      throw new Error('The human attestation id already has a conflicting immutable definition.');
+    }
+    const recordedAt = Date.now();
+    this.#record(null, {
+      kind: 'attestation.recorded',
+      attestationId,
+      expectationItemId: input.expectationItemId,
+      expectationSetId: input.expectationSetId,
+      actor: 'user',
+      authority: 'user',
+      statement: input.statement,
+      candidate: { ...input.candidate },
+      evidenceIds: [...input.evidenceIds],
+      recordedAt,
     });
     this.#onState();
   }
@@ -1062,6 +1272,7 @@ class Thread {
     try {
       const result = await execAsync(command, {
         cwd,
+        env: workerEnvironment(),
         timeout: this.#config.laneSetupTimeoutMs,
         windowsHide: true,
         maxBuffer: 32 * 1024 * 1024,
@@ -1129,6 +1340,137 @@ class Thread {
         candidateTree: candidate.tree,
       }),
       candidate,
+    };
+  }
+
+  /** Evaluate a planning edge from the recorded human answer/attestation facts. */
+  async evaluatePlanningTransition(input: {
+    sourceStepId: string;
+    targetStepId: string;
+    candidate: CandidateIdentity;
+    transitionId?: string;
+  }): Promise<TransitionDecision> {
+    const summary = this.#store.get(this.id);
+    if (!summary) throw new Error(`Unknown thread ${this.id}`);
+    if (input.sourceStepId.trim() === '' || input.targetStepId.trim() === '') {
+      throw new Error('A planning transition needs source and target steps.');
+    }
+
+    const workspace = this.#workspace(summary.cwd);
+    let sourceFailureReason: string | undefined;
+    let source: ReferenceIdentity;
+    if (workspace.status === 'ok') {
+      try {
+        source = workspaceIntegrationSource(workspace.workspace, await headCommit(summary.cwd));
+      } catch {
+        source = integrationFailureSource(summary.cwd, {
+          commit: input.candidate.revision,
+          tree: input.candidate.digest,
+          dirty: false,
+        });
+        sourceFailureReason = 'The workspace source could not be pinned, so the planning transition was refused.';
+      }
+    } else {
+      source = integrationFailureSource(summary.cwd, {
+        commit: input.candidate.revision,
+        tree: input.candidate.digest,
+        dirty: false,
+      });
+    }
+    const guardrails = workspace.status === 'ok'
+      ? workspace.workspace.guardrails.filter((guardrail) => appliesToTransition(
+          guardrail,
+          input.sourceStepId,
+          input.targetStepId,
+        ))
+      : [];
+    const built = buildGuardrailExpectationSet(
+      { requires: [], allowOverride: false },
+      workspace.status === 'ok' ? workspace.workspace.verify : [],
+      source,
+      guardrails,
+      { workItemId: summary.workItemId, sourceStepId: input.sourceStepId, targetStepId: input.targetStepId },
+    );
+    const currentEvents = this.#store.events(this.id);
+    const foldedSets = foldExpectationSets(currentEvents);
+    const conflicts = foldExpectationSetConflicts(currentEvents);
+    const prior = [...foldedSets.values()]
+      .filter((set) => set.scope?.sourceStepId === input.sourceStepId && set.scope?.targetStepId === input.targetStepId)
+      .at(-1);
+    const configuredSet = foldedSets.has(built.expectationSet.expectationSetId)
+      ? foldedSets.get(built.expectationSet.expectationSetId)!
+      : {
+          ...built.expectationSet,
+          ...(prior === undefined ? {} : { supersedes: prior.expectationSetId }),
+        };
+    if (!foldedSets.has(configuredSet.expectationSetId)) {
+      this.#record(null, { kind: 'expectation.set.created', expectationSet: configuredSet });
+      if (prior !== undefined && prior.expectationSetId !== configuredSet.expectationSetId) {
+        this.#record(null, {
+          kind: 'expectation.set.superseded',
+          expectationSetId: prior.expectationSetId,
+          supersededByExpectationSetId: configuredSet.expectationSetId,
+          supersedesTransitionId: null,
+        });
+      }
+    }
+
+    const transitionId = input.transitionId ?? `${this.id}:planning:${input.sourceStepId}:${input.targetStepId}`;
+    const history = foldTransitionEvaluationHistory(this.#store.events(this.id));
+    const previous = history.get(transitionId)?.at(-1);
+    const attempt: TransitionAttempt = {
+      transitionId,
+      attempt: (previous?.attempt ?? 0) + 1,
+      runId: null,
+      actor: 'user',
+      sourceStepId: input.sourceStepId,
+      targetStepId: input.targetStepId,
+      expectationSetId: configuredSet.expectationSetId,
+      candidate: { ...input.candidate },
+      evidenceIds: [],
+      supersedesTransitionId: previous?.transitionId ?? null,
+    };
+    const evaluation = evaluateGuardedTransition({
+      attempt,
+      expectationSet: configuredSet,
+      timestamp: Date.now(),
+      guardrails,
+      verify: workspace.status === 'ok' ? workspace.workspace.verify : [],
+      evidence: this.evidence(),
+      events: this.#store.events(this.id),
+    });
+    const invalidReason = workspace.status !== 'ok'
+      ? 'The workspace declaration is unavailable, so the planning transition was refused.'
+      : sourceFailureReason ?? (
+          conflicts.has(configuredSet.expectationSetId)
+            ? 'The pinned expectation set has conflicting immutable definitions and cannot be evaluated.'
+            : built.conflicts.length > 0
+              ? `The attached guardrails have conflicting definitions for: ${built.conflicts.join(', ')}.`
+              : undefined
+        );
+    const finalEvaluation = invalidReason === undefined
+      ? evaluation
+      : createTransitionEvaluation({
+          ...evaluation,
+          verdict: 'failed',
+          refusal: {
+            unmetRequirementIds: configuredSet.items.map((item) => item.id),
+            reason: invalidReason,
+            required: { kind: 'evidence', evidence: { requirementIds: configuredSet.items.map((item) => item.id), description: 'Provide a valid workspace policy and immutable expectation set.' } },
+            responsibleActor: 'user',
+            nextAction: 'escalate',
+            retryable: true,
+          },
+          override: null,
+        });
+    this.#record(null, { kind: 'transition.evaluated', evaluation: finalEvaluation });
+    this.#onState();
+    return {
+      allowed: finalEvaluation.verdict === 'passed',
+      requirements: [],
+      evaluation: finalEvaluation,
+      verdict: finalEvaluation.verdict,
+      refusal: finalEvaluation.refusal,
     };
   }
 
@@ -1311,6 +1653,7 @@ class Thread {
     try {
       await execAsync(command, {
         cwd,
+        env: workerEnvironment(),
         timeout: setup?.timeoutMs ?? this.#config.laneSetupTimeoutMs,
         windowsHide: true,
         maxBuffer: 32 * 1024 * 1024,
@@ -1378,6 +1721,9 @@ class Thread {
 
   /** Persist, update derived state, broadcast. The single write path for events. */
   #record(agent: AgentId | null, body: AdapterEvent): void {
+    if (agent !== null && (body.kind === 'answer.recorded' || body.kind === 'attestation.recorded' || body.kind === 'human.attestation.recorded')) {
+      throw new Error('Human answer and attestation records require the core human-authority boundary.');
+    }
     const event = this.#store.append(this.id, agent, body);
 
     switch (event.kind) {
@@ -1631,7 +1977,11 @@ export class Orchestrator extends EventEmitter {
    * form, or by a lane.
    */
   workspace(cwd: string): WorkspaceResolution {
-    return resolveWorkspace(cwd, { laneSetup: this.#config.laneSetup });
+    return resolveWorkspace(cwd, {
+      laneSetup: this.#config.laneSetup,
+      expectationItemIds: CORE_EXPECTATION_ITEM_IDS,
+      evaluatorProfileIds: CORE_EVALUATOR_PROFILE_IDS,
+    });
   }
 
   /** Project the local role preference against the current shared role authority. */
@@ -2026,9 +2376,66 @@ export class Orchestrator extends EventEmitter {
   /** Attach evidence to a run, with the tree it applies to captured as it stands now. */
   async recordEvidence(
     threadId: string,
-    input: { runId: string; kind: EvidenceKind; ref: EvidenceRef; summary: string; evidenceId?: string },
+    input: {
+      runId: string;
+      kind: EvidenceKind;
+      ref: EvidenceRef;
+      summary: string;
+      evidenceId?: string;
+      expectationSetId?: string | null;
+      expectationItemId?: string | null;
+    },
   ): Promise<void> {
     await this.#thread(threadId).recordEvidence(input);
+  }
+
+  /** Evaluate a planning edge from the recorded human answer/attestation facts. */
+  async evaluatePlanningTransition(
+    threadId: string,
+    input: {
+      sourceStepId: string;
+      targetStepId: string;
+      candidate: CandidateIdentity;
+      transitionId?: string;
+    },
+  ): Promise<TransitionDecision> {
+    return this.#thread(threadId).evaluatePlanningTransition(input);
+  }
+
+  /** Append a core-owned typed user answer for a planning expectation. */
+  recordAnswer(
+    threadId: string,
+    input: {
+      expectationItemId: string;
+      expectationSetId: string;
+      answer: TypedAnswer;
+      candidate: CandidateIdentity;
+      evidenceIds?: readonly string[];
+      answerId?: string;
+      humanCredential?: string;
+    },
+  ): void {
+    this.#requireHumanAuthorityCredential(input.humanCredential);
+    const { humanCredential: _humanCredential, ...record } = input;
+    this.#thread(threadId).recordAnswer(record);
+  }
+
+  /** Append a core-owned user attestation; the evaluator verifies its evidence later. */
+  recordAttestation(
+    threadId: string,
+    input: {
+      expectationItemId: string;
+      expectationSetId: string;
+      statement: string;
+      candidate: CandidateIdentity;
+      evidenceIds: readonly string[];
+      attestationId?: string;
+      humanCredential?: string;
+    },
+  ): void {
+    this.#requireHumanAuthorityCredential(input.humanCredential);
+    const { humanCredential: _humanCredential, ...record } = input;
+    this.#thread(threadId).recordAttestation(record);
   }
 
   /** Write something down against the thread's work item. */
@@ -2563,6 +2970,16 @@ export class Orchestrator extends EventEmitter {
 
   #requireThread(threadId: string): void {
     if (!this.store.get(threadId)) throw new Error(`Unknown thread ${threadId}`);
+  }
+
+  #requireHumanAuthorityCredential(presented: string | undefined): void {
+    if (!matchesHumanAuthorityCredential(
+      this.#config.humanAuthorityToken,
+      presented,
+      process.env['AWOS_TOKEN'],
+    )) {
+      throw new Error('A distinct human-authority credential is required for this write.');
+    }
   }
 
   #thread(threadId: string): Thread {

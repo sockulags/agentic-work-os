@@ -13,14 +13,18 @@
  */
 
 import type {
+  CandidateIdentity,
   CheckResult,
+  ClaimSource,
   ExpectationSet,
   EvidenceKind,
   EvidenceRef,
   GateOverride,
+  HumanAuthority,
   RequirementResult,
   RetainedKind,
   RunClaim,
+  TypedAnswer,
   TransitionEvaluation,
   WorkingState,
 } from './evidence.js';
@@ -281,6 +285,40 @@ export interface EvidenceRecordedBody {
   state: WorkingState;
   /** Set when this came from running a check the workspace names. */
   check: CheckResult | null;
+  /** Optional explicit association for evidence-backed planning expectations. */
+  expectationSetId?: string | null;
+  expectationItemId?: string | null;
+}
+
+/** A typed answer submitted by the authorized human, never inferred from a message. */
+export interface AnswerRecordedBody {
+  kind: 'answer.recorded';
+  answerId: string;
+  expectationItemId: string;
+  expectationSetId: string;
+  actor: ClaimSource;
+  authority: HumanAuthority;
+  answer: TypedAnswer;
+  candidate: CandidateIdentity;
+  evidenceIds: readonly string[];
+  /** Explicit body time; the event envelope `ts` remains the ordering authority. */
+  recordedAt: number;
+}
+
+/** An explicit human attestation bound to intent, candidate and supporting evidence. */
+export interface HumanAttestationRecordedBody {
+  /** The longer name is accepted for clarity in persisted records and replay. */
+  kind: 'attestation.recorded' | 'human.attestation.recorded';
+  attestationId: string;
+  expectationItemId: string;
+  expectationSetId: string;
+  actor: ClaimSource;
+  authority: HumanAuthority;
+  statement: string;
+  candidate: CandidateIdentity;
+  evidenceIds: readonly string[];
+  /** Explicit body time; the event envelope `ts` remains the ordering authority. */
+  recordedAt: number;
 }
 
 /**
@@ -472,6 +510,8 @@ export type HarnessEventBody =
   | RunCompletedBody
   | RunClosedBody
   | EvidenceRecordedBody
+  | AnswerRecordedBody
+  | HumanAttestationRecordedBody
   | GateEvaluatedBody
   | TransitionEvaluatedBody
   | ExpectationSetCreatedBody

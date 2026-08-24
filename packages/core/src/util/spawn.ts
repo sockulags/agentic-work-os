@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
+import { HUMAN_AUTH_TOKEN_ENV } from '../config.js';
 
 /**
  * Cross-platform CLI spawning.
@@ -18,6 +19,17 @@ export type StdioChild = ChildProcessByStdio<Writable, Readable, Readable>;
 export interface SpawnCliOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
+}
+
+/** Build a worker environment without crossing the human-authority boundary. */
+export function workerEnvironment(overrides: NodeJS.ProcessEnv = {}): Record<string, string> {
+  const humanAuthorityKey = HUMAN_AUTH_TOKEN_ENV.toLowerCase();
+  const env = Object.fromEntries(
+    Object.entries({ ...process.env, ...overrides })
+      .filter(([key]) => key.toLowerCase() !== humanAuthorityKey)
+      .filter((entry): entry is [string, string] => entry[1] !== undefined),
+  );
+  return env;
 }
 
 /**
@@ -44,7 +56,7 @@ export function spawnCli(
 ): StdioChild {
   const isWindows = process.platform === 'win32';
 
-  const env = { ...process.env, ...options.env };
+  const env = workerEnvironment(options.env);
 
   if (!isWindows) {
     return spawn(command, args, {

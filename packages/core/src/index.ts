@@ -1,4 +1,4 @@
-export { loadConfig, type HarnessConfig } from './config.js';
+export { HUMAN_AUTH_TOKEN_ENV, loadConfig, type HarnessConfig } from './config.js';
 export { Orchestrator } from './orchestrator.js';
 export { HarnessServer } from './server.js';
 export { ThreadStore } from './store/thread-store.js';
@@ -22,6 +22,14 @@ export {
   findWorkspaceRoot,
   type ResolveOptions as WorkspaceResolveOptions,
 } from './workspace/resolve.js';
+export {
+  CORE_EXPECTATION_ITEM_IDS,
+  CORE_EXPECTATION_MANIFEST,
+  CORE_EVALUATOR_PROFILE_IDS,
+  CORE_RESOLVER_EVALUATOR_KINDS,
+  coreExpectationManifestEntry,
+  type CoreExpectationManifestEntry,
+} from './workspace/manifest.js';
 export { parseDeclaration, type WorkspaceDeclaration } from './workspace/declaration.js';
 export { buildWorkspaceBlock, applyWorkspace } from './workspace/prompt.js';
 export { WorkItemStore } from './work/store.js';
@@ -40,6 +48,12 @@ export {
 } from './work/prompt.js';
 export {
   foldEvidence,
+  foldTypedAnswers,
+  foldTypedAnswerConflicts,
+  foldHumanAttestations,
+  foldHumanAttestationConflicts,
+  foldAnswers,
+  foldAttestations,
   foldExpectationSets,
   foldExpectationSetConflicts,
   foldExpectationSetHistory,
@@ -51,16 +65,35 @@ export {
   foldTransitionEvaluationHistory,
   selectedForContext,
 } from './work/ledger.js';
+export {
+  CORE_EVALUATOR_KINDS,
+  CORE_EVALUATOR_REGISTRY,
+  CORE_EVALUATOR_VERSION,
+  EVALUATOR_DIAGNOSTIC_MAX_CHARS,
+  coreEvaluator,
+  evaluateGuardrail,
+  evaluateGuardrails,
+  evaluateVerificationChecks,
+  type CoreEvaluatorDefinition,
+  type CoreEvaluatorKind,
+  type GuardrailEvaluatorInput,
+  type VerificationEvaluation,
+  type VerificationEvaluatorInput,
+} from './work/evaluators.js';
 export { projectRunEvidence } from './work/runs.js';
 export {
   buildIntegrationExpectationSet,
+  buildGuardrailExpectationSet,
   candidateIdentity,
   evaluateGate,
   evaluateIntegrationTransition,
+  evaluateGuardedTransition,
   evaluateTransition,
   explainGate,
   type GateInput,
   type GateDecision,
+  type GuardedTransitionInput,
+  type GuardrailExpectationSetResult,
   type IntegrationTransitionInput,
   type TransitionDecision,
   type TransitionInput,
@@ -92,3 +125,4 @@ export type {
 } from './adapters/registry.js';
 export type { AgentAdapter, WorkerAdapter, AgentCapabilities, AdapterContext } from './adapters/agent.js';
 export { LineDecoder, readJsonLines, encodeJsonLine } from './util/jsonl.js';
+export { workerEnvironment, spawnCli, type SpawnCliOptions, type StdioChild } from './util/spawn.js';

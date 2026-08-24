@@ -10,8 +10,9 @@ import {
   type ExpectationItemKind,
   type ExpectationSet,
   type TransitionAttempt,
+  type WorkspaceGuardrail,
 } from '@awos/protocol';
-import { buildIntegrationExpectationSet, evaluateTransition } from './gate.js';
+import { buildGuardrailExpectationSet, buildIntegrationExpectationSet, evaluateTransition } from './gate.js';
 
 const candidate: CandidateIdentity = {
   kind: 'working-tree',
@@ -34,6 +35,7 @@ function expectation(
       kind,
       name: id,
       enforcement,
+      allowOverride: enforcement === 'required',
       reference: {
         sourceKind: 'repository-file',
         locator: 'checks/test.txt',
@@ -123,6 +125,56 @@ describe('evaluateTransition', () => {
     assert.equal(result.verdict, 'passed');
     assert.deepEqual(result.override, override);
     assert.equal(result.facts[0]?.state, 'failed');
+  });
+
+  test('a required expectation with allowOverride false cannot be bypassed', () => {
+    const set = createExpectationSet({
+      ...expectation(),
+      items: [{ ...expectation().items[0]!, allowOverride: false }],
+    });
+    const override = createRequiredTransitionOverride({
+      permissionGranted: true,
+      authorizedUserId: 'user-1',
+      reason: 'reviewed the failing check',
+    });
+    const result = evaluateTransition({
+      attempt: attempt(set),
+      expectationSet: set,
+      facts: [fact(set, 'test', 'failed')],
+      timestamp: 10,
+      override,
+    });
+
+    assert.equal(result.verdict, 'blocked');
+    assert.match(result.refusal?.reason ?? '', /does not permit/);
+    assert.equal(result.override, null);
+  });
+
+  test('an override must cover every unmet required item with current failed evidence and permission', () => {
+    const base = expectation();
+    const set = createExpectationSet({
+      ...base,
+      expectationSetId: 'set-multiple',
+      items: [
+        { ...base.items[0]!, id: 'allowed', name: 'allowed', allowOverride: true },
+        { ...base.items[0]!, id: 'locked', name: 'locked', allowOverride: false },
+      ],
+    });
+    const override = createRequiredTransitionOverride({
+      permissionGranted: true,
+      authorizedUserId: 'user-1',
+      reason: 'reviewed the failing checks',
+    });
+    const result = evaluateTransition({
+      attempt: attempt(set),
+      expectationSet: set,
+      facts: [fact(set, 'allowed', 'failed'), fact(set, 'locked', 'failed')],
+      timestamp: 10,
+      override,
+    });
+
+    assert.equal(result.verdict, 'blocked');
+    assert.match(result.refusal?.reason ?? '', /does not permit/);
   });
 
   test('a required override cannot pass missing, unknown, stale, unpinned, uncertain, or mismatched facts', () => {
@@ -285,6 +337,35 @@ test('integration expectation sets require a canonical source identity', () => {
   const set = buildIntegrationExpectationSet(integration, verify, source);
   assert.match(set.expectationSetId, /^workspace-integration:/);
   assert.doesNotMatch(set.expectationSetId, /unbound-source/);
+  assert.equal(set.items[0]?.allowOverride, false);
+});
+
+test('schema-v3 expectation items come only from the core manifest', () => {
+  const source = {
+    sourceKind: 'workspace-declaration' as const,
+    locator: resolvePath('workspace.json'),
+    nativeRevision: 'git:head;content:source',
+    contentDigest: 'source',
+  };
+  const guardrail: WorkspaceGuardrail = {
+    id: 'unknown-expectation',
+    kind: 'evidence-present',
+    attach: { step: 'review' },
+    enforcement: 'required',
+    allowOverride: false,
+    parameters: { expectationItem: 'not-in-core-manifest' },
+    correction: { maxRuns: 2, onExhausted: 'waiting-for-human' },
+  };
+
+  const result = buildGuardrailExpectationSet(
+    { requires: [], allowOverride: false },
+    [],
+    source,
+    [guardrail],
+    { workItemId: null, sourceStepId: 'implementation', targetStepId: 'review' },
+  );
+  assert.deepEqual(result.expectationSet.items, []);
+  assert.deepEqual(result.conflicts, ['not-in-core-manifest']);
 });
 
 if (false) {

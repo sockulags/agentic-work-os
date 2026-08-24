@@ -30,6 +30,21 @@ export type RetainedKind = 'discovery' | 'decision' | 'constraint' | 'question';
 /** Who made a claim. `user` is the person at the keyboard; the rest are the agents. */
 export type ClaimSource = 'user' | AgentId;
 
+/** The only authority that can supply a planning answer or human attestation. */
+export type HumanAuthority = 'user';
+
+/**
+ * A deliberately small answer contract.
+ *
+ * Free-form worker messages are not answers. Keeping the value discriminated means the
+ * core can tell `false` and `0` from a missing value without interpreting prose.
+ */
+export type TypedAnswer =
+  | { type: 'string'; value: string }
+  | { type: 'number'; value: number }
+  | { type: 'boolean'; value: boolean }
+  | { type: 'choice'; value: string };
+
 /**
  * What the evidence points at.
  *
@@ -84,7 +99,38 @@ export interface EvidenceItem {
   summary: string;
   state: WorkingState;
   check: CheckResult | null;
+  /** Optional explicit association when evidence is recorded for a planning expectation. */
+  expectationSetId?: string | null;
+  expectationItemId?: string | null;
   source: ClaimSource;
+  at: number;
+}
+
+/** A typed answer as folded from an append-only `answer.recorded` event. */
+export interface TypedAnswerRecord {
+  answerId: string;
+  expectationItemId: string;
+  expectationSetId: string;
+  actor: ClaimSource;
+  authority: HumanAuthority;
+  answer: TypedAnswer;
+  candidate: CandidateIdentity;
+  evidenceIds: readonly string[];
+  threadId: string;
+  at: number;
+}
+
+/** A human statement that is evidence only when all of its identities still match. */
+export interface HumanAttestationRecord {
+  attestationId: string;
+  expectationItemId: string;
+  expectationSetId: string;
+  actor: ClaimSource;
+  authority: HumanAuthority;
+  statement: string;
+  candidate: CandidateIdentity;
+  evidenceIds: readonly string[];
+  threadId: string;
   at: number;
 }
 
@@ -149,7 +195,8 @@ export type ExpectationItemKind =
   | 'policy'
   | 'prototype'
   | 'visual-reference'
-  | 'mandatory-question';
+  | 'mandatory-question'
+  | 'human-attestation';
 
 /** Canonical source classes for immutable expectation references. */
 export type ExpectationSourceKind =
@@ -180,7 +227,11 @@ export interface ExpectationItem {
   kind: ExpectationItemKind;
   name: string;
   enforcement: Enforcement;
+  /** Whether a core-owned required transition may use an explicit human override. */
+  allowOverride: boolean;
   reference: ReferenceIdentity;
+  /** Explicit final authority; user-owned final expectations remain non-overridable. */
+  authority?: HumanAuthority;
 }
 
 /** Who owns the source and who authorized pinning it. */
@@ -239,6 +290,12 @@ export interface TransitionAttempt {
 
 export type EvaluatorFactState = 'satisfied' | 'failed' | 'unknown';
 
+/** Detailed observation state retained without making it a transition verdict. */
+export type EvaluatorObservationState = 'satisfied' | 'missing' | 'failed' | 'stale' | 'unknown';
+
+/** Maximum diagnostic size persisted on an evaluator fact. */
+export const EVALUATOR_DIAGNOSTIC_MAX_CHARS = 240;
+
 /** Why a fact cannot be treated as current, even when an adapter returned a result. */
 export type EvaluatorFactValidity =
   | 'current'
@@ -251,6 +308,8 @@ export type EvaluatorFactValidity =
 export interface EvaluatorProvenance {
   evaluatorId: string;
   evaluatorVersion: string;
+  /** Stable evaluator kind; `evaluatorId` remains for compatibility with v1 facts. */
+  evaluatorKind?: string;
   evaluatorClass: 'deterministic' | 'human' | 'model' | 'pixel' | 'other';
   expectationSetId: string;
   candidate: CandidateIdentity;
@@ -264,14 +323,24 @@ export interface EvaluatorFact {
   requirementId: string;
   /** Existing gate terminology uses the same `state` vocabulary. */
   state: EvaluatorFactState;
+  /** Missing, failed and stale stay distinguishable while transition state remains closed. */
+  observation?: EvaluatorObservationState;
+  /** Declared human authority carried as fact metadata, never as a verdict. */
+  authority?: HumanAuthority;
   evidenceIds: readonly string[];
   provenance: EvaluatorProvenance;
   detail: string | null;
+  /** Short diagnostics only; evaluators must not copy command output or worker prose here. */
+  diagnostics?: readonly string[];
 }
 
 export interface RequirementEnforcement {
   requirementId: string;
   enforcement: Enforcement;
+  /** Per-item override permission copied from the immutable expectation set. */
+  allowOverride: boolean;
+  /** User-owned final authority is not bypassable by a required override. */
+  authority?: HumanAuthority;
 }
 
 /** A required evidence item named by a structured refusal. */
@@ -384,7 +453,15 @@ export function createTransitionEvaluation(input: TransitionEvaluationInput): Tr
   const evaluation = {
     ...record,
     evidenceIds: [...input.evidenceIds],
-    facts: [...input.facts],
+    facts: input.facts.map((fact) => ({
+      ...fact,
+      evidenceIds: [...fact.evidenceIds],
+      provenance: {
+        ...fact.provenance,
+        evidenceIds: [...fact.provenance.evidenceIds],
+      },
+      ...(fact.diagnostics === undefined ? {} : { diagnostics: [...fact.diagnostics] }),
+    })),
     provenance: [...input.provenance],
     enforcement: [...input.enforcement],
     supersedesTransitionId: input.supersedesTransitionId ?? null,
@@ -435,21 +512,62 @@ function isCurrentPinnedEvaluatorProvenance(
  * auditable explicit override; absolute failures are never legal in a passed record.
  * Advisory failures remain visible without blocking, matching the core evaluator.
  */
-export function validateTransitionEvaluation(evaluation: TransitionEvaluation): string | null {
+export function validateTransitionEvaluation(
+  evaluation: TransitionEvaluation,
+  expectationSet?: ExpectationSet,
+): string | null {
   const factIds = new Set<string>();
   for (const fact of evaluation.facts) {
     if (factIds.has(fact.requirementId)) {
       return 'Each requirement may have only one evaluator fact per attempt.';
     }
+    if (
+      fact.provenance.evaluatorId.trim() === '' ||
+      fact.provenance.evaluatorVersion.trim() === '' ||
+      (fact.provenance.evaluatorKind !== undefined && fact.provenance.evaluatorKind.trim() === '') ||
+      (fact.detail !== null && fact.detail.length > EVALUATOR_DIAGNOSTIC_MAX_CHARS) ||
+      (fact.diagnostics ?? []).some((diagnostic) => diagnostic.length > EVALUATOR_DIAGNOSTIC_MAX_CHARS)
+    ) {
+      return 'Evaluator facts need a kind, version, stable provenance, and bounded diagnostics.';
+    }
     factIds.add(fact.requirementId);
   }
 
-  const enforcementById = new Map<string, RequirementEnforcement['enforcement']>();
+  const enforcementById = new Map<string, RequirementEnforcement>();
   for (const entry of evaluation.enforcement) {
     if (enforcementById.has(entry.requirementId)) {
       return 'Each requirement may have only one enforcement entry per attempt.';
     }
-    enforcementById.set(entry.requirementId, entry.enforcement);
+    if (entry.authority !== undefined && entry.authority !== 'user') {
+      return 'An enforcement entry names an unsupported final authority.';
+    }
+    if (typeof entry.allowOverride !== 'boolean') {
+      return 'An enforcement entry needs an explicit per-item override policy.';
+    }
+    if (entry.allowOverride && entry.enforcement !== 'required') {
+      return 'Only required enforcement entries may allow an explicit override.';
+    }
+    enforcementById.set(entry.requirementId, entry);
+  }
+
+  if (expectationSet !== undefined) {
+    if (expectationSet.expectationSetId !== evaluation.expectationSetId) {
+      return 'A transition evaluation must use the expectation set it claims to evaluate.';
+    }
+    if (enforcementById.size !== expectationSet.items.length) {
+      return 'A transition evaluation must preserve every immutable expectation policy.';
+    }
+    for (const item of expectationSet.items) {
+      const entry = enforcementById.get(item.id);
+      if (
+        entry === undefined ||
+        entry.enforcement !== item.enforcement ||
+        entry.allowOverride !== item.allowOverride ||
+        entry.authority !== item.authority
+      ) {
+        return 'A transition evaluation cannot bypass the immutable per-item override policy.';
+      }
+    }
   }
 
   if (evaluation.override !== null) {
@@ -482,7 +600,8 @@ export function validateTransitionEvaluation(evaluation: TransitionEvaluation): 
     return 'A passed transition needs exactly one evaluator fact for every enforcement entry.';
   }
 
-  for (const [requirementId, enforcement] of enforcementById) {
+  for (const [requirementId, enforcementEntry] of enforcementById) {
+    const enforcement = enforcementEntry.enforcement;
     const fact = factsById.get(requirementId);
     if (fact === undefined) {
       return 'A passed transition cannot omit an enforced evaluator fact.';
@@ -496,17 +615,29 @@ export function validateTransitionEvaluation(evaluation: TransitionEvaluation): 
     if (enforcement === 'absolute' && fact.state !== 'satisfied') {
       return 'Absolute expectations cannot be overridden.';
     }
+    if (
+      evaluation.override !== null &&
+      (enforcementEntry.authority === 'user' || enforcementEntry.allowOverride !== true) &&
+      fact.state !== 'satisfied'
+    ) {
+      return enforcementEntry.authority === 'user'
+        ? 'A user-owned final expectation cannot be overridden.'
+        : 'This expectation does not permit an explicit override.';
+    }
     if (evaluation.override === null && enforcement === 'required' && fact.state !== 'satisfied') {
       return 'A required failed expectation needs an eligible explicit override.';
     }
   }
 
   if (evaluation.override !== null) {
-    const requiredFailures = [...enforcementById].filter(([requirementId, enforcement]) =>
-      enforcement === 'required' && factsById.get(requirementId)?.state === 'failed',
+    const requiredFailures = [...enforcementById].filter(([requirementId, entry]) =>
+      entry.enforcement === 'required' && factsById.get(requirementId)?.state === 'failed',
     );
     if (requiredFailures.length === 0) {
       return 'An explicit override must cover a current failed required expectation.';
+    }
+    if (requiredFailures.some(([, entry]) => entry.allowOverride !== true || entry.authority === 'user')) {
+      return 'An explicit override cannot bypass a non-overridable expectation.';
     }
   }
 
@@ -544,6 +675,10 @@ export function createExpectationSet(input: ExpectationSet): ExpectationSet {
     if (item.id.trim() === '' || ids.has(item.id)) throw new Error('Expectation item ids must be unique and non-empty.');
     ids.add(item.id);
     if (item.name.trim() === '') throw new Error('Expectation item names must be non-empty.');
+    if (typeof item.allowOverride !== 'boolean') throw new Error('Expectation item override policy must be explicit.');
+    if (item.allowOverride && item.enforcement !== 'required') {
+      throw new Error('Only required expectation items may allow an explicit override.');
+    }
     if (item.reference.locator.trim() === '' || item.reference.nativeRevision.trim() === '' || item.reference.contentDigest.trim() === '') {
       throw new Error('Expectation references must be canonical, revision-pinned, and content-digested.');
     }
@@ -558,6 +693,17 @@ export function createExpectationSet(input: ExpectationSet): ExpectationSet {
       reference: { ...item.reference },
     })),
   };
+}
+
+/** Whether an expectation explicitly gives final authority to the user. */
+export function isUserFinalAuthority(
+  item: Pick<ExpectationItem, 'kind' | 'authority' | 'reference'>,
+): boolean {
+  return item.authority === 'user' && (
+    item.kind === 'mandatory-question' ||
+    item.kind === 'human-attestation' ||
+    item.reference.sourceKind === 'human-answer'
+  );
 }
 
 /** How much retained context a run's prompt will carry. */
