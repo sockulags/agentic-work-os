@@ -1,6 +1,9 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+/** Fallback ceiling on a Codex turn when the config does not carry one. */
+export const CODEX_TURN_TIMEOUT_DEFAULT_MS = 600_000;
+
 /** Process-only name for the credential that authorizes human-owned records. */
 export const HUMAN_AUTH_TOKEN_ENV = 'AWOS_HUMAN_AUTH_TOKEN';
 
@@ -59,6 +62,15 @@ export interface HarnessConfig {
   approvalTimeoutMs: number;
   /** Startup handshake budget for `codex app-server`. */
   codexInitTimeoutMs: number;
+  /**
+   * Ceiling on one Codex turn, measured from `turn/start` to `turn/completed`.
+   *
+   * `turn/start` only acknowledges that the turn was accepted; what ends it is a
+   * notification that arrives later. If that notification never comes — the server exits,
+   * or renames the method the adapter matches on — the thread would otherwise stay busy
+   * forever with no error. Optional so injected legacy test configs still typecheck.
+   */
+  codexTurnTimeoutMs?: number;
   /**
    * The GitHub CLI, used to read work items as the user.
    *
@@ -119,6 +131,7 @@ export function loadConfig(): HarnessConfig {
     interruptGraceMs: envInt('AWOS_INTERRUPT_GRACE_MS', 4_000),
     approvalTimeoutMs: envInt('AWOS_APPROVAL_TIMEOUT_MS', 10 * 60_000),
     codexInitTimeoutMs: envInt('AWOS_CODEX_INIT_TIMEOUT_MS', 30_000),
+    codexTurnTimeoutMs: envInt('AWOS_CODEX_TURN_TIMEOUT_MS', CODEX_TURN_TIMEOUT_DEFAULT_MS),
     ghBin: envStr('AWOS_GH_BIN', 'gh'),
     ghBinArgs: envArgs('AWOS_GH_BIN_ARGS'),
     ghTimeoutMs: envInt('AWOS_GH_TIMEOUT_MS', 20_000),
