@@ -232,3 +232,88 @@ test('project overview RPC returns the core-owned route and availability project
     await server.close();
   }
 });
+
+test('project issue detail reads current body without persisting, then falls back to the dated WorkItem snapshot', async () => {
+  const dataDir = tempDir();
+  const cwd = tempDir();
+  mkdirSync(join(cwd, '.awos'), { recursive: true });
+  writeFileSync(
+    join(cwd, WORKSPACE_FILE),
+    JSON.stringify({
+      version: WORKSPACE_SCHEMA_VERSION,
+      name: 'Issue detail workspace',
+      repository: { github: 'owner/repo' },
+      roles: [{ id: 'implementer', label: 'Implementer' }],
+      steps: [{ id: 'implement', action: 'Implement issue', role: 'implementer', workers: ['claude'] }],
+      routes: [{ id: 'enhancement', match: { anyLabels: ['enhancement'] }, step: 'implement' }],
+    }),
+    'utf8',
+  );
+
+  const cfg = config(dataDir, { ghBinArgs: [fakeGh] });
+  const orch = new Orchestrator(cfg);
+  await orch.setWorkspaceRoleSelection(cwd, 'implementer');
+  await orch.catalog.refresh(
+    { workspaceRoot: cwd, repository: 'owner/repo' },
+    { bin: process.execPath, binArgs: [fakeGh], timeoutMs: 10_000 },
+  );
+
+  const current = await orch.getProjectIssueDetail(cwd, 14);
+  assert.equal(current.error, null);
+  assert.equal(current.detail?.source.kind, 'github');
+  assert.deepEqual(current.detail?.issue.assignees, ['sockulags']);
+  assert.equal(current.detail?.source.assigneesKnown, true);
+  assert.equal(current.detail?.source.assigneesSource, 'catalog');
+  assert.equal(current.detail?.snapshot?.body, 'The issue body, as GitHub has it.');
+  assert.equal(orch.work.list(cwd).length, 0, 'detail reads do not create a local editable copy');
+
+  const item = orch.work.record({
+    workspaceRoot: cwd,
+    ref: { repo: 'owner/repo', number: 14, url: 'https://github.com/owner/repo/issues/14' },
+    snapshot: {
+      title: 'Cached issue',
+      body: 'Dated local body',
+      state: 'OPEN',
+      labels: ['enhancement'],
+      author: 'lucas',
+      revision: '2026-08-23T10:00:00Z',
+    },
+  });
+  const thread = orch.createThread({ cwd, title: 'Cached issue thread' });
+  orch.store.update(thread.id, { workItemId: item.id });
+  orch.work.record({
+    workspaceRoot: cwd,
+    ref: { repo: 'owner/repo', number: 15, url: 'https://github.com/owner/repo/issues/15' },
+    snapshot: {
+      title: 'WorkItem-only issue',
+      body: 'Only the local snapshot is available.',
+      state: 'OPEN',
+      labels: ['enhancement'],
+      author: 'lucas',
+      revision: '2026-08-23T10:00:00Z',
+    },
+  });
+
+  process.env['FAKE_GH_FAIL'] = 'offline';
+  try {
+    const fallback = await orch.getProjectIssueDetail(cwd, 14);
+    assert.equal(fallback.detail?.source.kind, 'work-item-snapshot');
+    assert.equal(fallback.detail?.source.freshness, 'cached');
+    assert.equal(fallback.detail?.source.catalogFreshness, 'current');
+    assert.equal(fallback.detail?.source.fetchedAt, item.fetchedAt);
+    assert.deepEqual(fallback.detail?.issue.assignees, ['sockulags']);
+    assert.equal(fallback.detail?.source.assigneesKnown, true);
+    assert.equal(fallback.detail?.source.assigneesSource, 'catalog');
+    assert.equal(fallback.detail?.snapshot?.body, 'Dated local body');
+    assert.equal(fallback.detail?.action.action, 'continue');
+    assert.equal(fallback.error?.kind, 'offline');
+
+    const workItemOnly = await orch.getProjectIssueDetail(cwd, 15);
+    assert.equal(workItemOnly.detail?.source.kind, 'work-item-snapshot');
+    assert.equal(workItemOnly.detail?.source.assigneesKnown, false);
+    assert.equal(workItemOnly.detail?.source.assigneesSource, 'work-item-snapshot');
+    assert.equal(workItemOnly.detail?.issue.assignees.length, 0);
+  } finally {
+    delete process.env['FAKE_GH_FAIL'];
+  }
+});

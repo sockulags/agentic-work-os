@@ -35,6 +35,9 @@ import type {
   IssuePreparation,
   IssueRouteProjection,
   ProjectOverview,
+  ProjectIssueDetail,
+  ProjectIssueDetailSource,
+  ProjectIssueThreadHistory,
 } from '@awos/protocol';
 import { AGENT_IDS, PINNED_CONTEXT_MAX_CHARS, RETAINED_FILE, RUN_CONTEXT_MAX_CHARS } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
@@ -55,13 +58,14 @@ import {
   buildRetainedBlock,
   buildWorkItemBlock,
 } from './work/prompt.js';
-import { foldEvidence, foldRetained, selectedForContext } from './work/ledger.js';
+import { foldEvidence, foldOutcomes, foldRetained, selectedForContext } from './work/ledger.js';
 import { projectRunEvidence } from './work/runs.js';
 import { evaluateGate, explainGate, type GateDecision } from './work/gate.js';
 import { fetchIssue, parseIssueRef } from './work/github.js';
 import { explainIssueRoute } from './work/issue-route-presentation.js';
 import { projectIssueRoute } from './work/issue-route.js';
 import { projectProjectOverview, type ProjectOverviewEntry } from './work/project-overview.js';
+import { projectProjectIssueDetail } from './work/project-issue.js';
 import { applyReplay, buildReplay, hasReplay, stripReplay } from './store/replay.js';
 import { ArtifactWatcher } from './artifact-watcher.js';
 import { contentHash } from './store/artifact-store.js';
@@ -124,6 +128,26 @@ function asCatalogIssue(item: WorkItem): CatalogIssue {
     assignees: [],
     updatedAt: item.snapshot.revision,
   };
+}
+
+function issueFromSnapshot(base: CatalogIssue, url: string, snapshot: WorkItem['snapshot']): CatalogIssue {
+  return {
+    ...base,
+    url,
+    title: snapshot.title,
+    state: snapshot.state.toUpperCase() === 'OPEN' ? 'OPEN' : 'CLOSED',
+    labels: [...snapshot.labels],
+    updatedAt: snapshot.revision || base.updatedAt,
+  };
+}
+
+function assigneeMetadata(catalogIssue: CatalogIssue | undefined, workItem: WorkItem | undefined): {
+  known: boolean;
+  source: 'catalog' | 'work-item-snapshot' | 'unavailable';
+} {
+  if (catalogIssue !== undefined) return { known: true, source: 'catalog' };
+  if (workItem !== undefined) return { known: false, source: 'work-item-snapshot' };
+  return { known: false, source: 'unavailable' };
 }
 
 function routeSummary(projection: IssueRouteProjection): IssuePreparation['route'] {
@@ -1513,6 +1537,165 @@ export class Orchestrator extends EventEmitter {
     return { overview, error: workerError ?? source.error };
   }
 
+  /**
+   * Read one issue's detail without creating or changing a WorkItem.
+   *
+   * The catalog remains the route authority. When it is current, GitHub is asked once for
+   * body/author detail through the existing bounded read adapter. A linked WorkItem is the
+   * honest dated fallback when that read fails; it is never refreshed or persisted here.
+   */
+  async getProjectIssueDetail(
+    cwd: string,
+    number: number,
+  ): Promise<{ detail: ProjectIssueDetail | null; error: WorkSourceError | null }> {
+    const resolution = this.workspace(cwd);
+    if (resolution.status !== 'ok') {
+      const scope = this.#catalogScope(cwd);
+      return { detail: null, error: scope.ok ? null : scope.error };
+    }
+
+    const repository = resolution.workspace.repository.github;
+    if (repository === null) {
+      return {
+        detail: null,
+        error: {
+          kind: 'unknown',
+          message: 'This workspace does not declare repository.github, so issue detail is unavailable.',
+          retryable: false,
+        },
+      };
+    }
+
+    const source = this.catalog.read({ workspaceRoot: resolution.workspace.root, repository });
+    const workItem = this.work.find(resolution.workspace.root, repository, number);
+    const catalogIssue = source.issues.find((candidate) => candidate.number === number);
+    if (catalogIssue === undefined && workItem === undefined) {
+      return {
+        detail: null,
+        error: {
+          kind: 'not-found',
+          message: `Issue #${number} is not in the current catalog and has no linked local snapshot.`,
+          retryable: false,
+        },
+      };
+    }
+
+    let issue = catalogIssue ?? asCatalogIssue(workItem as WorkItem);
+    let snapshot = workItem?.snapshot ?? null;
+    const assignees = assigneeMetadata(catalogIssue, workItem);
+    let detailSource: ProjectIssueDetailSource = {
+      kind: snapshot === null ? 'catalog-metadata' : 'work-item-snapshot',
+      freshness: snapshot === null ? source.freshness : 'cached',
+      catalogFreshness: source.freshness,
+      fetchedAt: workItem?.fetchedAt ?? null,
+      checkedAt: workItem?.lastRefreshedAt ?? source.successfulAt,
+      revision: (snapshot?.revision ?? issue.updatedAt) || null,
+      assigneesKnown: assignees.known,
+      assigneesSource: assignees.source,
+      error: source.error,
+    };
+    let detailError = source.error;
+    let fallbackToSnapshot = source.freshness !== 'current' && workItem !== undefined;
+
+    if (source.freshness === 'current') {
+      try {
+        const fetched = await fetchIssue({ repo: repository, number }, this.#github());
+        if (fetched.ok && fetched.ref.number === number) {
+          issue = issueFromSnapshot(issue, fetched.ref.url, fetched.snapshot);
+          snapshot = fetched.snapshot;
+          const now = Date.now();
+          detailSource = {
+            kind: 'github',
+            freshness: 'current',
+            catalogFreshness: 'current',
+            fetchedAt: now,
+            checkedAt: now,
+            revision: fetched.snapshot.revision || issue.updatedAt || null,
+            assigneesKnown: assignees.known,
+            assigneesSource: assignees.source,
+            error: null,
+          };
+          detailError = null;
+        } else {
+          detailError = fetched.ok
+            ? {
+                kind: 'unknown',
+                message: `GitHub returned issue #${fetched.ref.number} while reading issue #${number}.`,
+                retryable: true,
+              }
+            : fetched.error;
+          fallbackToSnapshot = workItem !== undefined;
+        }
+      } catch (error) {
+        detailError = {
+          kind: 'offline',
+          message: error instanceof Error ? error.message : 'Could not read issue detail from GitHub.',
+          retryable: true,
+        };
+        fallbackToSnapshot = workItem !== undefined;
+      }
+    }
+
+    if (fallbackToSnapshot && workItem !== undefined && detailSource.kind !== 'github') {
+      issue = issueFromSnapshot(catalogIssue ?? asCatalogIssue(workItem), workItem.source.url, workItem.snapshot);
+      snapshot = workItem.snapshot;
+      detailSource = {
+        kind: 'work-item-snapshot',
+        freshness: 'cached',
+        catalogFreshness: source.freshness,
+        fetchedAt: workItem.fetchedAt,
+        checkedAt: workItem.lastRefreshedAt,
+        revision: workItem.snapshot.revision || issue.updatedAt || null,
+        assigneesKnown: assignees.known,
+        assigneesSource: assignees.source,
+        error: detailError,
+      };
+    } else if (detailSource.kind !== 'github') {
+      detailSource = { ...detailSource, error: detailError };
+    }
+
+    // A failed current detail read is a cached detail source for new-action purposes. The
+    // panel still reports that the catalog itself was current through catalogFreshness.
+    const routeSource: IssueCatalogSource = {
+      ...source,
+      freshness: fallbackToSnapshot ? 'cached' : source.freshness,
+      successfulAt: fallbackToSnapshot && workItem !== undefined ? workItem.lastRefreshedAt : source.successfulAt,
+      issues: [issue],
+      error: detailError,
+    };
+
+    const profileIds = [...new Set(resolution.workspace.steps.flatMap((step) => step.workers))];
+    let availability: AgentAvailability[] = [];
+    let workerError: WorkSourceError | null = null;
+    try {
+      availability = await probeWorkerProfiles(this.#config, profileIds);
+    } catch (error) {
+      workerError = {
+        kind: 'unknown',
+        message: error instanceof Error ? `Could not check worker availability. ${error.message}` : 'Could not check worker availability.',
+        retryable: true,
+      };
+    }
+
+    const workerLabels = Object.fromEntries(
+      registeredWorkerProfiles(this.#config).map((profile) => [profile.id, profile.label]),
+    );
+    const detail = projectProjectIssueDetail({
+      cwd,
+      workspace: resolution,
+      issue,
+      catalogIssue: catalogIssue ?? null,
+      snapshot,
+      source: detailSource,
+      routeSource,
+      roleSelection: this.workspaceRoleSelection(cwd),
+      availability,
+      workerLabels,
+      linkedThreads: workItem === undefined ? [] : this.#projectIssueThreadHistory(workItem.id),
+    });
+    return { detail, error: workerError ?? detailError };
+  }
+
   // -------------------------------------------------------------------------
   // Work items
   // -------------------------------------------------------------------------
@@ -2127,6 +2310,30 @@ export class Orchestrator extends EventEmitter {
     }
 
     return [...entries.values()];
+  }
+
+  #projectIssueThreadHistory(workItemId: string): ProjectIssueThreadHistory[] {
+    return this.store.list()
+      .filter((thread) => thread.workItemId === workItemId)
+      .map((thread) => {
+        const events = this.store.events(thread.id);
+        const outcomes = foldOutcomes(events);
+        const runs = projectRunEvidence(
+          events,
+          (runId) => this.#threads.get(thread.id)?.isRunActive(runId) === true,
+          workItemId,
+        ).map((run) => ({ run, outcome: outcomes.get(run.runId) ?? null }));
+        return {
+          thread: {
+            threadId: thread.id,
+            workItemId,
+            title: thread.title,
+            updatedAt: thread.updatedAt,
+          },
+          runs,
+          evidence: foldEvidence(events).filter((item) => item.workItemId === workItemId),
+        };
+      });
   }
 
   getPinnedContext(threadId: string): string {

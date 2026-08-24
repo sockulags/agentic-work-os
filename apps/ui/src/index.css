@@ -899,6 +899,345 @@
   font-size: 0.75rem;
 }
 
+/* Project issue detail: the accepted prototype's persistent progressive-disclosure panel. */
+.project-issue-detail {
+  min-width: 0;
+  margin-top: var(--space-4);
+  overflow: hidden;
+  border: 1px solid hsl(var(--border-strong));
+  border-radius: var(--radius-panel);
+  background: hsl(var(--surface-overlay));
+  box-shadow: var(--elevation-panel);
+}
+
+.project-issue-detail-header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border-bottom: 1px solid hsl(var(--border-subtle));
+  padding: var(--space-4) var(--space-5);
+}
+
+.project-issue-detail-kicker,
+.project-issue-detail-label,
+.project-issue-detail-timeline-label {
+  color: hsl(var(--text-muted));
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.project-issue-detail-kicker {
+  margin: 0 0 0.25rem;
+}
+
+.project-issue-detail-header h2 {
+  min-width: 0;
+  margin: 0;
+  color: hsl(var(--text-primary));
+  font-size: 1.0625rem;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.project-issue-detail-header h2:focus-visible {
+  outline: 2px solid hsl(var(--focus-ring));
+  outline-offset: 3px;
+}
+
+.project-issue-detail-topline,
+.project-issue-detail-action-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.project-issue-detail-topline {
+  justify-content: space-between;
+  border-bottom: 1px solid hsl(var(--border-subtle));
+  padding: var(--space-3) var(--space-5);
+}
+
+.project-issue-detail-source-link {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.3rem;
+  color: hsl(var(--text-secondary));
+  font-size: 0.6875rem;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+
+.project-issue-detail-source-link:hover {
+  color: hsl(var(--text-primary));
+  text-decoration: underline;
+  text-underline-offset: 0.15rem;
+}
+
+.project-issue-detail-source-link svg {
+  width: 0.75rem;
+  height: 0.75rem;
+  flex: 0 0 auto;
+}
+
+.project-issue-detail-loading,
+.project-issue-detail-source-error {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: var(--space-4) var(--space-5) 0;
+  border-left: 2px solid hsl(var(--state-waiting-border));
+  background: hsl(var(--state-waiting-surface));
+  padding: var(--space-2) var(--space-3);
+  color: hsl(var(--text-secondary));
+  font-size: 0.75rem;
+}
+
+.project-issue-detail-loading svg,
+.project-issue-detail-source-error svg,
+.project-issue-detail-refusal > svg {
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 auto;
+}
+
+.project-issue-detail-source-error {
+  border-color: hsl(var(--state-stale-border));
+  background: hsl(var(--state-stale-surface));
+}
+
+.project-issue-detail-section {
+  min-width: 0;
+  border-bottom: 1px solid hsl(var(--border-subtle));
+  padding: var(--space-4) var(--space-5);
+}
+
+.project-issue-detail-section:last-child {
+  border-bottom: 0;
+}
+
+.project-issue-detail-section-heading {
+  margin: 0 0 var(--space-3);
+  color: hsl(var(--text-primary));
+  font-size: 0.8125rem;
+  font-weight: 650;
+}
+
+.project-issue-detail-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem var(--space-6);
+  margin: 0;
+}
+
+.project-issue-detail-facts > div {
+  min-width: 0;
+}
+
+.project-issue-detail-facts dt {
+  color: hsl(var(--text-subtle));
+  font-size: 0.625rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.project-issue-detail-facts dd {
+  min-width: 0;
+  margin: 0.1rem 0 0;
+  color: hsl(var(--text-secondary));
+  font-size: 0.75rem;
+}
+
+.project-issue-detail-note,
+.project-issue-detail-empty,
+.project-issue-detail-thread-meta {
+  color: hsl(var(--text-muted));
+  font-size: 0.6875rem;
+}
+
+.project-issue-detail-note,
+.project-issue-detail-empty {
+  margin: var(--space-3) 0 0;
+}
+
+.project-issue-detail-body {
+  max-height: 20rem;
+  min-width: 0;
+  overflow: auto;
+  border: 1px solid hsl(var(--border-subtle));
+  border-radius: var(--radius-control);
+  background: hsl(var(--surface-sunken));
+  padding: var(--space-3);
+}
+
+.project-issue-detail-body .awos-markdown {
+  font-size: 0.75rem;
+}
+
+.project-issue-detail-workers {
+  margin-top: var(--space-4);
+}
+
+.project-issue-detail-workers ul {
+  display: grid;
+  gap: 0.4rem;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project-issue-detail-workers li {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  border: 1px solid hsl(var(--border-default));
+  border-radius: var(--radius-control);
+  background: hsl(var(--surface-raised));
+  padding: 0.55rem 0.625rem;
+  color: hsl(var(--text-secondary));
+  font-size: 0.75rem;
+}
+
+.project-issue-detail-workers code,
+.project-issue-detail-thread-meta code,
+.project-issue-detail-refusal code,
+.project-issue-detail-problems code {
+  overflow-wrap: anywhere;
+}
+
+.project-issue-detail-refusal {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  border-left: 2px solid hsl(var(--state-blocked-border));
+  background: hsl(var(--state-blocked-surface));
+  padding: var(--space-2) var(--space-3);
+  color: hsl(var(--text-secondary));
+  font-size: 0.75rem;
+}
+
+.project-issue-detail-refusal > svg {
+  color: hsl(var(--state-blocked));
+}
+
+.project-issue-detail-refusal strong {
+  color: hsl(var(--text-primary));
+}
+
+.project-issue-detail-refusal p {
+  margin: 0.2rem 0 0;
+  color: hsl(var(--text-muted));
+  overflow-wrap: anywhere;
+}
+
+.project-issue-detail-problems {
+  display: grid;
+  gap: 0.35rem;
+  margin: var(--space-3) 0 0;
+  padding-left: 1rem;
+  color: hsl(var(--state-blocked));
+  font-size: 0.6875rem;
+}
+
+.project-issue-detail-action-row {
+  align-items: flex-start;
+}
+
+.project-issue-detail-action-row p {
+  min-width: 12rem;
+  flex: 1 1 18rem;
+  margin: 0.45rem 0 0;
+  color: hsl(var(--text-muted));
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.project-issue-detail-thread-list,
+.project-issue-detail-timeline {
+  max-height: 18rem;
+  min-width: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+}
+
+.project-issue-detail-thread-list {
+  display: grid;
+  gap: 1px;
+  list-style: none;
+  background: hsl(var(--border-subtle));
+}
+
+.project-issue-detail-thread-list li {
+  min-width: 0;
+  background: hsl(var(--surface-raised));
+  padding: 0.65rem 0.75rem;
+}
+
+.project-issue-detail-thread-heading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.project-issue-detail-thread-meta {
+  margin: 0.25rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.project-issue-detail-timeline {
+  display: grid;
+  gap: var(--space-2);
+  list-style: none;
+}
+
+.project-issue-detail-timeline-entry {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: var(--space-2);
+  border-left: 1px solid hsl(var(--border-default));
+  padding: 0 0 0.4rem;
+}
+
+.project-issue-detail-timeline-marker {
+  width: 0.45rem;
+  height: 0.45rem;
+  flex: 0 0 auto;
+  margin: 0.35rem 0 0 -0.25rem;
+  border: 1px solid hsl(var(--action-primary));
+  border-radius: 50%;
+  background: hsl(var(--surface-overlay));
+}
+
+.project-issue-detail-timeline-copy {
+  margin: 0.3rem 0 0;
+  color: hsl(var(--text-secondary));
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.project-issue-detail-timeline-entry > div:last-child > ul {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .project-overview-empty {
   display: grid;
   min-height: 100%;
@@ -1120,6 +1459,12 @@
   .project-overview-group.blocked-group {
     grid-column: auto;
   }
+
+  .project-issue-detail-header,
+  .project-issue-detail-topline,
+  .project-issue-detail-section {
+    padding-inline: var(--space-4);
+  }
 }
 
 @media (max-width: 32.5rem) {
@@ -1159,5 +1504,22 @@
 
   .project-overview-issue-actions .awos-button {
     width: 100%;
+  }
+
+  .project-issue-detail-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .project-issue-detail-action-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .project-issue-detail-action-row .awos-button {
+    width: 100%;
+  }
+
+  .project-issue-detail-action-row p {
+    min-width: 0;
   }
 }
