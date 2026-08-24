@@ -14,6 +14,7 @@ import type { WorkspaceResolution } from './workspace.js';
 import type { WorkspaceRoleSelection } from './role-selection.js';
 import type { WorkItem, WorkSourceError } from './work.js';
 import type { IssueOpenResult } from './issue-open.js';
+import type { ProjectOverview } from './project-overview.js';
 import type {
   EvidenceKind,
   EvidenceRef,
@@ -173,6 +174,8 @@ export type ClientRequest =
   | { type: 'catalog.refresh'; threadId?: string; cwd?: string }
   /** Atomically prepare a new issue thread, or continue the surviving linked thread. */
   | { type: 'issue.open'; threadId?: string; cwd?: string; number: number }
+  /** Read the core-owned project overview projection without contacting GitHub. */
+  | { type: 'project.overview.get'; cwd: string }
   /**
    * State what a run achieved. Sending it again with the same `runId` is a correction:
    * the later claim stands and the earlier one stays in the log.
@@ -250,6 +253,7 @@ export type ServerResponseBody =
       error: WorkSourceError | null;
     }
   | { type: 'issue.open'; result: IssueOpenResult }
+  | { type: 'project.overview'; cwd: string; overview: ProjectOverview | null; error: WorkSourceError | null }
   /**
    * The gate's verdict on one lane, requirement by requirement.
    *

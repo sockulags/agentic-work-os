@@ -8,7 +8,8 @@ export interface CatalogIssue {
   number: number;
   url: string;
   title: string;
-  state: 'OPEN';
+  /** Catalog refreshes contain only open issues; local linked work may be older/closed. */
+  state: 'OPEN' | 'CLOSED';
   labels: string[];
   assignees: string[];
   updatedAt: string;

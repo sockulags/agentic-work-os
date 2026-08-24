@@ -6,6 +6,7 @@ import { join, resolve as resolvePath } from 'node:path';
 import { promisify } from 'node:util';
 import type {
   AdapterEvent,
+  AgentAvailability,
   AgentId,
   ApprovalRequestedBody,
   HarnessEvent,
@@ -33,11 +34,12 @@ import type {
   IssueOpenResult,
   IssuePreparation,
   IssueRouteProjection,
+  ProjectOverview,
 } from '@awos/protocol';
 import { AGENT_IDS, PINNED_CONTEXT_MAX_CHARS, RETAINED_FILE, RUN_CONTEXT_MAX_CHARS } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
 import type { WorkerAdapter, AdapterContext } from './adapters/agent.js';
-import { createWorkerAdapter, probeWorkerProfiles } from './adapters/registry.js';
+import { createWorkerAdapter, probeWorkerProfiles, registeredWorkerProfiles } from './adapters/registry.js';
 import { isQwenResumeNotFoundError } from './adapters/qwen-code.js';
 import { PermissionBridge } from './permission-bridge.js';
 import { ThreadStore } from './store/thread-store.js';
@@ -59,6 +61,7 @@ import { evaluateGate, explainGate, type GateDecision } from './work/gate.js';
 import { fetchIssue, parseIssueRef } from './work/github.js';
 import { explainIssueRoute } from './work/issue-route-presentation.js';
 import { projectIssueRoute } from './work/issue-route.js';
+import { projectProjectOverview, type ProjectOverviewEntry } from './work/project-overview.js';
 import { applyReplay, buildReplay, hasReplay, stripReplay } from './store/replay.js';
 import { ArtifactWatcher } from './artifact-watcher.js';
 import { contentHash } from './store/artifact-store.js';
@@ -116,7 +119,7 @@ function asCatalogIssue(item: WorkItem): CatalogIssue {
     number: item.source.number,
     url: item.source.url,
     title: item.snapshot.title,
-    state: 'OPEN',
+    state: item.snapshot.state.toUpperCase() === 'OPEN' ? 'OPEN' : 'CLOSED',
     labels: [...item.snapshot.labels],
     assignees: [],
     updatedAt: item.snapshot.revision,
@@ -1453,6 +1456,63 @@ export class Orchestrator extends EventEmitter {
     return { catalog: this.#composeIssueCatalog(source), error: source.error };
   }
 
+  /**
+   * Read the project-level overview without contacting GitHub.
+   *
+   * The catalog is local state, while the core probes only the worker profiles named by
+   * the workspace steps for every authoritative read. The projection below owns the
+   * classification; the UI never re-routes an issue or infers a blocker.
+   */
+  async getProjectOverview(cwd: string): Promise<{ overview: ProjectOverview | null; error: WorkSourceError | null }> {
+    const resolution = this.workspace(cwd);
+    if (resolution.status !== 'ok') {
+      const scope = this.#catalogScope(cwd);
+      return { overview: null, error: scope.ok ? null : scope.error };
+    }
+
+    const repository = resolution.workspace.repository.github;
+    if (repository === null) {
+      return {
+        overview: null,
+        error: {
+          kind: 'unknown',
+          message: 'This workspace does not declare repository.github, so no project overview is available.',
+          retryable: false,
+        },
+      };
+    }
+
+    const source = this.catalog.read({ workspaceRoot: resolution.workspace.root, repository });
+    let workerAvailability: AgentAvailability[];
+    let workerError: WorkSourceError | null = null;
+    const profileIds = [...new Set(resolution.workspace.steps.flatMap((step) => step.workers))];
+    try {
+      workerAvailability = await probeWorkerProfiles(this.#config, profileIds);
+    } catch (error) {
+      const detail = error instanceof Error && error.message !== '' ? ` ${error.message}` : '';
+      workerAvailability = [];
+      workerError = {
+        kind: 'unknown',
+        message: `Could not check worker availability.${detail}`,
+        retryable: true,
+      };
+    }
+
+    const workerLabels = Object.fromEntries(
+      registeredWorkerProfiles(this.#config).map((profile) => [profile.id, profile.label]),
+    );
+    const overview = projectProjectOverview({
+      cwd,
+      workspace: resolution,
+      source,
+      roleSelection: this.workspaceRoleSelection(cwd),
+      availability: workerAvailability,
+      workerLabels,
+      entries: this.#projectOverviewEntries(source),
+    });
+    return { overview, error: workerError ?? source.error };
+  }
+
   // -------------------------------------------------------------------------
   // Work items
   // -------------------------------------------------------------------------
@@ -2026,6 +2086,47 @@ export class Orchestrator extends EventEmitter {
     }
 
     return { source, overlay };
+  }
+
+  #projectOverviewEntries(source: IssueCatalogSource): ProjectOverviewEntry[] {
+    const entries = new Map<string, ProjectOverviewEntry>();
+    for (const issue of source.issues) {
+      entries.set(`${source.repository}#${issue.number}`, {
+        issue,
+        linkedThreads: [],
+        runs: [],
+      });
+    }
+
+    const summaries = this.store.list();
+    const items = this.work.list(source.workspaceRoot).filter((item) => item.source.repo === source.repository);
+    for (const item of items) {
+      const linkedThreads = summaries.filter((thread) => thread.workItemId === item.id);
+      if (linkedThreads.length === 0) continue;
+
+      const key = `${item.source.repo}#${item.source.number}`;
+      const entry = entries.get(key) ?? {
+        issue: asCatalogIssue(item),
+        linkedThreads: [],
+        runs: [],
+      };
+      entry.linkedThreads = linkedThreads.map((thread) => ({
+        threadId: thread.id,
+        workItemId: item.id,
+        title: thread.title,
+        updatedAt: thread.updatedAt,
+      }));
+      entry.runs = linkedThreads.flatMap((thread) =>
+        projectRunEvidence(
+          this.store.events(thread.id),
+          (runId) => this.#threads.get(thread.id)?.isRunActive(runId) === true,
+          item.id,
+        ),
+      );
+      entries.set(key, entry);
+    }
+
+    return [...entries.values()];
   }
 
   getPinnedContext(threadId: string): string {

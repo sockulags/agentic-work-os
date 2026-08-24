@@ -28,6 +28,8 @@ export { WorkItemStore } from './work/store.js';
 export { fetchIssue, parseIssueRef, type GitHubOptions } from './work/github.js';
 export { projectIssueRoute } from './work/issue-route.js';
 export { explainIssueRoute } from './work/issue-route-presentation.js';
+export { projectProjectOverview } from './work/project-overview.js';
+export type { ProjectOverviewEntry, ProjectOverviewProjectionInput } from './work/project-overview.js';
 export {
   buildWorkItemBlock,
   applyWorkItem,

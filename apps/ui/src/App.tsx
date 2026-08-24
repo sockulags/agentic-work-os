@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { GitMerge, X } from 'lucide-react';
 import type { AgentAvailability, AgentId, PermissionMode } from '@awos/protocol';
 import { useHarnessContext } from '@/state/HarnessContext';
@@ -8,6 +8,7 @@ import { Composer } from '@/components/Composer';
 import { Dock } from '@/components/dock/Dock';
 import { ApprovalDialog } from '@/components/ApprovalDialog';
 import { DensityToggle } from '@/components/DensityToggle';
+import { ProjectOverview } from '@/components/ProjectOverview';
 import { Button } from '@/components/ui/button';
 import { getAgentStyle } from '@/components/AgentBadge';
 import { cn, formatTokens } from '@/lib/utils';
@@ -23,6 +24,8 @@ const PERMISSION_MODES: Array<{ value: PermissionMode; label: string }> = [
 export default function App(): React.JSX.Element {
   const h = useHarnessContext();
   const { density } = useDisplaySettings();
+  const [surface, setSurface] = useState<'threads' | 'overview'>('threads');
+  const overviewCwd = h.activeThread?.cwd ?? h.threads[0]?.cwd ?? null;
 
   // Notices are transient; they shouldn't linger after the user has moved on.
   useEffect(() => {
@@ -36,22 +39,28 @@ export default function App(): React.JSX.Element {
       data-density={density === 'compact' ? 'compact' : 'comfortable'}
       className="awos-shell flex h-full bg-surface-canvas"
     >
-      <ThreadSidebar />
+      <ThreadSidebar
+        overviewOpen={surface === 'overview'}
+        onOpenOverview={() => setSurface('overview')}
+        onOpenThreads={() => setSurface('threads')}
+      />
 
       <main className="flex min-w-0 flex-1 flex-col">
-        <Header
-          title={h.activeThread?.title ?? 'Agentic Work OS'}
-          cwd={h.activeThread?.cwd ?? null}
-          status={h.status}
-          totals={h.transcript.totals}
-          onPermissionMode={(mode) => void h.setPermissionMode(mode)}
-          hasThread={h.activeThread !== null}
-          parallel={h.activeThread?.parallel ?? false}
-          lanes={h.runtime?.lanes ?? {}}
-          busy={h.runtime?.busy ?? []}
-          onParallel={(on) => void h.setParallel(on)}
-          onIntegrate={(agent) => void h.integrateLane(agent)}
-        />
+        {surface === 'threads' && (
+          <Header
+            title={h.activeThread?.title ?? 'Agentic Work OS'}
+            cwd={h.activeThread?.cwd ?? null}
+            status={h.status}
+            totals={h.transcript.totals}
+            onPermissionMode={(mode) => void h.setPermissionMode(mode)}
+            hasThread={h.activeThread !== null}
+            parallel={h.activeThread?.parallel ?? false}
+            lanes={h.runtime?.lanes ?? {}}
+            busy={h.runtime?.busy ?? []}
+            onParallel={(on) => void h.setParallel(on)}
+            onIntegrate={(agent) => void h.integrateLane(agent)}
+          />
+        )}
 
         {h.notice && (
           <div
@@ -76,7 +85,15 @@ export default function App(): React.JSX.Element {
           </div>
         )}
 
-        {h.activeThread === null ? (
+        {surface === 'overview' ? (
+          <ProjectOverview
+            cwd={overviewCwd}
+            onOpenThread={(threadId) => {
+              setSurface('threads');
+              void h.openThread(threadId);
+            }}
+          />
+        ) : h.activeThread === null ? (
           <EmptyState connected={h.status === 'open'} profiles={h.availability} />
         ) : (
           <>
@@ -89,7 +106,7 @@ export default function App(): React.JSX.Element {
       {/* Outside <main> so the dock spans the full window height rather than sitting
           under the thread header, and so it never competes with the transcript for
           vertical space the way the old strips did. */}
-      {h.activeThread !== null && <Dock />}
+      {surface === 'threads' && h.activeThread !== null && <Dock />}
 
       <ApprovalDialog />
     </div>
