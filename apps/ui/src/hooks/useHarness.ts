@@ -19,6 +19,7 @@ import type {
   WorkspaceRoleSelection,
   IssueOpenResult,
   ProjectOverview,
+  ProjectIssueDetail,
 } from '@awos/protocol';
 import type { ClientRequest } from '@awos/protocol';
 import { HarnessClient, resolveClientOptions, type ConnectionStatus } from '@/lib/client';
@@ -427,6 +428,17 @@ export function useHarness() {
         throw new Error('The harness returned an unexpected issue-opening response.');
       }
       return response.result;
+    },
+    [client],
+  );
+
+  const openProjectIssueDetail = useCallback(
+    async (cwd: string, number: number): Promise<{ detail: ProjectIssueDetail | null; error: WorkSourceError | null }> => {
+      const response = await client.request({ type: 'project.issue.get', cwd, number });
+      if (response.type !== 'project.issue') {
+        throw new Error('The harness returned an unexpected issue-detail response.');
+      }
+      return { detail: response.detail, error: response.error };
     },
     [client],
   );
@@ -872,6 +884,7 @@ export function useHarness() {
     refreshProjectCatalog: (cwd: string) => refreshProjectOverview(cwd, true),
     setProjectOverviewRole,
     openIssue,
+    openProjectIssueDetail,
   };
 }
 

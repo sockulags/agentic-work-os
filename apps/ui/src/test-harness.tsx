@@ -113,6 +113,7 @@ function stubHarness(overrides: Partial<Harness>): Harness {
     refreshProjectCatalog: vi.fn(),
     setProjectOverviewRole: vi.fn(),
     openIssue: vi.fn(),
+    openProjectIssueDetail: vi.fn(),
     ...overrides,
   } as Harness;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, CircleDot, ExternalLink, Grid2X2, RefreshCw, XCircle } from 'lucide-react';
 import type {
   AgentId,
@@ -6,12 +6,15 @@ import type {
   ProjectOverview as ProjectOverviewModel,
   ProjectOverviewGroup,
   ProjectOverviewItem,
+  ProjectIssueDetail as ProjectIssueDetailModel,
+  WorkSourceError,
 } from '@awos/protocol';
 import { useHarnessContext } from '@/state/HarnessContext';
 import { WorkspaceRoleSelector } from '@/components/WorkspaceRoleSelector';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { cn, formatRelative } from '@/lib/utils';
+import { ProjectIssueDetail } from '@/components/ProjectIssueDetail';
 
 const GROUPS: readonly {
   id: ProjectOverviewGroup;
@@ -34,6 +37,14 @@ interface PendingPreparation {
   preparation: IssuePreparation;
 }
 
+interface DetailSelection {
+  issueNumber: number;
+  item: ProjectOverviewItem;
+  detail: ProjectIssueDetailModel | null;
+  error: WorkSourceError | null;
+  loading: boolean;
+}
+
 /** The production project-level entry surface. It consumes only the core read model. */
 export function ProjectOverview({ cwd, onOpenThread }: ProjectOverviewProps): React.JSX.Element {
   const h = useHarnessContext();
@@ -43,12 +54,21 @@ export function ProjectOverview({ cwd, onOpenThread }: ProjectOverviewProps): Re
   const [actionError, setActionError] = useState<string | null>(null);
   const [preparationError, setPreparationError] = useState<string | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
+  const [detailSelection, setDetailSelection] = useState<DetailSelection | null>(null);
+  const detailRequestRef = useRef(0);
+  const detailHeadingRef = useRef<HTMLHeadingElement>(null);
+  const overviewHeadingRef = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
     if (cwd === null) return;
     void h.openProjectOverview(cwd);
     return () => h.closeProjectOverview(cwd);
   }, [cwd, h.openProjectOverview, h.closeProjectOverview]);
+
+  useEffect(() => {
+    detailRequestRef.current += 1;
+    setDetailSelection(null);
+  }, [cwd]);
 
   const view = h.projectOverview;
   const model = view?.cwd === cwd ? view.overview : null;
@@ -62,8 +82,8 @@ export function ProjectOverview({ cwd, onOpenThread }: ProjectOverviewProps): Re
     return groups;
   }, [model]);
 
-  async function runAction(item: ProjectOverviewItem): Promise<void> {
-    if (cwd === null || item.action === 'none') return;
+  async function runAction(item: ProjectOverviewItem, fromDetail = false): Promise<void> {
+    if (cwd === null || (!fromDetail && item.action === 'none')) return;
     setActionBusy(item.issue.number);
     setActionError(null);
     setPreparationError(null);
@@ -83,6 +103,48 @@ export function ProjectOverview({ cwd, onOpenThread }: ProjectOverviewProps): Re
     } finally {
       setActionBusy(null);
     }
+  }
+
+  const openDetail = useCallback(async (item: ProjectOverviewItem): Promise<void> => {
+    if (cwd === null) return;
+    const requestId = ++detailRequestRef.current;
+    setDetailSelection({ issueNumber: item.issue.number, item, detail: null, error: null, loading: true });
+    try {
+      const result = await h.openProjectIssueDetail(cwd, item.issue.number);
+      if (requestId !== detailRequestRef.current) return;
+      setDetailSelection({ issueNumber: item.issue.number, item, detail: result.detail, error: result.error, loading: false });
+    } catch (error) {
+      if (requestId !== detailRequestRef.current) return;
+      setDetailSelection({
+        issueNumber: item.issue.number,
+        item,
+        detail: null,
+        error: { kind: 'offline', message: error instanceof Error ? error.message : 'Could not read issue detail.', retryable: true },
+        loading: false,
+      });
+    }
+  }, [cwd, h.openProjectIssueDetail]);
+
+  useEffect(() => {
+    if (model === null || detailSelection === null) return;
+    const currentItem = model.items.find((item) => item.issue.number === detailSelection.issueNumber);
+    void openDetail(currentItem ?? detailSelection.item);
+  }, [model, openDetail]);
+
+  function closeDetail(): void {
+    const issueNumber = detailSelection?.issueNumber ?? null;
+    detailRequestRef.current += 1;
+    setDetailSelection(null);
+    window.setTimeout(() => {
+      const currentControl = issueNumber === null
+        ? null
+        : document.querySelector<HTMLButtonElement>(`[data-project-issue-details="${issueNumber}"]`);
+      if (currentControl?.isConnected) {
+        currentControl.focus();
+        return;
+      }
+      overviewHeadingRef.current?.focus();
+    }, 0);
   }
 
   async function confirmPreparation(): Promise<void> {
@@ -174,7 +236,7 @@ export function ProjectOverview({ cwd, onOpenThread }: ProjectOverviewProps): Re
       <main className="project-overview-content">
         <section className="project-overview-intro" aria-labelledby="project-overview-title">
           <div>
-            <h1 id="project-overview-title">{model.workspace.name}</h1>
+            <h1 id="project-overview-title" ref={overviewHeadingRef} tabIndex={-1}>{model.workspace.name}</h1>
             <p className="project-overview-lede">
               Find work your role can own, see why an issue is blocked, and prepare the next step without dispatching a worker.
             </p>
@@ -205,16 +267,30 @@ export function ProjectOverview({ cwd, onOpenThread }: ProjectOverviewProps): Re
         )}
 
         <section className="project-overview-groups" aria-label="Issues grouped by local workflow state">
-          {GROUPS.map((group) => (
-            <OverviewGroup
-              key={group.id}
-              group={group}
-              items={grouped[group.id]}
-              actionBusy={actionBusy}
-              onAction={(item) => void runAction(item)}
-            />
-          ))}
+            {GROUPS.map((group) => (
+              <OverviewGroup
+                key={group.id}
+                group={group}
+                items={grouped[group.id]}
+                actionBusy={actionBusy}
+                onAction={(item) => void runAction(item)}
+                onOpenDetail={(item) => void openDetail(item)}
+              />
+            ))}
         </section>
+
+        {detailSelection !== null && (
+          <ProjectIssueDetail
+            detail={detailSelection.detail}
+            selectedItem={detailSelection.item}
+            error={detailSelection.error}
+            loading={detailSelection.loading}
+            actionBusy={actionBusy === detailSelection.item.issue.number}
+            headingRef={detailHeadingRef}
+            onClose={closeDetail}
+            onAction={(item) => void runAction(item, true)}
+          />
+        )}
       </main>
 
       <PreparationDialog
@@ -329,11 +405,13 @@ function OverviewGroup({
   items,
   actionBusy,
   onAction,
+  onOpenDetail,
 }: {
   group: (typeof GROUPS)[number];
   items: ProjectOverviewItem[];
   actionBusy: number | null;
   onAction: (item: ProjectOverviewItem) => void;
+  onOpenDetail: (item: ProjectOverviewItem) => void;
 }): React.JSX.Element {
   const titleId = `project-overview-${group.id}-title`;
   return (
@@ -357,8 +435,8 @@ function OverviewGroup({
             {group.id === 'available' ? 'No role-owned work is ready to take.' : group.id === 'active' ? 'No linked local work.' : 'Nothing is blocked.'}
           </p>
         ) : (
-          items.map((item) => (
-            <IssueRow key={`${item.issue.url}:${item.issue.number}`} item={item} actionBusy={actionBusy} onAction={onAction} />
+            items.map((item) => (
+            <IssueRow key={`${item.issue.url}:${item.issue.number}`} item={item} actionBusy={actionBusy} onAction={onAction} onOpenDetail={onOpenDetail} />
           ))
         )}
       </div>
@@ -370,10 +448,12 @@ function IssueRow({
   item,
   actionBusy,
   onAction,
+  onOpenDetail,
 }: {
   item: ProjectOverviewItem;
   actionBusy: number | null;
   onAction: (item: ProjectOverviewItem) => void;
+  onOpenDetail: (item: ProjectOverviewItem) => void;
 }): React.JSX.Element {
   const busy = actionBusy === item.issue.number;
   return (
@@ -407,6 +487,16 @@ function IssueRow({
           </Button>
         )}
         {item.action === 'none' && <span className="project-overview-unavailable">No action available</span>}
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          aria-label={`View details for issue #${item.issue.number}`}
+          data-project-issue-details={item.issue.number}
+          onClick={() => onOpenDetail(item)}
+        >
+          Details
+        </Button>
       </div>
       <p className={cn('project-overview-reason', item.group === 'blocked' && 'blocked', item.reasonCode === 'available' && 'ready')}>
         {item.reason}

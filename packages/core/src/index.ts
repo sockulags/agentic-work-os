@@ -30,6 +30,8 @@ export { projectIssueRoute } from './work/issue-route.js';
 export { explainIssueRoute } from './work/issue-route-presentation.js';
 export { projectProjectOverview } from './work/project-overview.js';
 export type { ProjectOverviewEntry, ProjectOverviewProjectionInput } from './work/project-overview.js';
+export { projectProjectIssueDetail, PROJECT_ISSUE_DETAIL_BODY_MAX_CHARS } from './work/project-issue.js';
+export type { ProjectIssueDetailProjectionInput } from './work/project-issue.js';
 export {
   buildWorkItemBlock,
   applyWorkItem,

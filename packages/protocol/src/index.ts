@@ -10,6 +10,7 @@ export * from './catalog.js';
 export * from './issue-route.js';
 export * from './issue-open.js';
 export * from './project-overview.js';
+export * from './project-issue.js';
 export * as ClaudeWire from './claude-wire.js';
 export * as CodexWire from './codex-wire.js';
 export {
