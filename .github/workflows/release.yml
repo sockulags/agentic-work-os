@@ -1,0 +1,70 @@
+name: Release
+
+# Builds the Windows installer from a version tag and publishes it as a GitHub release,
+# together with the signed `latest.json` the in-app updater reads.
+#
+# The tag is the trigger and the source of the release name; `scripts/set-version.mjs`
+# is what makes the sources agree with it beforehand.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The Rust build dominates the runtime; without a cache every release pays it twice
+      # over, once for the plugin tree and once for the shell.
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+
+      - run: npm ci
+
+      # A release that fails the same gate as main is not a release worth publishing.
+      - run: npm run typecheck
+      - run: npm test
+
+      # Builds the UI, the core, the self-contained core bundle and the vendored Node
+      # runtime through `beforeBuildCommand`, then signs the installer and uploads it
+      # alongside latest.json.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: Agentic Work OS ${{ github.ref_name }}
+          releaseDraft: false
+          prerelease: false
+
+      # Tauri names the installer after the version, so a download link that points at the
+      # newest release would rot on every bump. A second copy under a stable name keeps
+      # /releases/latest/download/awos-setup.exe working forever. The updater is unaffected
+      # either way: it follows the URL recorded in latest.json.
+      - name: Publish a version-less installer name
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $setup = Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe |
+            Select-Object -First 1
+          if (-not $setup) { throw 'no NSIS installer was produced' }
+          Copy-Item $setup awos-setup.exe
+          gh release upload ${{ github.ref_name }} awos-setup.exe --clobber

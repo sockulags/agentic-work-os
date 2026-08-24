@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "A lightweight harness that drives Claude Code CLI and OpenAI Codex in one thread.",
+  "license": "MIT",
   "type": "module",
   "workspaces": [
     "packages/*",
@@ -22,6 +23,7 @@
     "dev:ui": "npm run dev --workspace @awos/ui",
     "desktop": "npm run build --workspace @awos/protocol && npm run build --workspace @awos/core && npm run dev --workspace @awos/desktop",
     "desktop:build": "npm run build --workspace @awos/desktop",
+    "version:set": "node scripts/set-version.mjs",
     "clean": "rimraf packages/*/dist apps/ui/dist"
   },
   "devDependencies": {
