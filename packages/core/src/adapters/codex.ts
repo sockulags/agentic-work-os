@@ -42,7 +42,10 @@ export class CodexAdapter implements WorkerAdapter {
   #ctx: AdapterContext;
   #child: StdioChild | null = null;
   #threadId: string | null = null;
+  /** Our id for the turn in flight, stable for its whole life; what every event carries. */
   #turnId: string | null = null;
+  /** Codex's own id for that turn, which is what the wire talks about. */
+  #serverTurnId: string | null = null;
   #busy = false;
   #model: string | null = null;
   #starting: Promise<void> | null = null;
@@ -67,13 +70,24 @@ export class CodexAdapter implements WorkerAdapter {
   #turnTimer: NodeJS.Timeout | null = null;
 
   /**
-   * Server turn ids the watchdog gave up on.
+   * Server turn ids the watchdog gave up on and has not seen end.
    *
    * The adapter goes on to accept another turn, so `busy` alone cannot tell a late
    * completion from the live one — and a stale completion that settled the wrong turn
-   * would report work as finished that has barely started.
+   * would report work as finished that has barely started. An id leaves this set when its
+   * own `turn/completed` arrives, which is the only thing that proves the server stopped
+   * running it.
    */
   readonly #abandonedTurns = new Set<string>();
+
+  /**
+   * Set when the watchdog gave up on a turn Codex never named.
+   *
+   * Nothing that turn goes on to emit can be recognized, so it is never retired: from here
+   * on the adapter only attributes a notification to the turn in flight when the wire says
+   * so outright.
+   */
+  #abandonedUnnamedTurn = false;
 
   constructor(ctx: AdapterContext) {
     this.#ctx = ctx;
@@ -141,6 +155,9 @@ export class CodexAdapter implements WorkerAdapter {
       this.#child = null;
       this.#threadId = null;
       this.#emitStatus('exited', code === null ? null : `exit code ${code}`);
+      // Nothing survives the process, so no abandoned turn can still be emitting.
+      this.#abandonedTurns.clear();
+      this.#abandonedUnnamedTurn = false;
       const err = new Error(`Codex app-server exited (code ${code ?? 'null'})`);
       this.#rejectAllPending(err);
       this.#failTurn(err);
@@ -219,8 +236,9 @@ export class CodexAdapter implements WorkerAdapter {
 
     this.#busy = true;
     this.#turnStartedAt = Date.now();
-    // Provisional id; replaced by the server's turn id when `turn/started` lands.
     this.#turnId = randomUUID();
+    this.#serverTurnId = null;
+    const turnId = this.#turnId;
 
     this.#ctx.emit({
       kind: 'turn.started',
@@ -242,11 +260,12 @@ export class CodexAdapter implements WorkerAdapter {
       };
     });
 
+    let accepted: CodexWire.CodexTurnStartResult | undefined;
     try {
-      await this.#request(CODEX_METHODS.turnStart, {
+      accepted = (await this.#request(CODEX_METHODS.turnStart, {
         threadId: this.#threadId,
         input: [{ type: 'text', text }],
-      } satisfies CodexWire.CodexTurnStartParams);
+      } satisfies CodexWire.CodexTurnStartParams)) as CodexWire.CodexTurnStartResult | undefined;
     } catch (err) {
       this.#failTurn(err as Error);
       throw err;
@@ -255,8 +274,14 @@ export class CodexAdapter implements WorkerAdapter {
     // Armed here rather than before the request: until the turn is accepted the wait is
     // already bounded by the request's own timeout, and rejecting `settled` before it is
     // returned below would be an unhandled rejection. A turn that finished inside that
-    // window needs no watchdog.
-    if (this.#busy) {
+    // window needs no watchdog — and must not have this turn's bookkeeping written over
+    // whatever started after it, hence the check that we are still the turn in flight.
+    if (this.#busy && this.#turnId === turnId) {
+      // The acceptance already names the turn. Waiting for `turn/started` instead would
+      // leave a turn that hangs before it — the case the watchdog exists for — nameless,
+      // and a nameless turn cannot be told apart from the one that follows it.
+      if (typeof accepted?.turn?.id === 'string') this.#serverTurnId = accepted.turn.id;
+
       const deadline = this.#ctx.config.codexTurnTimeoutMs ?? CODEX_TURN_TIMEOUT_DEFAULT_MS;
       this.#turnTimer = setTimeout(() => this.#timeOutTurn(deadline), deadline);
     }
@@ -269,10 +294,17 @@ export class CodexAdapter implements WorkerAdapter {
   async interrupt(): Promise<void> {
     if (!this.#busy || !this.#threadId) return;
     try {
-      await this.#request(CODEX_METHODS.turnInterrupt, { threadId: this.#threadId });
+      await this.#request(CODEX_METHODS.turnInterrupt, this.#interruptParams(this.#threadId));
     } catch (err) {
       log.warn('interrupt failed', { message: (err as Error).message });
     }
+  }
+
+  /** Names the turn when Codex has told us its id, so the server stops that one and no other. */
+  #interruptParams(threadId: string): CodexWire.CodexTurnInterruptParams {
+    return this.#serverTurnId === null
+      ? { threadId }
+      : { threadId, turnId: this.#serverTurnId };
   }
 
   resolveApproval(approvalId: string, optionId: string): void {
@@ -399,6 +431,16 @@ export class CodexAdapter implements WorkerAdapter {
     }
 
     const params = (msg.params ?? {}) as CodexWire.CodexApprovalRequestParams;
+
+    // An approval from a turn the watchdog abandoned must not be shown as the current
+    // turn's, or the operator answers for work they are not looking at. Denying it here
+    // still answers the server, which is what keeps that turn from wedging.
+    if (!this.#ownsActiveTurn(typeof params.turnId === 'string' ? params.turnId : null)) {
+      log.warn('approval from another turn denied', { turn: params.turnId ?? null });
+      this.#respond(msg.id, { decision: 'denied' } satisfies CodexWire.CodexApprovalResponse);
+      return;
+    }
+
     const approvalId = randomUUID();
     const { title, detail, toolKind } = describeCodexApproval(params);
 
@@ -431,8 +473,40 @@ export class CodexAdapter implements WorkerAdapter {
     });
   }
 
+  /**
+   * Does something the server said about turn `turnId` belong to the turn in flight?
+   *
+   * A turn the watchdog abandoned goes on running on the server, so "the turn we are in"
+   * and "the only turn that can still be talking" stop being the same thing. When both
+   * sides name a turn the answer is exact. When either side is unnamed — Codex leaves the
+   * turn off several notifications, and `exec/outputDelta` has never carried one — the
+   * honest answer is only that it belongs to the turn in flight while nothing else could
+   * be emitting.
+   */
+  #ownsActiveTurn(turnId: string | null): boolean {
+    if (this.#serverTurnId !== null && turnId !== null) return turnId === this.#serverTurnId;
+    return this.#abandonedTurns.size === 0 && !this.#abandonedUnnamedTurn;
+  }
+
   #onNotification(msg: CodexWire.JsonRpcNotification): void {
     const params = (msg.params ?? {}) as Record<string, unknown>;
+
+    // Everything below `thread/started` is scoped to a turn, and an abandoned turn's
+    // stragglers — items, output, plans, diffs — would otherwise be stamped with the turn
+    // in flight and land in its transcript and its patch. Read ownership before retiring
+    // the id, or a completion would clear the doubt it is itself the evidence of.
+    if (msg.method !== CODEX_NOTIFICATIONS.threadStarted) {
+      const named = notificationTurnId(params);
+      const owned = this.#ownsActiveTurn(named);
+      // An abandoned turn reporting complete is the one thing that proves it has stopped.
+      if (msg.method === CODEX_NOTIFICATIONS.turnCompleted && named !== null) {
+        this.#abandonedTurns.delete(named);
+      }
+      if (!owned) {
+        log.debug('notification from another turn ignored', { method: msg.method, turn: named });
+        return;
+      }
+    }
 
     switch (msg.method) {
       case CODEX_NOTIFICATIONS.threadStarted: {
@@ -446,23 +520,16 @@ export class CodexAdapter implements WorkerAdapter {
 
       case CODEX_NOTIFICATIONS.turnStarted: {
         const p = params as unknown as CodexWire.CodexTurnStartedParams;
-        if (p.turn?.id) this.#turnId = p.turn.id;
+        // Confirms rather than replaces our id: the turn was already named by the
+        // acceptance, and this is the only chance to learn it when it was not.
+        if (this.#busy && p.turn?.id) this.#serverTurnId = p.turn.id;
         return;
       }
 
       case CODEX_NOTIFICATIONS.turnCompleted: {
         const p = params as unknown as CodexWire.CodexTurnCompletedParams;
-        const completed = typeof p.turn?.id === 'string' ? p.turn.id : null;
-
-        // Only the turn in flight can end one. A completion the watchdog already gave up
-        // on must not emit a second terminal event, and must not settle the turn that was
-        // started after it.
-        if (completed !== null && this.#abandonedTurns.delete(completed)) {
-          log.debug('completion for an abandoned turn ignored', { turn: completed });
-          return;
-        }
         if (!this.#busy) {
-          log.debug('completion outside a turn ignored', { turn: completed });
+          log.debug('completion outside a turn ignored', { turn: p.turn?.id ?? null });
           return;
         }
         const usage = p.turn?.usage;
@@ -495,6 +562,7 @@ export class CodexAdapter implements WorkerAdapter {
         this.#clearTurnTimer();
         this.#busy = false;
         this.#turnId = null;
+        this.#serverTurnId = null;
         this.#emitStatus('idle', null);
         this.#turnSettle?.resolve();
         return;
@@ -657,15 +725,19 @@ export class CodexAdapter implements WorkerAdapter {
     log.warn('turn timed out', { turnId: this.#turnId, deadline });
 
     // Giving up locally does not stop the server, which may still be running this turn in
-    // the thread's directory. Remember its id so a late completion cannot settle the next
-    // turn, and ask it to stop so its output does not land inside that turn either. A
-    // provisional id — no `turn/started` yet — simply never matches anything.
-    if (this.#turnId !== null) this.#abandonedTurns.add(this.#turnId);
+    // the thread's directory. Remember its id so nothing it says afterwards is taken for
+    // the next turn's, and ask it to stop. The interrupt is a request, not a guarantee:
+    // until the turn's own completion arrives, the adapter treats it as still emitting.
+    if (this.#serverTurnId !== null) this.#abandonedTurns.add(this.#serverTurnId);
+    else this.#abandonedUnnamedTurn = true;
 
     this.#ctx.emit({ kind: 'error', severity: 'turn', turnId: this.#turnId, message });
     for (const [approvalId] of this.#approvals) this.#settleApproval(approvalId, 'denied', true);
     if (this.#child && this.#threadId) {
-      void this.#request(CODEX_METHODS.turnInterrupt, { threadId: this.#threadId }).catch((err) => {
+      void this.#request(
+        CODEX_METHODS.turnInterrupt,
+        this.#interruptParams(this.#threadId),
+      ).catch((err) => {
         log.warn('interrupt after a timed-out turn failed', { message: (err as Error).message });
       });
     }
@@ -693,8 +765,24 @@ export class CodexAdapter implements WorkerAdapter {
       durationMs: Date.now() - this.#turnStartedAt,
     });
     this.#turnId = null;
+    this.#serverTurnId = null;
     this.#turnSettle?.reject(err);
   }
+}
+
+/**
+ * The turn a notification names, across the shapes Codex uses for it.
+ *
+ * `turn/started` and `turn/completed` nest it under `turn`; item and diff notifications
+ * carry a flat `turnId`; several carry nothing at all, which is what `null` means here.
+ */
+function notificationTurnId(params: Record<string, unknown>): string | null {
+  const turn = params['turn'];
+  if (typeof turn === 'object' && turn !== null) {
+    const id = (turn as { id?: unknown }).id;
+    if (typeof id === 'string') return id;
+  }
+  return typeof params['turnId'] === 'string' ? params['turnId'] : null;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
@@ -333,6 +333,181 @@ process.stdin.on('end', () => process.exit(0));`,
       assert.equal(of('turn.completed').length, 2);
       assert.equal(of('turn.completed')[1]?.reason, 'completed');
       assert.ok(existsSync(join(dir, 'interrupted')), 'the abandoned turn should be interrupted');
+    } finally {
+      await adapter.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/** Boilerplate every abandoned-turn case repeats: handshake, thread, and a turn counter. */
+function codexTurnServer(body: string): string {
+  return String.raw`import { appendFileSync } from 'node:fs';
+
+const emit = (value) => process.stdout.write(JSON.stringify(value) + '\n');
+let buffer = '';
+let turns = 0;
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  for (;;) {
+    const newline = buffer.indexOf('\n');
+    if (newline < 0) break;
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    const message = JSON.parse(line);
+    if (message.method === 'initialize') emit({ id: message.id, result: {} });
+    if (message.method === 'thread/start') {
+      emit({ id: message.id, result: { thread: { id: 'thread-1' } } });
+    }
+    if (message.method === 'turn/interrupt') {
+      // Recorded, and deliberately not acted on: a server that acknowledges an interrupt
+      // and keeps going is what the bookkeeping has to survive.
+      appendFileSync(
+        new URL('interrupts.jsonl', import.meta.url),
+        JSON.stringify(message.params) + '\n',
+      );
+      emit({ id: message.id, result: {} });
+    }
+    if (message.method === 'turn/start') {
+      turns += 1;
+      const turnId = 'turn-' + turns;
+      emit({ id: message.id, result: { turn: { id: turnId } } });
+` + body + String.raw`
+    }
+  }
+});
+process.stdin.on('end', () => process.exit(0));`;
+}
+
+/** One adapter over a fake server, plus a typed reader for what it emitted. */
+function codexHarness(dir: string, server: string, overrides: Partial<HarnessConfig> = {}) {
+  const events: AdapterEvent[] = [];
+  const adapter = new CodexAdapter({
+    threadId: 'thread-1',
+    cwd: dir,
+    config: codexTestConfig(dir, server, overrides),
+    permissionMode: 'default',
+    permissionBridge: {} as AdapterContext['permissionBridge'],
+    resumeSessionId: null,
+    emit: (event) => events.push(event),
+    onSessionId: () => {},
+  });
+
+  const of = <K extends AdapterEvent['kind']>(
+    kind: K,
+  ): Array<Extract<AdapterEvent, { kind: K }>> =>
+    events.filter((event): event is Extract<AdapterEvent, { kind: K }> => event.kind === kind);
+
+  return { adapter, of };
+}
+
+describe('CodexAdapter abandoned turns', () => {
+  test('ignores a completion for a turn only the acceptance ever named', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-codex-unstarted-'));
+    const server = join(dir, 'server.mjs');
+    // Names each turn in the `turn/start` result and never sends `turn/started`, which is
+    // where the adapter used to learn the id. A turn that hangs before its first
+    // notification is exactly the turn the watchdog gives up on, so the id has to be
+    // taken from the acceptance or the abandoned turn is never recognizable again.
+    writeFileSync(
+      server,
+      codexTurnServer(String.raw`      if (turns === 2) {
+        // Turn 1 reports in at last, mid-way through turn 2, claiming real work.
+        emit({
+          method: 'turn/completed',
+          params: { turn: { id: 'turn-1', status: 'completed', usage: { inputTokens: 99 } } },
+        });
+      }`),
+      'utf8',
+    );
+
+    const { adapter, of } = codexHarness(dir, server, { codexTurnTimeoutMs: 120 });
+
+    try {
+      await assert.rejects(
+        adapter.sendTurn('hang before you start'),
+        /did not complete the turn within 120ms/,
+      );
+      // Turn 1's completion lands here. Settling this turn on it would report a turn that
+      // has done nothing as finished, and bank the other turn's token usage against it.
+      await assert.rejects(
+        adapter.sendTurn('and now the next one'),
+        /did not complete the turn within 120ms/,
+      );
+
+      assert.equal(of('usage').length, 0);
+      assert.deepEqual(
+        of('turn.completed').map((event) => event.reason),
+        ['error', 'error'],
+      );
+
+      // The adapter knew which turn it was giving up on, so it could ask for that one to
+      // stop rather than for whatever the thread happens to be running by then.
+      const [firstInterrupt] = readFileSync(join(dir, 'interrupts.jsonl'), 'utf8')
+        .trimEnd()
+        .split('\n')
+        .map((line) => JSON.parse(line) as { threadId?: string; turnId?: string });
+      assert.equal(firstInterrupt?.turnId, 'turn-1');
+    } finally {
+      await adapter.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps an abandoned turn out of the next turn', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-codex-stragglers-'));
+    const server = join(dir, 'server.mjs');
+    // Turn 1 is abandoned and goes on emitting: a patch, a command, its output. The
+    // interrupt is answered and ignored, which is the whole reason this can happen.
+    writeFileSync(
+      server,
+      codexTurnServer(String.raw`      emit({ method: 'turn/started', params: { turn: { id: turnId } } });
+      if (turns === 2) {
+        emit({ method: 'turn/diff/updated', params: { turnId: 'turn-1', diff: 'stale patch' } });
+        emit({
+          method: 'item/started',
+          params: {
+            turnId: 'turn-1',
+            item: { id: 'stale-item', type: 'commandExecution', command: ['rm', '-rf', 'dist'] },
+          },
+        });
+        // Codex has never put a turn on this one, so it can only be told apart by the
+        // company it keeps.
+        emit({
+          method: 'exec/outputDelta',
+          params: { itemId: 'stale-item', stream: 'stdout', chunk: 'from the abandoned turn' },
+        });
+        emit({ method: 'turn/diff/updated', params: { turnId: turnId, diff: 'live patch' } });
+        emit({
+          method: 'turn/completed',
+          params: { turn: { id: turnId, status: 'completed' } },
+        });
+      }`),
+      'utf8',
+    );
+
+    const { adapter, of } = codexHarness(dir, server, { codexTurnTimeoutMs: 120 });
+
+    try {
+      await assert.rejects(adapter.sendTurn('hang forever'), /did not complete the turn/);
+      await adapter.sendTurn('and now a normal one');
+
+      // The abandoned turn's patch would have replaced the live one's wholesale: the diff
+      // is a snapshot of the whole turn, not an addition to it.
+      assert.deepEqual(
+        of('diff.updated').map((event) => event.patch),
+        ['live patch'],
+      );
+      // Its command never opens a row in a transcript it does not belong to, and neither
+      // does the output of that command, which names no turn at all.
+      assert.equal(of('tool.started').length, 0);
+      assert.equal(of('tool.output').length, 0);
+
+      assert.equal(of('turn.completed').length, 2);
+      assert.equal(of('turn.completed')[1]?.reason, 'completed');
+      // One turn, one id: the events that open and close it agree on which turn it was.
+      assert.equal(of('turn.started')[1]?.turnId, of('turn.completed')[1]?.turnId);
     } finally {
       await adapter.stop();
       rmSync(dir, { recursive: true, force: true });
