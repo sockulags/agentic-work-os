@@ -1,7 +1,18 @@
 export { HUMAN_AUTH_TOKEN_ENV, loadConfig, type HarnessConfig } from './config.js';
-export { Orchestrator } from './orchestrator.js';
+export { Orchestrator, TransitionEvaluationConflictError } from './orchestrator.js';
 export { HarnessServer } from './server.js';
-export { ThreadStore } from './store/thread-store.js';
+export {
+  ThreadStore,
+  ThreadStoreLockError,
+} from './store/thread-store.js';
+export type {
+  CanonicalThreadLog,
+  CompareAndAppendEntry,
+  EvaluationBatchBuild,
+  EvaluationBatchRequest,
+  EvaluationBatchResult,
+  ExpectedTransitionAttempt,
+} from './store/thread-store.js';
 export {
   buildReplay,
   applyReplay,
@@ -66,6 +77,21 @@ export {
   selectedForContext,
 } from './work/ledger.js';
 export {
+  RECOVERY_CONTEXT_MAX_CHARS,
+  RECOVERY_MAX_TRANSIENT_EVALUATOR_RETRIES,
+  buildRecoveryWorkerContext,
+  findRecoveryCycle,
+  foldRecoveryCycles,
+  hasValidHumanRecoveryAction,
+  isTransientEvaluatorRefusal,
+  recoveryPolicy,
+  recoveryWorkerPrompt,
+  RecoveryConflictError,
+  sameTransitionFingerprint,
+  serializeRecoveryContext,
+  transitionFingerprint,
+} from './work/recovery.js';
+export {
   CORE_EVALUATOR_KINDS,
   CORE_EVALUATOR_REGISTRY,
   CORE_EVALUATOR_VERSION,
@@ -123,6 +149,10 @@ export type {
   WorkerProfileDefinition,
   WorkerRegistries,
 } from './adapters/registry.js';
-export type { AgentAdapter, WorkerAdapter, AgentCapabilities, AdapterContext } from './adapters/agent.js';
+export {
+  NativeResumeNotFoundError,
+  isNativeResumeNotFoundError,
+} from './adapters/agent.js';
+export type { AgentAdapter, WorkerAdapter, AgentCapabilities, AdapterContext, WorkerTurnOptions } from './adapters/agent.js';
 export { LineDecoder, readJsonLines, encodeJsonLine } from './util/jsonl.js';
 export { workerEnvironment, spawnCli, type SpawnCliOptions, type StdioChild } from './util/spawn.js';

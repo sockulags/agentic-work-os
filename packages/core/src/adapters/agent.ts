@@ -1,4 +1,10 @@
-import type { AgentCapabilities, AgentId, PermissionMode, WorkerAdapterEvent } from '@awos/protocol';
+import type {
+  AgentCapabilities,
+  AgentId,
+  PermissionMode,
+  RecoveryWorkerContext,
+  WorkerAdapterEvent,
+} from '@awos/protocol';
 import type { HarnessConfig } from '../config.js';
 import type { PermissionBridge } from '../permission-bridge.js';
 
@@ -29,7 +35,7 @@ export interface WorkerAdapter {
   start(): Promise<void>;
 
   /** Send a user turn. Resolves when the turn *completes*, not when it's accepted. */
-  sendTurn(text: string): Promise<void>;
+  sendTurn(text: string, options?: WorkerTurnOptions): Promise<void>;
 
   /** Best-effort cancel of the in-flight turn. */
   interrupt(): Promise<void>;
@@ -43,6 +49,26 @@ export interface WorkerAdapter {
 
 /** Compatibility name for callers that still use the pre-WorkerProfile contract. */
 export type AgentAdapter = WorkerAdapter;
+
+/** A persisted native session id was rejected before any new turn content was accepted. */
+export class NativeResumeNotFoundError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string) {
+    super(`Native session ${sessionId} could not be resumed.`);
+    this.name = 'NativeResumeNotFoundError';
+    this.sessionId = sessionId;
+  }
+}
+
+export function isNativeResumeNotFoundError(error: unknown): error is NativeResumeNotFoundError {
+  return error instanceof NativeResumeNotFoundError;
+}
+
+/** Structured metadata for a bounded correction; adapters must not replace its worker. */
+export interface WorkerTurnOptions {
+  recoveryContext?: RecoveryWorkerContext;
+}
 
 // The capability shape now lives in @awos/protocol, because the UI branches on it too.
 export type { AgentCapabilities };
@@ -60,4 +86,6 @@ export interface AdapterContext {
   emit: (event: WorkerAdapterEvent) => void;
   /** Called when the adapter learns its native session id. */
   onSessionId: (sessionId: string) => void;
+  /** Called when a persisted native id is proven unusable before a fresh session starts. */
+  onSessionLost?: () => void;
 }

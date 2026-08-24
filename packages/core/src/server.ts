@@ -11,7 +11,8 @@ import type {
 } from '@awos/protocol';
 import { hasVisualEvidencePayload } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
-import type { Orchestrator } from './orchestrator.js';
+import { TransitionEvaluationConflictError, type Orchestrator } from './orchestrator.js';
+import { RecoveryConflictError } from './work/recovery.js';
 import { createLogger } from './util/logger.js';
 import { probeWorkerProfiles } from './adapters/registry.js';
 
@@ -121,6 +122,24 @@ export class HarnessServer {
       void this.#handle(msg)
         .then((body) => send({ ...body, requestId: msg.requestId }))
         .catch((err: Error) => {
+          if (err instanceof RecoveryConflictError) {
+            send({
+              requestId: msg.requestId,
+              type: 'recovery.conflict',
+              threadId: 'threadId' in msg && typeof msg.threadId === 'string' ? msg.threadId : '',
+              conflict: err.conflict,
+            });
+            return;
+          }
+          if (err instanceof TransitionEvaluationConflictError) {
+            send({
+              requestId: msg.requestId,
+              type: 'transition.conflict',
+              threadId: 'threadId' in msg && typeof msg.threadId === 'string' ? msg.threadId : '',
+              conflict: err.conflict,
+            });
+            return;
+          }
           log.error('request failed', { type: msg.type, message: err.message });
           send({ requestId: msg.requestId, type: 'error', message: err.message });
         });
@@ -222,6 +241,8 @@ export class HarnessServer {
           targetStepId: msg.targetStepId,
           candidate: msg.candidate,
           ...(msg.transitionId === undefined ? {} : { transitionId: msg.transitionId }),
+          ...(msg.expectedAttempt === undefined ? {} : { expectedAttempt: msg.expectedAttempt }),
+          ...(msg.expectedHead === undefined ? {} : { expectedHead: msg.expectedHead }),
         });
         return {
           type: 'transition',
@@ -229,6 +250,36 @@ export class HarnessServer {
           allowed: decision.allowed,
           verdict: decision.verdict,
           evaluation: decision.evaluation,
+        };
+      }
+
+      case 'recovery.get':
+        return {
+          type: 'recovery',
+          threadId: msg.threadId,
+          cycle: orchestrator.getRecovery(msg.threadId, {
+            ...(msg.transitionId === undefined ? {} : { transitionId: msg.transitionId }),
+            ...(msg.cycleId === undefined ? {} : { cycleId: msg.cycleId }),
+          }),
+        };
+
+      case 'recovery.start': {
+        // The worker turn is intentionally pushed through the existing event stream. The
+        // cycle reservation is synchronous, so the response can still return its durable
+        // state without holding the RPC open for the worker's full turn.
+        void orchestrator.startRecovery(msg.threadId, {
+          transitionId: msg.transitionId,
+          expectedAttempt: msg.expectedAttempt,
+          ...(msg.expectedHead === undefined ? {} : { expectedHead: msg.expectedHead }),
+          agent: msg.agent,
+          ...(msg.cycleId === undefined ? {} : { cycleId: msg.cycleId }),
+        }).catch((err: Error) => {
+          this.broadcast({ type: 'notice', level: 'error', message: err.message });
+        });
+        return {
+          type: 'recovery',
+          threadId: msg.threadId,
+          cycle: orchestrator.getRecovery(msg.threadId, { transitionId: msg.transitionId }),
         };
       }
 
@@ -331,6 +382,13 @@ export class HarnessServer {
           ...(msg.attestationId === undefined ? {} : { attestationId: msg.attestationId }),
         });
         return { type: 'ok' };
+
+      case 'recovery.action':
+        return {
+          type: 'recovery',
+          threadId: msg.threadId,
+          cycle: await orchestrator.applyRecoveryAction(msg.threadId, msg.action),
+        };
 
       case 'context.retain':
         orchestrator.retainContext(msg.threadId, {

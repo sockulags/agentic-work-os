@@ -13,7 +13,8 @@ import {
   type ToolInput,
 } from '@qwen-code/sdk';
 import type { ToolKind, PermissionMode, ModelTarget } from '@awos/protocol';
-import type { WorkerAdapter, AgentCapabilities, AdapterContext } from './agent.js';
+import { NativeResumeNotFoundError } from './agent.js';
+import type { WorkerAdapter, AgentCapabilities, AdapterContext, WorkerTurnOptions } from './agent.js';
 import { resolveWorkspace } from '../workspace/resolve.js';
 import type { HarnessConfig } from '../config.js';
 import { workerEnvironment } from '../util/spawn.js';
@@ -38,14 +39,12 @@ export const QWEN_CAPABILITIES: AgentCapabilities = {
 };
 
 /** A persisted Qwen session was explicitly proven absent before execution began. */
-export class QwenResumeNotFoundError extends Error {
+export class QwenResumeNotFoundError extends NativeResumeNotFoundError {
   readonly code = 'qwen_resume_not_found' as const;
-  readonly sessionId: string;
 
   constructor(sessionId: string) {
-    super(`Qwen Code resume session was not found: ${sessionId}`);
+    super(sessionId);
     this.name = 'QwenResumeNotFoundError';
-    this.sessionId = sessionId;
   }
 }
 
@@ -269,7 +268,7 @@ export class QwenCodeAdapter implements WorkerAdapter {
     this.#clearInterruptFallback();
   }
 
-  async sendTurn(text: string): Promise<void> {
+  async sendTurn(text: string, _options?: WorkerTurnOptions): Promise<void> {
     if (this.#busy) throw new Error('Qwen Code is already working on a turn.');
     const release = acquireQwenInferenceSlot();
     if (!release) throw new Error('Qwen Code is already running another inference; concurrent Qwen turns are not queued.');

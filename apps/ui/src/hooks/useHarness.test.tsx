@@ -127,6 +127,7 @@ function runtime(run: CatalogRunEvidence): ThreadRuntimeState {
     busyWith: run.live ? 'claude' : null,
     busy: run.live ? ['claude'] : [],
     runStates: [run],
+    recovery: [],
     lanes: {},
     currentTurnId: run.live ? 'turn-1' : null,
     lastTurnAgent: 'claude',

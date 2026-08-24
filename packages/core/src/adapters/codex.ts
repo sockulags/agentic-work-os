@@ -7,7 +7,8 @@ import {
   type PlanItemStatus,
   type ToolKind,
 } from '@awos/protocol';
-import type { WorkerAdapter, AgentCapabilities, AdapterContext } from './agent.js';
+import { NativeResumeNotFoundError } from './agent.js';
+import type { WorkerAdapter, AgentCapabilities, AdapterContext, WorkerTurnOptions } from './agent.js';
 import { spawnCli, type StdioChild } from '../util/spawn.js';
 import { readJsonLines, encodeJsonLine } from '../util/jsonl.js';
 import { createLogger } from '../util/logger.js';
@@ -152,7 +153,12 @@ export class CodexAdapter implements WorkerAdapter {
         log.warn('resume failed, starting a new thread', {
           message: (err as Error).message,
         });
+        // A fresh native thread is not trustworthy against the old watermark. Clear
+        // both identities so the orchestrator's next payload is rebuilt from canonical
+        // replay rather than silently omitting prior context.
+        this.#ctx.onSessionLost?.();
         this.#threadId = null;
+        throw new NativeResumeNotFoundError(resumeSessionId);
       }
     }
 
@@ -199,7 +205,7 @@ export class CodexAdapter implements WorkerAdapter {
   // Turns
   // -------------------------------------------------------------------------
 
-  async sendTurn(text: string): Promise<void> {
+  async sendTurn(text: string, _options?: WorkerTurnOptions): Promise<void> {
     await this.start();
     if (!this.#child || !this.#threadId) throw new Error('Codex is not running.');
     if (this.#busy) throw new Error('Codex is already working on a turn.');

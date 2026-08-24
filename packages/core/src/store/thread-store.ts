@@ -1,11 +1,23 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, appendFileSync } from 'node:fs';
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  existsSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import type {
   AdapterEvent,
   AgentId,
   HarnessEvent,
   ThreadSummary,
+  TransitionEvaluation,
 } from '@awos/protocol';
 import { AGENT_IDS, isTrustedVisualEventKind } from '@awos/protocol';
 import { createLogger } from '../util/logger.js';
@@ -23,6 +35,50 @@ export interface EventLogSnapshot {
   readonly threadId: string;
   readonly revision: number;
   readonly events: readonly HarnessEvent[];
+}
+
+export interface ExpectedTransitionAttempt {
+  transitionId: string;
+  attempt: number;
+}
+
+export interface CompareAndAppendEntry {
+  agent: AgentId | null;
+  body: AdapterEvent;
+}
+
+/** The canonical log view supplied to an evaluation CAS builder while the disk lock is held. */
+export interface CanonicalThreadLog {
+  readonly threadId: string;
+  readonly revision: number;
+  readonly events: readonly HarnessEvent[];
+  readonly latestAttempt: (transitionId: string) => number | null;
+}
+
+export interface EvaluationBatchBuild<T> {
+  entries: readonly CompareAndAppendEntry[];
+  value: T;
+}
+
+/** Build and persist one new accepted evaluation from the canonical locked log. */
+export interface EvaluationBatchRequest<T> {
+  transitionId: string;
+  /** The latest accepted attempt before the new evaluation; zero means a new identity. */
+  expectedAttempt: number;
+  build: (canonical: CanonicalThreadLog) => EvaluationBatchBuild<T>;
+}
+
+export interface EvaluationBatchResult<T> {
+  events: HarnessEvent[];
+  value: T;
+}
+
+/** A lock could not be acquired or could not be released safely. */
+export class ThreadStoreLockError extends Error {
+  constructor(threadId: string, cause?: unknown) {
+    super(`The append lock for thread ${threadId} is unavailable; the write was refused.`, { cause });
+    this.name = 'ThreadStoreLockError';
+  }
 }
 
 const eventLogSnapshotBrand = new WeakSet<object>();
@@ -191,6 +247,14 @@ export class ThreadStore {
     return events.length === 0 ? 0 : (events[events.length - 1] as HarnessEvent).seq;
   }
 
+  /** Reload one canonical thread under the same lock used for writes. */
+  refresh(threadId: string): number {
+    return this.#withThreadLock(threadId, () => {
+      this.#reloadThreadFromDisk(threadId);
+      return this.head(threadId);
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Writes
   // -------------------------------------------------------------------------
@@ -228,6 +292,15 @@ export class ThreadStore {
 
   /** Stamp identity and ordering onto an adapter event, persist, return it. */
   append(threadId: string, agent: AgentId | null, body: AdapterEvent): HarnessEvent {
+    return this.#withThreadLock(threadId, () => {
+      // Ordinary events also cross process boundaries. Do not let a stale instance reuse
+      // the last sequence it saw before acquiring the reservation.
+      this.#reloadThreadFromDisk(threadId);
+      return this.#appendUnlocked(threadId, agent, body);
+    });
+  }
+
+  #appendUnlocked(threadId: string, agent: AgentId | null, body: AdapterEvent): HarnessEvent {
     const summary = this.#summaries.get(threadId);
     if (!summary) throw new Error(`Unknown thread ${threadId}`);
     if (agent !== null && (
@@ -250,9 +323,9 @@ export class ThreadStore {
       ts: ts ?? Date.now(),
     }) as HarnessEvent;
 
+    this.#appendDurably(this.#eventsPath(threadId), `${JSON.stringify(event)}\n`);
     events.push(event);
     this.#events.set(threadId, events);
-    appendFileSync(this.#eventsPath(threadId), `${JSON.stringify(event)}\n`, 'utf8');
 
     summary.eventCount = events.length;
     summary.updatedAt = this.#tick();
@@ -263,13 +336,89 @@ export class ThreadStore {
     return freezeClone(event);
   }
 
+  /**
+   * Compare-and-append one event against the current log head.
+   *
+   * Recovery reservations use this synchronous boundary instead of a process-local
+   * register: two callers can both read the same refusal, but only the caller whose
+   * expected head still matches may append the correction reservation.
+   */
+  compareAndAppend(
+    threadId: string,
+    expectedHead: number,
+    agent: AgentId | null,
+    body: AdapterEvent,
+    expectedAttempt?: ExpectedTransitionAttempt,
+  ): HarnessEvent | null {
+    const events = this.compareAndAppendBatch(threadId, expectedHead, [{ agent, body }], expectedAttempt);
+    return events?.[0] ?? null;
+  }
+
+  /**
+   * Compare-and-append one or more events under one same-filesystem exclusive lock.
+   *
+   * The lock is coordination only. The event log remains the recovery truth. Reloading
+   * from disk while holding it is required because another process may have advanced the
+   * log since this store instance last read it.
+   */
+  compareAndAppendBatch(
+    threadId: string,
+    expectedHead: number,
+    entries: readonly CompareAndAppendEntry[],
+    expectedAttempt?: ExpectedTransitionAttempt,
+  ): HarnessEvent[] | null;
+  compareAndAppendBatch<T>(
+    threadId: string,
+    expectedHead: number,
+    request: EvaluationBatchRequest<T>,
+  ): EvaluationBatchResult<T> | null;
+  compareAndAppendBatch(
+    threadId: string,
+    expectedHead: number,
+    entries: readonly CompareAndAppendEntry[] | EvaluationBatchRequest<unknown>,
+    expectedAttempt?: ExpectedTransitionAttempt,
+  ): HarnessEvent[] | EvaluationBatchResult<unknown> | null {
+    return this.#withThreadLock(threadId, () => {
+      this.#reloadThreadFromDisk(threadId);
+      if (this.head(threadId) !== expectedHead) return null;
+      if (isEvaluationBatchRequest(entries)) {
+        const request = entries;
+        if (
+          request.transitionId.trim() === '' ||
+          !Number.isInteger(request.expectedAttempt) ||
+          request.expectedAttempt < 0 ||
+          typeof request.build !== 'function'
+        ) return null;
+        const canonical = this.#canonicalLog(threadId);
+        if (canonical.latestAttempt(request.transitionId) !== (request.expectedAttempt === 0 ? null : request.expectedAttempt)) {
+          return null;
+        }
+        const built = request.build(canonical);
+        if (!this.#validEvaluationBatch(canonical, request, built.entries)) return null;
+        const events = built.entries.map((entry) => this.#appendUnlocked(threadId, entry.agent, entry.body));
+        return { events, value: built.value };
+      }
+      if (expectedAttempt !== undefined && !this.#matchesExpectedAttempt(threadId, expectedAttempt)) return null;
+      const canonical = this.#canonicalLog(threadId);
+      if (this.#containsEvaluation(entries)) {
+        if (expectedAttempt === undefined || !this.#validPrebuiltEvaluationBatch(canonical, entries, expectedAttempt)) {
+          return null;
+        }
+      }
+      return entries.map((entry) => this.#appendUnlocked(threadId, entry.agent, entry.body));
+    });
+  }
+
   update(threadId: string, patch: Partial<ThreadSummary>): ThreadSummary {
-    const summary = this.#summaries.get(threadId);
-    if (!summary) throw new Error(`Unknown thread ${threadId}`);
-    const next: ThreadSummary = { ...summary, ...patch, id: threadId, updatedAt: this.#tick() };
-    this.#summaries.set(threadId, next);
-    this.#writeMeta(next);
-    return next;
+    return this.#withThreadLock(threadId, () => {
+      this.#reloadThreadFromDisk(threadId);
+      const summary = this.#summaries.get(threadId);
+      if (!summary) throw new Error(`Unknown thread ${threadId}`);
+      const next: ThreadSummary = { ...summary, ...patch, id: threadId, updatedAt: this.#tick() };
+      this.#summaries.set(threadId, next);
+      this.#writeMeta(next);
+      return next;
+    });
   }
 
   setNativeSession(threadId: string, agent: AgentId, sessionId: string): void {
@@ -321,8 +470,155 @@ export class ThreadStore {
     return join(this.#dir(threadId), 'events.jsonl');
   }
 
+  #lockPath(threadId: string): string {
+    return join(this.#dir(threadId), '.events.lock');
+  }
+
+  #withThreadLock<T>(threadId: string, callback: () => T): T {
+    if (!this.#summaries.has(threadId) && !existsSync(this.#metaPath(threadId))) {
+      throw new Error(`Unknown thread ${threadId}`);
+    }
+
+    const lockPath = this.#lockPath(threadId);
+    let acquired = false;
+    try {
+      // mkdir is an atomic same-filesystem operation. We intentionally do not reclaim an
+      // existing directory: a stale or uncertain owner must fail closed, not fork history.
+      mkdirSync(lockPath);
+      acquired = true;
+      const ownerPath = join(lockPath, 'owner');
+      const fd = openSync(ownerPath, 'wx');
+      try {
+        writeSync(fd, `${process.pid}\n`, undefined, 'utf8');
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      return callback();
+    } catch (error) {
+      if (!acquired) throw new ThreadStoreLockError(threadId, error);
+      throw error;
+    } finally {
+      if (acquired) {
+        try {
+          rmSync(lockPath, { recursive: true, force: false });
+        } catch (error) {
+          throw new ThreadStoreLockError(threadId, error);
+        }
+      }
+    }
+  }
+
+  #appendDurably(path: string, content: string): void {
+    const fd = openSync(path, 'a');
+    try {
+      writeSync(fd, content, undefined, 'utf8');
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  #matchesExpectedAttempt(threadId: string, expected: ExpectedTransitionAttempt): boolean {
+    const attempts = this.#attempts(this.#events.get(threadId) ?? [], expected.transitionId);
+    return expected.attempt === 0
+      ? attempts.length === 0
+      : attempts.length === expected.attempt && attempts.every((attempt, index) => attempt === index + 1);
+  }
+
+  #canonicalLog(threadId: string): CanonicalThreadLog {
+    const events = Object.freeze((this.#events.get(threadId) ?? []).map((event) => freezeClone(event)));
+    return {
+      threadId,
+      revision: this.head(threadId),
+      events,
+      latestAttempt: (transitionId) => this.#latestAttempt(events, transitionId),
+    };
+  }
+
+  #latestAttempt(events: readonly HarnessEvent[], transitionId: string): number | null {
+    const attempts = this.#attempts(events, transitionId);
+    if (attempts.some((attempt, index) => attempt !== index + 1)) return null;
+    return attempts.at(-1) ?? null;
+  }
+
+  #containsEvaluation(entries: readonly CompareAndAppendEntry[]): boolean {
+    return entries.some((entry) => evaluationFromBody(entry.body) !== null);
+  }
+
+  #validPrebuiltEvaluationBatch(
+    canonical: CanonicalThreadLog,
+    entries: readonly CompareAndAppendEntry[],
+    expected: ExpectedTransitionAttempt,
+  ): boolean {
+    const evaluations = entries
+      .map((entry) => evaluationFromBody(entry.body))
+      .filter((evaluation): evaluation is TransitionEvaluation => evaluation !== null);
+    return evaluations.length === 1 && this.#validEvaluation(canonical, evaluations[0]!, expected.transitionId, expected.attempt);
+  }
+
+  #validEvaluationBatch<T>(
+    canonical: CanonicalThreadLog,
+    request: EvaluationBatchRequest<T>,
+    entries: readonly CompareAndAppendEntry[],
+  ): boolean {
+    const evaluations = entries
+      .map((entry) => evaluationFromBody(entry.body))
+      .filter((evaluation): evaluation is TransitionEvaluation => evaluation !== null);
+    return evaluations.length === 1 && this.#validEvaluation(
+      canonical,
+      evaluations[0]!,
+      request.transitionId,
+      request.expectedAttempt,
+    );
+  }
+
+  #validEvaluation(
+    canonical: CanonicalThreadLog,
+    evaluation: TransitionEvaluation,
+    transitionId: string,
+    expectedAttempt: number,
+  ): boolean {
+    if (evaluation.transitionId !== transitionId) return false;
+    if (evaluation.attempt !== expectedAttempt + 1) return false;
+    const priorAttempts = this.#attempts(canonical.events, transitionId);
+    if (
+      (expectedAttempt === 0 && priorAttempts.length !== 0) ||
+      (expectedAttempt > 0 && (
+        priorAttempts.length !== expectedAttempt ||
+        priorAttempts.some((attempt, index) => attempt !== index + 1)
+      ))
+    ) return false;
+    if (canonical.latestAttempt(transitionId) !== (expectedAttempt === 0 ? null : expectedAttempt)) return false;
+    for (const event of canonical.events) {
+      const prior = evaluationFromEvent(event);
+      if (prior?.transitionId === transitionId && prior.attempt === evaluation.attempt) return false;
+    }
+    return true;
+  }
+
+  #attempts(events: readonly HarnessEvent[], transitionId: string): number[] {
+    return events
+      .map((event) => evaluationFromEvent(event))
+      .filter((evaluation): evaluation is TransitionEvaluation => evaluation?.transitionId === transitionId)
+      .map((evaluation) => evaluation.attempt);
+  }
+
   #writeMeta(summary: ThreadSummary): void {
-    writeFileSync(this.#metaPath(summary.id), JSON.stringify(summary, null, 2), 'utf8');
+    const target = this.#metaPath(summary.id);
+    const temporary = join(this.#dir(summary.id), `.meta-${process.pid}-${randomUUID()}.tmp`);
+    let fd: number | null = null;
+    try {
+      fd = openSync(temporary, 'wx');
+      writeSync(fd, JSON.stringify(summary, null, 2), undefined, 'utf8');
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = null;
+      renameSync(temporary, target);
+    } finally {
+      if (fd !== null) closeSync(fd);
+      if (existsSync(temporary)) rmSync(temporary, { force: true });
+    }
   }
 
   #loadAll(): void {
@@ -346,7 +642,7 @@ export class ThreadStore {
     log.info('loaded threads', { count: this.#summaries.size });
   }
 
-  #loadThread(id: string): void {
+  #loadThread(id: string, strict = false): void {
     const metaPath = this.#metaPath(id);
     if (!existsSync(metaPath)) return;
 
@@ -361,7 +657,7 @@ export class ThreadStore {
     // Lanes are scratch directories that do not survive a restart, so a thread always
     // reopens in the shared directory and the user turns parallel mode back on if they
     // want it. Reopening straight into lanes would point agents at paths that may be gone.
-    summary.parallel = false;
+    if (!strict) summary.parallel = false;
 
     const events: HarnessEvent[] = [];
     const eventsPath = this.#eventsPath(id);
@@ -372,10 +668,23 @@ export class ThreadStore {
         try {
           events.push(JSON.parse(line) as HarnessEvent);
         } catch {
+          if (strict) throw new Error(`Thread ${id} has an incomplete or corrupt event line.`);
           // A torn final line is the expected shape of a crash mid-append. Drop it and
           // keep every complete event before it.
           log.warn('dropping malformed event line', { id });
         }
+      }
+    }
+
+    if (strict) {
+      let previousSeq = 0;
+      const ids = new Set<string>();
+      for (const event of events) {
+        if (event.threadId !== id || !Number.isInteger(event.seq) || event.seq <= previousSeq || ids.has(event.id)) {
+          throw new Error(`Thread ${id} has a non-canonical event sequence.`);
+        }
+        previousSeq = event.seq;
+        ids.add(event.id);
       }
     }
 
@@ -386,4 +695,27 @@ export class ThreadStore {
     this.#summaries.set(id, summary);
     this.#events.set(id, events);
   }
+
+  #reloadThreadFromDisk(threadId: string): void {
+    this.#loadThread(threadId, true);
+    if (!this.#summaries.has(threadId)) throw new Error(`Unknown thread ${threadId}`);
+  }
+}
+
+function evaluationFromBody(body: AdapterEvent): TransitionEvaluation | null {
+  if (body.kind === 'transition.evaluated') return body.evaluation;
+  if (body.kind === 'gate.evaluated') return body.evaluation ?? null;
+  return null;
+}
+
+function isEvaluationBatchRequest(
+  value: readonly CompareAndAppendEntry[] | EvaluationBatchRequest<unknown>,
+): value is EvaluationBatchRequest<unknown> {
+  return !Array.isArray(value);
+}
+
+function evaluationFromEvent(event: HarnessEvent): TransitionEvaluation | null {
+  if (event.kind === 'transition.evaluated') return event.evaluation;
+  if (event.kind === 'gate.evaluated') return event.evaluation ?? null;
+  return null;
 }

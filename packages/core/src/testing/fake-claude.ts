@@ -12,8 +12,14 @@
  */
 
 import { LineDecoder } from '../util/jsonl.js';
+import { writeFileSync } from 'node:fs';
 
 const args = new Set(process.argv.slice(2));
+
+if (args.has('--version')) {
+  process.stdout.write('fake-claude 1.0\n');
+  process.exit(0);
+}
 
 /**
  * How much of the prompt the fake echoes back.
@@ -125,6 +131,10 @@ function markdownChunks(prompt: string): string[] {
 async function runTurn(text: string): Promise<void> {
   turn += 1;
   const messageId = `msg_${turn}`;
+
+  if (args.has('--recovery-edit')) {
+    writeFileSync(`.awos-recovery-edit-${turn}.txt`, `correction ${turn}\n`, 'utf8');
+  }
 
   if (turn === 1) {
     emit({
