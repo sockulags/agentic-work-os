@@ -442,6 +442,7 @@ describe('parseDeclaration', () => {
                 browser: 'chromium', runtime: 'node', viewport: '1440x900', dpr: 1,
                 fonts: 'fonts-v1', data: 'fixture-v1', animation: 'disabled', region: 'main',
               },
+              exact: true,
             },
           },
           {
@@ -635,6 +636,23 @@ describe('parseDeclaration', () => {
       assert.ok(result.problems.some((problem) => problem.path === 'guardrails[0].parameters.evaluatorProfile'));
       assert.match(result.problems.find((problem) => problem.path === 'guardrails[0].parameters.evaluatorProfile')?.message ?? '', /independent evaluator capability/);
       assert.ok(result.problems.some((problem) => problem.path === 'guardrails[1].parameters.capture.region'));
+    });
+
+    test('requires explicit exact pixels before allowing absolute pixel enforcement', () => {
+      const result = parse(v3({
+        guardrails: [{
+          id: 'pixels', kind: 'pixel-diff', attach: { step: 'review' }, enforcement: 'absolute',
+          parameters: {
+            expectationItem: 'prototype.dashboard',
+            capture: {
+              browser: 'chromium/128', runtime: 'node/22', viewport: '1440x900', dpr: 1,
+              fonts: 'fonts-v1', data: 'fixture-v1', animation: 'disabled-v1', region: 'main',
+            },
+          },
+        }],
+      }));
+      assert.deepEqual(paths(result), ['guardrails[0].parameters.exact']);
+      assert.match(result.problems[0]?.message ?? '', /explicitly require exact pixels/);
     });
 
     test('refuses local guardrails and schema-v3 legacy policy overrides', () => {

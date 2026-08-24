@@ -9,6 +9,7 @@ import type {
   WorkItem,
   WorkSourceError,
 } from '@awos/protocol';
+import { hasVisualEvidencePayload } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
 import type { Orchestrator } from './orchestrator.js';
 import { createLogger } from './util/logger.js';
@@ -287,6 +288,9 @@ export class HarnessServer {
         return { type: 'ok' };
 
       case 'evidence.record':
+        if (hasVisualEvidencePayload(msg)) {
+          throw new Error('Visual evidence can only be recorded by a trusted core adapter.');
+        }
         await orchestrator.recordEvidence(msg.threadId, {
           runId: msg.runId,
           kind: msg.evidenceKind,

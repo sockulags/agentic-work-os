@@ -22,6 +22,7 @@ import {
   foldTransitionEvaluations,
   foldTransitionEvaluationConflicts,
   foldTransitionEvaluationHistory,
+  foldVisualSourceEvents,
   selectedForContext,
 } from './ledger.js';
 
@@ -125,6 +126,25 @@ describe('foldEvidence', () => {
     assert.equal(items[0]?.summary, 'actually 3 were skipped');
   });
 
+  test('visual evidence identity cannot be corrected in place', () => {
+    const visual = {
+      kind: 'pixel-diff',
+      reference: { eventId: 'reference-event', artifactId: 'reference-v1', locator: 'artifact://reference', revision: 'r1', digest: 'ref-digest' },
+      candidate: { eventId: 'candidate-event', artifactId: 'candidate-v1', locator: 'artifact://candidate', revision: 'c1', digest: 'candidate-digest' },
+      capture: { browser: 'chromium/128', runtime: 'node/22', viewport: '10x10', dpr: 1, fonts: 'fonts', data: 'fixture', animation: 'disabled', region: 'main' },
+      measurement: { comparedPixels: 100, differentPixels: 0, equal: true, exact: true },
+    };
+    const changed = { ...visual, candidate: { ...visual.candidate, digest: 'changed-digest' } };
+    const items = foldEvidence([
+      evidence('visual', { evidenceKind: 'artifact', visual }),
+      evidence('visual', { evidenceKind: 'artifact', visual: changed }),
+    ]);
+
+    assert.equal(items.length, 1);
+    assert.equal(items[0]?.visual?.kind, 'pixel-diff');
+    assert.equal(items[0]?.visual?.kind === 'pixel-diff' ? items[0].visual.candidate.digest : null, 'candidate-digest');
+  });
+
   test('separate items stay separate', () => {
     assert.equal(foldEvidence([evidence('ev1'), evidence('ev2')]).length, 2);
   });
@@ -139,6 +159,25 @@ describe('foldEvidence', () => {
 
     assert.equal(item?.ref.url, 'https://example.com/run/9');
     assert.equal(item?.ref.eventId, null);
+  });
+});
+
+describe('foldVisualSourceEvents', () => {
+  test('keeps the first immutable source and marks a later redefinition as unusable', () => {
+    const first = event({
+      kind: 'visual.artifact.recorded',
+      role: 'reference',
+      artifactId: 'reference-v1',
+      locator: 'artifact://reference-v1',
+      revision: 'r1',
+      digest: 'digest-v1',
+      capture: null,
+    });
+    const redefined = { ...first, digest: 'digest-v2' } as HarnessEvent;
+    const folded = foldVisualSourceEvents([first, redefined]);
+
+    assert.equal(folded.artifacts.get(first.id)?.identity.digest, 'digest-v1');
+    assert.equal(folded.conflicts.has(first.id), true);
   });
 });
 

@@ -150,6 +150,7 @@ export function foldRuns(
           summary: event.summary,
           state: event.state,
           check: event.check,
+          ...(event.visual === undefined ? {} : { visual: event.visual }),
           source: sourceOf(event),
           at: event.ts,
         });

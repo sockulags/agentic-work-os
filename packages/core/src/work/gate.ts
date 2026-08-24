@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import type {
   CandidateIdentity,
+  EvaluatorCapability,
   EvaluatorFact,
   EvaluatorFactState,
   EvidenceItem,
@@ -27,7 +28,11 @@ import {
   isUserFinalAuthority,
 } from '@awos/protocol';
 import { coreExpectationManifestEntry } from '../workspace/manifest.js';
-import { evaluateGuardrails, evaluateVerificationChecks } from './evaluators.js';
+import {
+  evaluateOwnedGuardrails,
+  evaluateGuardrails,
+  evaluateVerificationChecks,
+} from './evaluators.js';
 
 /**
  * The existing integration input. It remains small and is still useful to callers that only
@@ -74,6 +79,11 @@ export interface IntegrationTransitionInput extends GateInput {
   guardrails?: readonly WorkspaceGuardrail[];
   /** Append-only records used by human and evidence evaluators. */
   events?: readonly HarnessEvent[];
+  /** Independent semantic capabilities supplied by the host, never by workspace config. */
+  evaluatorCapabilities?: readonly EvaluatorCapability[];
+  producingWorkerProfileId?: string | null;
+  producingWorkerInstanceId?: string | null;
+  evaluatorInstanceId?: string | null;
 }
 
 export interface GuardrailExpectationSetResult {
@@ -94,6 +104,10 @@ export interface GuardedTransitionInput extends Omit<TransitionInput, 'facts'> {
   verify: readonly VerifyCommand[];
   evidence: readonly EvidenceItem[];
   events: readonly HarnessEvent[];
+  evaluatorCapabilities?: readonly EvaluatorCapability[];
+  producingWorkerProfileId?: string | null;
+  producingWorkerInstanceId?: string | null;
+  evaluatorInstanceId?: string | null;
 }
 
 /**
@@ -143,6 +157,24 @@ export function evaluateTransition(input: TransitionInput): TransitionEvaluation
   const requiredUnmet = unmet.filter(({ item }) => item.enforcement === 'required');
   const nonOverridableRequired = requiredUnmet.filter(({ item }) => item.allowOverride !== true || isUserFinalAuthority(item));
   const advisoryUncertainty = unknown.some(({ item }) => item.enforcement === 'advisory');
+  const forbiddenAbsoluteModel = states.filter(({ item, fact }) =>
+    item.enforcement === 'absolute' &&
+    (fact.provenance.evaluatorClass === 'model' || fact.provenance.evaluatorKind === 'model-rubric'),
+  );
+
+  if (forbiddenAbsoluteModel.length > 0) {
+    return refused(base, 'blocked', {
+      unmetRequirementIds: forbiddenAbsoluteModel.map(({ item }) => item.id),
+      reason: 'Model-rubric evaluations cannot use absolute enforcement.',
+      required: evidenceRequirement(
+        forbiddenAbsoluteModel.map(({ item }) => item.id),
+        'Change the semantic guardrail to advisory or required enforcement.',
+      ),
+      responsibleActor: input.attempt.actor,
+      nextAction: 'escalate',
+      retryable: false,
+    });
+  }
 
   // An override is a legal escape only for a current, pinned, known required failure. It
   // cannot turn an absolute refusal, an invalid attempt, or an unresolved evaluator into a
@@ -215,6 +247,26 @@ export function evaluateTransition(input: TransitionInput): TransitionEvaluation
     ));
   }
 
+  const visualUncertainty = unknown.filter(({ item, fact }) =>
+    item.enforcement === 'required' &&
+    fact.provenance.validity === 'uncertain' &&
+    (
+      fact.provenance.evaluatorClass === 'pixel' ||
+      fact.provenance.evaluatorClass === 'model' ||
+      fact.provenance.evaluatorKind === 'pixel-diff' ||
+      fact.provenance.evaluatorKind === 'model-rubric'
+    ),
+  );
+  if (visualUncertainty.length > 0) {
+    return refused(base, 'waiting-for-human', refusalFor(
+      visualUncertainty,
+      'Visual evaluator evidence is uncertain, conflicting, or invalid and needs human review.',
+      'provide-evidence',
+      true,
+      'user',
+    ));
+  }
+
   if (absoluteUnmet.length > 0) {
     return refused(base, 'blocked', refusalFor(
       absoluteUnmet,
@@ -259,16 +311,48 @@ export function evaluateTransition(input: TransitionInput): TransitionEvaluation
 
 /** Evaluate configured guardrails, then let the core transition function choose the verdict. */
 export function evaluateGuardedTransition(input: GuardedTransitionInput): TransitionEvaluation {
+  return evaluateGuardedTransitionInternal(input, false);
+}
+
+/** Internal owner-bound transition entry point; callers cannot supply a snapshot. */
+export function evaluateOwnedGuardedTransition(
+  input: GuardedTransitionInput,
+): TransitionEvaluation {
+  return evaluateGuardedTransitionInternal(input, true);
+}
+
+function evaluateGuardedTransitionInternal(
+  input: GuardedTransitionInput,
+  ownerBound: boolean,
+): TransitionEvaluation {
+  const facts = ownerBound
+    ? evaluateOwnedGuardrails({
+        guardrails: input.guardrails,
+        expectationSet: input.expectationSet,
+        candidate: input.attempt.candidate,
+        verify: input.verify,
+        evidence: input.evidence,
+        events: input.events,
+        evaluatorCapabilities: input.evaluatorCapabilities,
+        producingWorkerProfileId: input.producingWorkerProfileId,
+        producingWorkerInstanceId: input.producingWorkerInstanceId,
+        evaluatorInstanceId: input.evaluatorInstanceId,
+      })
+    : evaluateGuardrails({
+        guardrails: input.guardrails,
+        expectationSet: input.expectationSet,
+        candidate: input.attempt.candidate,
+        verify: input.verify,
+        evidence: input.evidence,
+        events: input.events,
+        evaluatorCapabilities: input.evaluatorCapabilities,
+        producingWorkerProfileId: input.producingWorkerProfileId,
+        producingWorkerInstanceId: input.producingWorkerInstanceId,
+        evaluatorInstanceId: input.evaluatorInstanceId,
+      });
   return evaluateTransition({
     ...input,
-    facts: uniqueFacts(evaluateGuardrails({
-      guardrails: input.guardrails,
-      expectationSet: input.expectationSet,
-      candidate: input.attempt.candidate,
-      verify: input.verify,
-      evidence: input.evidence,
-      events: input.events,
-    })),
+    facts: uniqueFacts(facts),
   });
 }
 
@@ -293,6 +377,20 @@ export function evaluateGate(input: GateInput): GateDecision {
 
 /** Evaluate the shared transition contract while retaining the old requirement projection. */
 export function evaluateIntegrationTransition(input: IntegrationTransitionInput): TransitionDecision {
+  return evaluateIntegrationTransitionInternal(input, false);
+}
+
+/** Internal owner-bound integration entry point; the store context is supplied by Thread. */
+export function evaluateOwnedIntegrationTransition(
+  input: IntegrationTransitionInput,
+): TransitionDecision {
+  return evaluateIntegrationTransitionInternal(input, true);
+}
+
+function evaluateIntegrationTransitionInternal(
+  input: IntegrationTransitionInput,
+  ownerBound: boolean,
+): TransitionDecision {
   const verification = evaluateVerificationChecks({
     checkNames: input.integration.requires,
     verify: input.verify,
@@ -312,7 +410,7 @@ export function evaluateIntegrationTransition(input: IntegrationTransitionInput)
         timestamp: input.timestamp,
         ...(input.override === undefined ? {} : { override: input.override }),
       })
-    : evaluateGuardedTransition({
+    : evaluateGuardedTransitionInternal({
         attempt: input.attempt,
         expectationSet: input.expectationSet,
         timestamp: input.timestamp,
@@ -321,7 +419,11 @@ export function evaluateIntegrationTransition(input: IntegrationTransitionInput)
         verify: input.verify,
         evidence: input.evidence,
         events: input.events ?? [],
-      });
+        evaluatorCapabilities: input.evaluatorCapabilities,
+        producingWorkerProfileId: input.producingWorkerProfileId,
+        producingWorkerInstanceId: input.producingWorkerInstanceId,
+        evaluatorInstanceId: input.evaluatorInstanceId,
+      }, ownerBound);
   const invalidReason = input.invalidAttemptReason ?? input.invalidOverrideReason;
   const finalEvaluation = invalidReason === undefined
     ? evaluation
@@ -518,6 +620,16 @@ export function buildGuardrailExpectationSet(
   const items = new Map<string, ExpectationSet['items'][number]>();
   const conflicts = new Set<string>();
   for (const guardrail of attached) {
+    if (guardrail.kind === 'model-rubric' && guardrail.enforcement === 'absolute') {
+      conflicts.add(guardrail.id);
+    }
+    if (
+      guardrail.kind === 'pixel-diff' &&
+      guardrail.enforcement === 'absolute' &&
+      (!isRecord(guardrail.parameters) || guardrail.parameters.exact !== true || !isRecord(guardrail.parameters.capture))
+    ) {
+      conflicts.add(guardrail.id);
+    }
     const parameters = guardrail.parameters;
     const checks = guardrail.kind === 'verification' && isRecord(parameters) && Array.isArray(parameters.checks)
       ? parameters.checks.filter((check): check is string => typeof check === 'string')

@@ -1,4 +1,4 @@
-import type { AdapterEvent, AgentCapabilities, AgentId, PermissionMode } from '@awos/protocol';
+import type { AgentCapabilities, AgentId, PermissionMode, WorkerAdapterEvent } from '@awos/protocol';
 import type { HarnessConfig } from '../config.js';
 import type { PermissionBridge } from '../permission-bridge.js';
 
@@ -57,7 +57,7 @@ export interface AdapterContext {
   /** Only used by the Claude adapter; Codex approvals ride its own protocol. */
   permissionBridge: PermissionBridge;
   /** Every adapter event flows through here; the store stamps seq and identity. */
-  emit: (event: AdapterEvent) => void;
+  emit: (event: WorkerAdapterEvent) => void;
   /** Called when the adapter learns its native session id. */
   onSessionId: (sessionId: string) => void;
 }

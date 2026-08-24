@@ -27,6 +27,131 @@ export type EvidenceKind = 'command' | 'diff' | 'artifact' | 'approval' | 'link'
 
 export type RetainedKind = 'discovery' | 'decision' | 'constraint' | 'question';
 
+/**
+ * The capture inputs that make a pixel measurement reproducible.
+ *
+ * These are identities, not instructions for launching a browser. A capture adapter may
+ * implement the contract later; the core only accepts a measurement that names every input.
+ */
+export interface PixelCaptureContract {
+  /** Browser identity including its version. */
+  readonly browser: string;
+  /** Rendering/runtime identity including its version. */
+  readonly runtime: string;
+  /** CSS viewport in WIDTHxHEIGHT form. */
+  readonly viewport: string;
+  /** Device pixel ratio used for the captured image. */
+  readonly dpr: number;
+  /** Font set identity or digest. */
+  readonly fonts: string;
+  /** Data fixture identity or digest. */
+  readonly data: string;
+  /** Animation policy identity, such as a pinned disabled-animation policy. */
+  readonly animation: string;
+  /** Named capture region identity. */
+  readonly region: string;
+  /** Optional selector identity when the region is selected from a rendered page. */
+  readonly selector?: string | null;
+}
+
+/** An addressable image whose content identity cannot be changed in place. */
+export interface VisualArtifactIdentity {
+  /** Stable event or record identity that published this immutable artifact. */
+  readonly eventId: string | null;
+  /** Stable artifact id in the addressable artifact store. */
+  readonly artifactId: string;
+  /** Address used to retrieve the exact artifact revision. */
+  readonly locator: string;
+  /** Artifact-native revision, immutable for this identity. */
+  readonly revision: string;
+  /** Content digest of the image bytes. */
+  readonly digest: string;
+  /** Optional immutable fragment identity within the source artifact. */
+  readonly selector?: string | null;
+}
+
+/** Numeric output from a pixel comparator; no semantic interpretation is allowed here. */
+export interface PixelDiffMeasurement {
+  /** Number of pixels included in the comparison. */
+  readonly comparedPixels: number;
+  /** Number of pixels the comparator measured as different. */
+  readonly differentPixels: number;
+  /** The comparator's measured equality, redundant by design for contradiction detection. */
+  readonly equal: boolean;
+  /** True only when the comparator explicitly performed exact-pixel comparison. */
+  readonly exact: boolean;
+}
+
+/** Structured, bounded evidence produced by a pixel-comparison adapter. */
+export interface PixelDiffEvidence {
+  readonly kind: 'pixel-diff';
+  readonly reference: VisualArtifactIdentity;
+  readonly candidate: VisualArtifactIdentity;
+  readonly capture: PixelCaptureContract;
+  readonly measurement: PixelDiffMeasurement;
+}
+
+/** Immutable identity of the rubric used for a model observation. */
+export interface RubricIdentity {
+  /** Stable event or record identity that published this immutable rubric. */
+  readonly eventId: string | null;
+  readonly id: string;
+  readonly revision: string;
+  readonly digest: string;
+}
+
+/** Stable identity of an independent semantic evaluator capability. */
+export interface EvaluatorCapabilityIdentity {
+  /** Stable event or record identity that published this immutable capability. */
+  readonly eventId: string | null;
+  readonly id: string;
+  readonly version: string;
+}
+
+export type ModelRubricOutcome = 'satisfied' | 'failed' | 'uncertain' | 'conflicting';
+
+/** Structured evidence produced by an independent semantic evaluator. */
+export interface ModelRubricEvidence {
+  readonly kind: 'model-rubric';
+  readonly reference: VisualArtifactIdentity;
+  readonly candidate: VisualArtifactIdentity;
+  readonly rubric: RubricIdentity;
+  readonly evaluator: EvaluatorCapabilityIdentity;
+  readonly outcome: ModelRubricOutcome;
+  /** One bounded diagnostic; it is not used as a verdict. */
+  readonly detail?: string | null;
+}
+
+export type VisualEvidence = PixelDiffEvidence | ModelRubricEvidence;
+
+/** Read-only request crossing the independent model-evaluator adapter boundary. */
+export interface ModelRubricEvaluationRequest {
+  readonly reference: Readonly<VisualArtifactIdentity>;
+  readonly candidate: Readonly<VisualArtifactIdentity>;
+  readonly rubric: Readonly<RubricIdentity>;
+}
+
+/** The adapter may return an observation only; the core chooses the transition verdict. */
+export interface ModelRubricEvaluationResult {
+  readonly outcome: ModelRubricOutcome;
+  readonly detail?: string | null;
+}
+
+/**
+ * A stable capability contract, intentionally without provider, model, prompt or code
+ * configuration. The evaluator may be evidence-only when `evaluate` is absent.
+ */
+export interface EvaluatorCapability {
+  readonly kind: 'model-rubric';
+  readonly id: string;
+  readonly version: string;
+  /** Must be true for a capability to be used as an independent evaluator. */
+  readonly independent: boolean;
+  readonly evaluate?: (
+    request: ModelRubricEvaluationRequest,
+  ) => ModelRubricEvaluationResult;
+}
+
 /** Who made a claim. `user` is the person at the keyboard; the rest are the agents. */
 export type ClaimSource = 'user' | AgentId;
 
@@ -99,6 +224,8 @@ export interface EvidenceItem {
   summary: string;
   state: WorkingState;
   check: CheckResult | null;
+  /** Optional structured visual evidence; summaries are never interpreted as measurements. */
+  visual?: VisualEvidence;
   /** Optional explicit association when evidence is recorded for a planning expectation. */
   expectationSetId?: string | null;
   expectationItemId?: string | null;
@@ -611,6 +738,12 @@ export function validateTransitionEvaluation(
     }
     if (fact.state === 'unknown') {
       return 'A passed transition cannot contain an unknown evaluator fact.';
+    }
+    if (
+      enforcement === 'absolute' &&
+      (fact.provenance.evaluatorClass === 'model' || fact.provenance.evaluatorKind === 'model-rubric')
+    ) {
+      return 'Model-rubric evaluations cannot use absolute enforcement.';
     }
     if (enforcement === 'absolute' && fact.state !== 'satisfied') {
       return 'Absolute expectations cannot be overridden.';

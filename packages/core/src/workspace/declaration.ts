@@ -522,6 +522,8 @@ function parseGuardrails(
     if (kind === 'pixel-diff' && enforcement === 'absolute' && parameters !== null) {
       if (!('capture' in parameters) || parameters.capture === undefined) {
         fail(`${at}.parameters.capture`, 'An absolute pixel-diff guardrail needs a complete pinned capture contract.');
+      } else if (!('exact' in parameters) || parameters.exact !== true) {
+        fail(`${at}.parameters.exact`, 'An absolute pixel-diff guardrail must explicitly require exact pixels.');
       }
     }
 
@@ -662,7 +664,7 @@ function parseGuardrailParameters(
     : kind === 'human-attestation'
       ? ['expectationItem', 'authority']
       : kind === 'pixel-diff'
-        ? ['expectationItem', 'capture']
+        ? ['expectationItem', 'capture', 'exact']
         : kind === 'model-rubric'
           ? ['expectationItem', 'evaluatorProfile']
           : kind === 'evidence-present'
@@ -700,9 +702,18 @@ function parseGuardrailParameters(
   }
 
   if (kind === 'pixel-diff') {
-    if (raw.capture === undefined) return { expectationItem };
+    let exact: boolean | undefined;
+    if (raw.exact !== undefined) {
+      if (typeof raw.exact !== 'boolean') {
+        fail(`${at}.exact`, 'A pixel-diff exact setting must be true or false.');
+        return null;
+      }
+      exact = raw.exact;
+    }
+    if (raw.capture === undefined) return exact === undefined ? { expectationItem } : { expectationItem, exact };
     const capture = parsePixelCapture(raw.capture, `${at}.capture`, fail);
-    return capture === null ? null : { expectationItem, capture };
+    if (capture === null) return null;
+    return exact === undefined ? { expectationItem, capture } : { expectationItem, capture, exact };
   }
 
   const evaluatorProfile = parseStableId(raw.evaluatorProfile, `${at}.evaluatorProfile`, 'evaluator profile', fail);
@@ -765,7 +776,7 @@ function parsePixelCapture(
     fail(at, 'A pixel capture contract must be an object.');
     return null;
   }
-  rejectUnknown(raw, ['browser', 'runtime', 'viewport', 'dpr', 'fonts', 'data', 'animation', 'region'], at, fail);
+  rejectUnknown(raw, ['browser', 'runtime', 'viewport', 'dpr', 'fonts', 'data', 'animation', 'region', 'selector'], at, fail);
   let valid = true;
   const textFields = ['browser', 'runtime', 'viewport', 'fonts', 'data', 'animation', 'region'] as const;
   const values = {} as Record<(typeof textFields)[number], string>;
@@ -787,7 +798,18 @@ function parsePixelCapture(
     fail(`${at}.viewport`, 'A pixel capture viewport must use WIDTHxHEIGHT, such as 1440x900.');
     valid = false;
   }
-  return valid ? { ...values, dpr: dpr as number } : null;
+  const selector = raw.selector;
+  if (selector !== undefined && (typeof selector !== 'string' || selector.trim() === '')) {
+    fail(`${at}.selector`, 'A pixel capture selector must be a non-empty identity when supplied.');
+    valid = false;
+  }
+  return valid
+    ? {
+        ...values,
+        dpr: dpr as number,
+        ...(selector === undefined ? {} : { selector: (selector as string).trim() }),
+      }
+    : null;
 }
 
 function parseGuardrailCorrection(

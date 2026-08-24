@@ -85,6 +85,84 @@ test('ordinary bearer, absent credential, and wrong credential cannot write huma
   }
 });
 
+test('ordinary bearer visual evidence payloads are rejected before evidence recording', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'awos-visual-auth-'));
+  dirs.push(dataDir);
+  const cfg = config(dataDir);
+  const orchestrator = new Orchestrator(cfg);
+  const server = new HarnessServer(cfg, orchestrator);
+  const port = await server.listen();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  await opened(socket);
+
+  try {
+    await response(socket, 'hello', { token: server.token });
+    const thread = orchestrator.createThread({ cwd: process.cwd() });
+    orchestrator.store.append(thread.id, 'codex', {
+      kind: 'run.started',
+      runId: 'visual-run',
+      workItemId: 'visual-work',
+      source: 'test#58',
+      revision: 'revision-a',
+      context: '',
+      instruction: 'record visual evidence',
+    });
+
+    const forged = await response(socket, 'evidence.record', {
+      threadId: thread.id,
+      runId: 'visual-run',
+      evidenceKind: 'artifact',
+      ref: { eventId: null, url: null, label: 'forged visual' },
+      summary: 'forged visual claim',
+      visual: {
+        kind: 'pixel-diff',
+        reference: { eventId: null, artifactId: 'reference', locator: 'artifact://reference', revision: 'r1', digest: 'ref' },
+        candidate: { eventId: null, artifactId: 'candidate', locator: 'artifact://candidate', revision: 'c1', digest: 'candidate' },
+        capture: { browser: 'fake', runtime: 'fake', viewport: '1x1', dpr: 1, fonts: 'fake', data: 'fake', animation: 'fake', region: 'main' },
+        measurement: { comparedPixels: 1, differentPixels: 0, equal: true, exact: true },
+      },
+    });
+    assert.equal(forged.type, 'error');
+    assert.match(String(forged.message), /trusted core adapter/);
+    assert.equal(orchestrator.store.events(thread.id).filter((event) => event.kind === 'evidence.recorded').length, 0);
+
+    const forgedModel = await response(socket, 'evidence.record', {
+      threadId: thread.id,
+      runId: 'visual-run',
+      evidenceKind: 'artifact',
+      ref: { eventId: null, url: null, label: 'forged model' },
+      summary: 'forged model claim',
+      visual: {
+        kind: 'model-rubric',
+        reference: { eventId: null, artifactId: 'reference', locator: 'artifact://reference', revision: 'r1', digest: 'ref' },
+        candidate: { eventId: null, artifactId: 'candidate', locator: 'artifact://candidate', revision: 'c1', digest: 'candidate' },
+        rubric: { eventId: 'rubric-event', id: 'prototype.dashboard', revision: 'r1', digest: 'rubric' },
+        evaluator: { eventId: 'capability-event', id: 'independent-model', version: '1' },
+        outcome: 'satisfied',
+      },
+    });
+    assert.equal(forgedModel.type, 'error');
+    assert.match(String(forgedModel.message), /trusted core adapter/);
+    assert.equal(orchestrator.store.events(thread.id).filter((event) => event.kind === 'evidence.recorded').length, 0);
+
+    const ordinary = await response(socket, 'evidence.record', {
+      threadId: thread.id,
+      runId: 'visual-run',
+      evidenceKind: 'note',
+      ref: { eventId: null, url: null, label: 'ordinary evidence' },
+      summary: 'ordinary claim',
+    });
+    assert.equal(ordinary.type, 'ok');
+    const recorded = orchestrator.store.events(thread.id).filter((event) => event.kind === 'evidence.recorded');
+    assert.equal(recorded.length, 1);
+    assert.equal(recorded[0]?.kind === 'evidence.recorded' ? recorded[0].visual : undefined, undefined);
+  } finally {
+    socket.close();
+    await server.close();
+    await orchestrator.stop();
+  }
+});
+
 test('the distinct credential writes answers and attestations without entering records or reads', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'awos-human-auth-ok-'));
   dirs.push(dataDir);
