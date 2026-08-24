@@ -57,6 +57,20 @@ impl Drop for CoreProcess {
     }
 }
 
+/// Strip Windows' verbatim `\\?\` prefix from a path.
+///
+/// `resource_dir()` returns a verbatim path. Rust and the filesystem accept it happily, so
+/// `exists()` says yes and the spawn succeeds — and then Node reads `\\?\C:\...` as a UNC
+/// share, resolves the script argument down to `C:`, and dies on an EISDIR before it ever
+/// loads the core. Nothing in the dev loop goes through `resource_dir()`, so this only
+/// ever surfaces in a packaged build.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_string_lossy().strip_prefix(r"\\?\") {
+        Some(stripped) => PathBuf::from(stripped),
+        None => path,
+    }
+}
+
 /// Locate the compiled core: the workspace copy during development, the bundled
 /// resource in a packaged build.
 fn core_entrypoint(app: &tauri::AppHandle) -> PathBuf {
@@ -64,7 +78,7 @@ fn core_entrypoint(app: &tauri::AppHandle) -> PathBuf {
     // machine that built the installer that path still exists — checking it first would
     // make an installed app quietly run the developer's working tree instead of its own.
     if let Ok(resources) = app.path().resource_dir() {
-        let bundled = resources.join("core/main.js");
+        let bundled = without_verbatim_prefix(resources.join("core").join("main.js"));
         if bundled.exists() {
             return bundled;
         }
@@ -81,7 +95,7 @@ fn core_entrypoint(app: &tauri::AppHandle) -> PathBuf {
 fn node_binary(app: &tauri::AppHandle) -> PathBuf {
     let exe = if cfg!(windows) { "node.exe" } else { "node" };
     if let Ok(resources) = app.path().resource_dir() {
-        let vendored = resources.join("core").join("runtime").join(exe);
+        let vendored = without_verbatim_prefix(resources.join("core").join("runtime").join(exe));
         if vendored.exists() {
             return vendored;
         }
