@@ -540,6 +540,161 @@ export type TransitionEvaluation =
       override: null;
     });
 
+/** The bounded state machine around a refused transition. */
+export type RecoveryCycleStatus =
+  | 'correcting'
+  | 'waiting-human'
+  | 'worker-unavailable'
+  | 'interrupted'
+  | 'exhausted'
+  | 'blocked'
+  | 'passed'
+  | 'cancelled';
+
+export type RecoveryEscalationReason =
+  | 'unchanged-candidate'
+  | 'exhausted'
+  | 'absolute'
+  | 'invalid'
+  | 'worker-unavailable';
+
+/** Candidate plus retrieval identities used to detect whether a correction changed anything. */
+export interface TransitionFingerprint {
+  candidate: CandidateIdentity;
+  evidenceIds: readonly string[];
+  /** Stable digest of the candidate and the referenced evidence identities/state. */
+  digest: string;
+}
+
+/** A typed action in a recovery cycle. Free-form worker prose is never an action. */
+export type RecoveryActionKind =
+  | 'answer'
+  | 'evidence'
+  | 'override'
+  | 'cancel'
+  | 'repin'
+  | 'retry-evaluator';
+
+/** Structured conflict returned when a displayed recovery action is stale. */
+export interface RecoveryConflict {
+  kind: 'stale-action';
+  cycleId: string;
+  transitionId: string;
+  actionKind: RecoveryActionKind;
+  expectedAttempt: number;
+  actualAttempt: number | null;
+  expectedTransitionId: string;
+  actualTransitionId: string | null;
+  expectedHead: number;
+  actualHead: number;
+  detail: string;
+}
+
+/** Structured conflict returned when evaluation was built from a stale log revision. */
+export interface TransitionEvaluationConflict {
+  kind: 'stale-evaluation';
+  transitionId: string;
+  expectedAttempt: number;
+  actualAttempt: number | null;
+  expectedHead: number;
+  actualHead: number;
+  detail: string;
+}
+
+export interface RecoveryAction {
+  actionId: string;
+  cycleId: string;
+  transitionId: string;
+  attempt: number;
+  /** Log head observed before this action was authorized. */
+  expectedHead: number;
+  kind: RecoveryActionKind;
+  actor: 'user';
+  authority: HumanAuthority;
+  candidate: CandidateIdentity;
+  evidenceIds: readonly string[];
+  /** The exact mandatory question or evidence request acted on, when applicable. */
+  questionId?: string | null;
+  answerId?: string | null;
+  answer?: TypedAnswer | null;
+  /** Full authorized identity and reason are retained for an override action. */
+  authorizedUserId?: string | null;
+  reason?: string | null;
+  supersededByTransitionId?: string | null;
+}
+
+/** Structured context delivered to an automatic correction worker and retained on its run. */
+export interface RecoveryWorkerContext {
+  schema: 'awos.recovery.v1';
+  cycleId: string;
+  transitionId: string;
+  refusalAttempt: number;
+  correctionIndex: number;
+  sourceStepId: string;
+  targetStepId: string;
+  expectationSetId: string;
+  fingerprint: TransitionFingerprint;
+  /** The complete refusal, including exact human question/evidence requirements. */
+  blocker: TransitionRefusal;
+  /** The complete evaluation, including evaluator ids, revisions, evidence and provenance. */
+  evaluation: TransitionEvaluation;
+  /** Earlier attempts and typed actions needed to avoid repeating a refused move. */
+  attempts: readonly TransitionEvaluation[];
+  actions: readonly RecoveryAction[];
+}
+
+export interface RecoveryCorrectionRun {
+  runId: string;
+  cycleId: string;
+  transitionId: string;
+  refusalAttempt: number;
+  correctionIndex: number;
+  workerProfileId: AgentId;
+  fingerprint: TransitionFingerprint;
+  startedAt: number;
+  state: 'running' | 'completed' | 'interrupted' | 'error';
+  interruptedByRestart: boolean;
+  context: RecoveryWorkerContext;
+}
+
+/** Core-owned read projection for typed recovery RPCs. */
+export interface RecoveryCycle {
+  cycleId: string;
+  /** Current canonical event-log head used for action CAS. */
+  head: number;
+  transitionId: string;
+  refusalAttempt: number;
+  expectationSetId: string;
+  sourceStepId: string;
+  targetStepId: string;
+  maxRuns: number;
+  maxEvaluations: number;
+  onExhausted: 'waiting-for-human' | 'blocked';
+  status: RecoveryCycleStatus;
+  correctionRuns: readonly RecoveryCorrectionRun[];
+  activeCorrection: RecoveryCorrectionRun | null;
+  correctionsUsed: number;
+  evaluationsUsed: number;
+  transientEvaluatorRetries: number;
+  latestEvaluation: TransitionEvaluation | null;
+  /** Full attempt history, never a summary of the AI blocker. */
+  attempts: readonly TransitionEvaluation[];
+  actions: readonly RecoveryAction[];
+  waiting: {
+    reason: 'human-action' | 'worker-unavailable' | 'transient-evaluator';
+    required: RefusalRequirement;
+    authority: HumanAuthority;
+    detail: string;
+  } | null;
+  escalation: { reason: RecoveryEscalationReason; action: 'waiting-for-human' | 'blocked'; detail: string } | null;
+  cancelled: boolean;
+  worker: {
+    profileId: AgentId | null;
+    available: boolean | null;
+    detail: string | null;
+  };
+}
+
 export type TransitionEvaluationInput =
   | (Omit<TransitionEvaluationBase, 'supersedesTransitionId'> & {
       verdict: 'passed';

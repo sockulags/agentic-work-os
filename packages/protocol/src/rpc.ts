@@ -20,6 +20,9 @@ import type {
   EvidenceKind,
   EvidenceRef,
   CandidateIdentity,
+  RecoveryConflict,
+  TransitionEvaluationConflict,
+  RecoveryCycle,
   RequirementResult,
   RetainedItem,
   RetainedKind,
@@ -79,6 +82,8 @@ export interface ThreadRuntimeState {
   busy: AgentId[];
   /** Run history projected from the ledger with the exact live-runtime overlay. */
   runStates: CatalogRunEvidence[];
+  /** Durable refused-transition recovery projections, folded from the same event log. */
+  recovery: RecoveryCycle[];
   /** Where each agent's working copy is, for the agents that have a lane. */
   lanes: Partial<Record<AgentId, string>>;
   currentTurnId: string | null;
@@ -148,6 +153,20 @@ export type ClientRequest =
       targetStepId: string;
       candidate: CandidateIdentity;
       transitionId?: string;
+      expectedAttempt?: number;
+      expectedHead?: number;
+    }
+  /** Read the append-only recovery projection for one refused transition. */
+  | { type: 'recovery.get'; threadId: string; transitionId?: string; cycleId?: string }
+  /** Compare-and-start one explicitly selected worker correction. */
+  | {
+      type: 'recovery.start';
+      threadId: string;
+      transitionId: string;
+      expectedAttempt: number;
+      expectedHead?: number;
+      agent: AgentId;
+      cycleId?: string;
     }
   /** Run a check the workspace names, where the agent's work is. */
   | { type: 'verify.run'; threadId: string; agent: AgentId; name: string }
@@ -235,6 +254,8 @@ export type ClientRequest =
       evidenceIds: string[];
       attestationId?: string;
     }
+  /** Typed human recovery actions; workers cannot manufacture these records. */
+  | { type: 'recovery.action'; threadId: string; action: RecoveryActionRequest }
   /** Keep a discovery, decision, constraint or open question against the work item. */
   | {
       type: 'context.retain';
@@ -252,6 +273,71 @@ export type ClientRequest =
       retired?: boolean;
     }
   | { type: 'agents.probe' };
+
+export type RecoveryActionRequest =
+  | {
+      kind: 'answer';
+      cycleId: string;
+      expectedAttempt: number;
+      expectedTransitionId: string;
+      expectedHead: number;
+      questionId: string;
+      expectationItemId: string;
+      expectationSetId: string;
+      answer: TypedAnswer;
+      candidate: CandidateIdentity;
+      evidenceIds?: string[];
+      answerId?: string;
+      humanCredential?: string;
+    }
+  | {
+      kind: 'evidence';
+      cycleId: string;
+      expectedAttempt: number;
+      expectedTransitionId: string;
+      expectedHead: number;
+      evidenceIds: string[];
+      candidate: CandidateIdentity;
+      humanCredential?: string;
+    }
+  | {
+      kind: 'override';
+      cycleId: string;
+      expectedAttempt: number;
+      expectedTransitionId: string;
+      expectedHead: number;
+      authorizedUserId: string;
+      reason: string;
+      humanCredential?: string;
+    }
+  | {
+      kind: 'cancel';
+      cycleId: string;
+      expectedAttempt: number;
+      expectedTransitionId: string;
+      expectedHead: number;
+      reason?: string;
+      humanCredential?: string;
+    }
+  | {
+      kind: 'repin';
+      cycleId: string;
+      expectedAttempt: number;
+      expectedTransitionId: string;
+      expectedHead: number;
+      sourceStepId: string;
+      targetStepId: string;
+      candidate: CandidateIdentity;
+      humanCredential?: string;
+    }
+  | {
+      kind: 'retry-evaluator';
+      cycleId: string;
+      expectedAttempt: number;
+      expectedTransitionId: string;
+      expectedHead: number;
+      humanCredential?: string;
+    };
 
 export type ClientMessage = ClientRequest & { requestId: string };
 
@@ -324,6 +410,9 @@ export type ServerResponseBody =
       verdict: TransitionEvaluation['verdict'];
       evaluation: TransitionEvaluation;
     }
+  | { type: 'transition.conflict'; threadId: string; conflict: TransitionEvaluationConflict }
+  | { type: 'recovery'; threadId: string; cycle: RecoveryCycle | null }
+  | { type: 'recovery.conflict'; threadId: string; conflict: RecoveryConflict }
   | { type: 'agents.probe'; agents: AgentAvailability[] };
 
 export type ServerResponse = ServerResponseBody & { requestId: string };

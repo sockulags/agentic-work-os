@@ -1,11 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { exec } from 'node:child_process';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import { promisify } from 'node:util';
 import type {
   AdapterEvent,
+  AnswerRecordedBody,
   AgentAvailability,
   AgentId,
   ApprovalRequestedBody,
@@ -19,7 +20,15 @@ import type {
   CandidateIdentity,
   GateOverride,
   ExpectationSet,
+  RecoveryCycle,
+  RecoveryAction,
+  RecoveryActionKind,
+  RecoveryConflict,
+  TransitionEvaluationConflict,
+  RecoveryWorkerContext,
+  RecoveryActionRequest,
   TransitionAttempt,
+  TransitionEvaluation,
   TransitionOverride,
   RetainedItem,
   RetainedKind,
@@ -48,6 +57,7 @@ import type {
 } from '@awos/protocol';
 import {
   AGENT_IDS,
+  createRequiredTransitionOverride,
   createTransitionEvaluation,
   isTrustedVisualEventKind,
   PINNED_CONTEXT_MAX_CHARS,
@@ -57,11 +67,16 @@ import {
   WORKSPACE_LOCAL_FILE,
 } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
-import type { WorkerAdapter, AdapterContext } from './adapters/agent.js';
+import { isNativeResumeNotFoundError, type WorkerAdapter, type AdapterContext, type WorkerTurnOptions } from './adapters/agent.js';
 import { createWorkerAdapter, probeWorkerProfiles, registeredWorkerProfiles } from './adapters/registry.js';
 import { isQwenResumeNotFoundError } from './adapters/qwen-code.js';
 import { PermissionBridge } from './permission-bridge.js';
-import { ThreadStore } from './store/thread-store.js';
+import {
+  ThreadStore,
+  type CanonicalThreadLog,
+  type CompareAndAppendEntry,
+  type ExpectedTransitionAttempt,
+} from './store/thread-store.js';
 import { ContextStore, applyPinnedContext, buildPinnedContext } from './store/context-store.js';
 import { resolveWorkspace } from './workspace/resolve.js';
 import { CORE_EXPECTATION_ITEM_IDS, CORE_EVALUATOR_PROFILE_IDS } from './workspace/manifest.js';
@@ -91,6 +106,19 @@ import {
 } from './work/ledger.js';
 import { projectRunEvidence } from './work/runs.js';
 import {
+  RECOVERY_MAX_TRANSIENT_EVALUATOR_RETRIES,
+  RecoveryConflictError,
+  buildRecoveryWorkerContext,
+  findRecoveryCycle,
+  foldRecoveryCycles,
+  hasValidHumanRecoveryAction,
+  isTransientEvaluatorRefusal,
+  recoveryPolicy,
+  recoveryWorkerPrompt,
+  sameTransitionFingerprint,
+  transitionFingerprint,
+} from './work/recovery.js';
+import {
   buildIntegrationExpectationSet,
   buildGuardrailExpectationSet,
   candidateIdentity,
@@ -117,6 +145,17 @@ import { workerEnvironment } from './util/spawn.js';
 
 const log = createLogger('orchestrator');
 const execAsync = promisify(exec);
+
+/** A planning or integration evaluation lost its canonical log reservation. */
+export class TransitionEvaluationConflictError extends Error {
+  readonly conflict: TransitionEvaluationConflict;
+
+  constructor(conflict: TransitionEvaluationConflict) {
+    super(conflict.detail);
+    this.name = 'TransitionEvaluationConflictError';
+    this.conflict = conflict;
+  }
+}
 
 function emptyAgentRecord<T>(factory: () => T): Record<AgentId, T> {
   return Object.fromEntries(AGENT_IDS.map((agent) => [agent, factory()])) as Record<AgentId, T>;
@@ -293,6 +332,24 @@ function appliesToTransition(
 /** How many files a patch touches, for a one-line report of what an integration moved. */
 function countChangedFiles(patch: string): number {
   return patch.split('\n').filter((line) => line.startsWith('diff --git ')).length;
+}
+
+/** Give staged action bodies the event envelope evaluators need without persisting them yet. */
+function previewEvent(
+  canonical: CanonicalThreadLog,
+  entry: CompareAndAppendEntry,
+  index: number,
+): HarnessEvent {
+  const { turnId, ts, ...rest } = entry.body;
+  return {
+    ...rest,
+    id: `staged:${canonical.threadId}:${canonical.revision}:${index}`,
+    seq: canonical.revision + index + 1,
+    threadId: canonical.threadId,
+    agent: entry.agent,
+    turnId: turnId ?? null,
+    ts: ts ?? Date.now(),
+  } as HarnessEvent;
 }
 
 function issueKey(workspaceRoot: string, repository: string, number: number): string {
@@ -519,6 +576,7 @@ class Thread {
       busyWith: this.busyWith,
       busy: this.#busy,
       runStates: projectRunEvidence(this.#store.events(this.id), (runId) => this.isRunActive(runId)),
+      recovery: foldRecoveryCycles(this.#store.events(this.id), (runId) => this.isRunActive(runId)),
       lanes,
       currentTurnId: this.#currentTurnId,
       lastTurnAgent: this.#lastTurnAgent,
@@ -540,7 +598,16 @@ class Thread {
    * the same thread still carry the work item in their context — the issue is standing
    * truth about the thread — but they are conversation, not a run.
    */
-  async send(agent: AgentId, text: string, asRun = false): Promise<void> {
+  async send(
+    agent: AgentId,
+    text: string,
+    asRun = false,
+    options: { runId?: string; recoveryContext?: RecoveryWorkerContext; keepRunActive?: boolean } = {},
+  ): Promise<void> {
+    const reservedRun = this.#activeRuns.get(agent);
+    if (reservedRun !== undefined && reservedRun !== options.runId) {
+      throw new Error(`${agent} already has an active correction run.`);
+    }
     if (this.#turns.has(agent)) {
       throw new Error(`${agent} is still working. Interrupt it before sending again.`);
     }
@@ -627,7 +694,10 @@ class Thread {
 
     // Recorded before dispatch, and before the run can fail, so a run that dies on the
     // first token still leaves behind what it was asked to do and what it was given.
-    const runId = asRun && item ? randomUUID() : null;
+    const runId = asRun && item ? options.runId ?? randomUUID() : null;
+    if (options.runId !== undefined && runId === null) {
+      throw new Error('A recovery correction run needs a linked work item.');
+    }
     const runFrom = this.#store.head(this.id);
     if (runId && item) {
       this.#record(agent, {
@@ -638,6 +708,12 @@ class Thread {
         revision: item.snapshot.revision,
         context: capContext(payload),
         instruction: text,
+        ...(options.recoveryContext === undefined
+          ? {}
+          : {
+              transitionId: options.recoveryContext.transitionId,
+              recoveryContext: options.recoveryContext,
+            }),
       });
     }
 
@@ -657,10 +733,13 @@ class Thread {
       let retriedStaleResume = false;
       for (;;) {
         try {
-          await adapter.sendTurn(payload);
+          const turnOptions: WorkerTurnOptions | undefined = options.recoveryContext === undefined
+            ? undefined
+            : { recoveryContext: options.recoveryContext };
+          await adapter.sendTurn(payload, turnOptions);
           break;
         } catch (err) {
-          if (!retriedStaleResume && isQwenResumeNotFoundError(err)) {
+          if (!retriedStaleResume && (isQwenResumeNotFoundError(err) || isNativeResumeNotFoundError(err))) {
             retriedStaleResume = true;
             await this.#resetStaleNativeSession(agent);
 
@@ -697,7 +776,7 @@ class Thread {
         if (patch) this.#record(agent, { kind: 'diff.updated', turnId, patch });
       }
       this.#turns.delete(agent);
-      if (runId) this.#activeRuns.delete(agent);
+      if (runId && options.keepRunActive !== true) this.#activeRuns.delete(agent);
       // Read after the turn rather than watched during it: nothing needs these the moment
       // they are written, and a file read on a boundary we already have beats another
       // watcher with its own debounce and restart story.
@@ -777,6 +856,10 @@ class Thread {
   ): Promise<{ ok: boolean; detail: string }> {
     const summary = this.#store.get(this.id);
     if (!summary) throw new Error(`Unknown thread ${this.id}`);
+    // Capture the revision before any asynchronous workspace inspection. The evaluation
+    // CAS below must refuse if another process advances the canonical log meanwhile.
+    const evaluationExpectedHead = this.#store.head(this.id);
+    const evaluationInitialEvents = this.#store.events(this.id);
 
     const lane = this.#lanes.get(agent);
     if (!lane) throw new Error(`${agent} has no lane to integrate.`);
@@ -814,12 +897,6 @@ class Thread {
       workspaceSource = integrationFailureSource(summary.cwd, candidate);
       invalidSourceReason = 'The workspace has no valid canonical integration source, so the transition was refused.';
     }
-    const gateDecision = evaluateGate({
-      integration,
-      verify,
-      evidence: this.evidence(),
-      candidateTree: candidate.tree,
-    });
     const integrationGuardrails = workspace.status === 'ok'
       ? workspace.workspace.guardrails.filter((guardrail) =>
           'step' in guardrail.attach
@@ -830,68 +907,10 @@ class Thread {
     const configuredResult = workspace.status === 'ok'
       ? buildGuardrailExpectationSet(integration, verify, workspaceSource, integrationGuardrails)
       : { expectationSet: buildIntegrationExpectationSet(integration, verify, workspaceSource), conflicts: [] as readonly string[] };
-    const configuredSet = configuredResult.expectationSet;
-    const currentEvents = this.#store.events(this.id);
-    const expectationSets = foldExpectationSets(currentEvents);
-    const expectationConflicts = foldExpectationSetConflicts(currentEvents);
-    const expectationHistory = foldExpectationSetHistory(currentEvents);
-    const expectationConflict = expectationConflicts.get(configuredSet.expectationSetId);
-    const priorSet = [...expectationHistory]
-      .filter((set) => set.scope?.sourceStepId === 'lane')
-      .at(-1);
-    const expectationSet: ExpectationSet = expectationSets.get(configuredSet.expectationSetId) ?? {
-      ...configuredSet,
-      ...(priorSet === undefined || priorSet.expectationSetId === configuredSet.expectationSetId
-        ? {}
-        : { supersedes: priorSet.expectationSetId }),
-    };
-    if (!expectationSets.has(expectationSet.expectationSetId)) {
-      this.#record(null, {
-        kind: 'expectation.set.created',
-        expectationSet,
-      });
-      if (priorSet !== undefined && priorSet.expectationSetId !== expectationSet.expectationSetId) {
-        const previousHistory = foldTransitionEvaluationHistory(this.#store.events(this.id));
-        const previous = [...previousHistory.values()]
-          .flat()
-          .filter((evaluation) => evaluation.expectationSetId === priorSet.expectationSetId)
-          .sort((left, right) => left.timestamp - right.timestamp)
-          .at(-1);
-        this.#record(null, {
-          kind: 'expectation.set.superseded',
-          expectationSetId: priorSet.expectationSetId,
-          supersededByExpectationSetId: expectationSet.expectationSetId,
-          supersedesTransitionId: previous?.transitionId ?? null,
-        });
-      }
-    }
-
     const transitionPrefix = `${this.id}:lane.integration:${agent}:`;
-    const history = foldTransitionEvaluationHistory(this.#store.events(this.id));
-    const transitionId = `${transitionPrefix}${expectationSet.expectationSetId}`;
-    const previousAttempt = history.get(transitionId)?.at(-1);
-    const previousTransition = [...history.values()]
-      .flat()
-      .filter((evaluation) => evaluation.transitionId.startsWith(transitionPrefix))
-      .sort((left, right) => left.timestamp - right.timestamp)
-      .at(-1);
-    const attempt: TransitionAttempt = {
-      transitionId,
-      attempt: (previousAttempt?.attempt ?? 0) + 1,
-      runId: this.#latestRun(agent)?.runId ?? null,
-      actor: 'user',
-      sourceStepId: 'lane',
-      targetStepId: 'workspace',
-      expectationSetId: expectationSet.expectationSetId,
-      candidate: candidateIdentity(candidate.tree, candidate.commit),
-      evidenceIds: gateDecision.requirements
-        .map((requirement) => requirement.evidenceId)
-        .filter((evidenceId): evidenceId is string => evidenceId !== null),
-      supersedesTransitionId:
-        previousTransition !== undefined && previousTransition.transitionId !== transitionId
-          ? previousTransition.transitionId
-          : null,
-    };
+    const transitionId = `${transitionPrefix}${configuredResult.expectationSet.expectationSetId}`;
+    const initialHistory = foldTransitionEvaluationHistory(evaluationInitialEvents);
+    const expectedAttempt = initialHistory.get(transitionId)?.at(-1)?.attempt ?? 0;
     const transitionOverride: TransitionOverride | null = invalidOverrideReason === undefined && override !== null
       ? {
           enforcement: 'required',
@@ -902,40 +921,113 @@ class Thread {
           reason: override.reason,
         }
       : null;
-    const invalidAttemptReason = expectationConflict !== undefined
-      ? 'The pinned expectation set has conflicting immutable definitions and cannot be evaluated.'
-      : configuredResult.conflicts.length > 0
-        ? `The attached guardrails have conflicting definitions for: ${configuredResult.conflicts.join(', ')}.`
-      : invalidSourceReason;
-    const decision = this.#store.withTrustedThreadContext(this.id, () => evaluateOwnedIntegrationTransition({
-      integration,
-      verify,
-      evidence: this.evidence(),
-      candidateTree: candidate.tree,
-      attempt,
-      expectationSet,
-      timestamp: Date.now(),
-      override: transitionOverride,
-      ...(invalidOverrideReason === undefined ? {} : { invalidOverrideReason }),
-      ...(invalidAttemptReason === undefined ? {} : { invalidAttemptReason }),
-      guardrails: integrationGuardrails,
-      events: currentEvents,
-      producingWorkerProfileId: agent,
-    }));
-
-    // Recorded before anything is applied, so the decision exists in the log whether or
-    // not the patch that follows works out. The legacy fields stay on the same event for
-    // existing transcript and gate consumers; `evaluation` is the shared truth.
-    this.#record(agent, {
-      kind: 'gate.evaluated',
-      gate: 'lane.integration',
-      allowed: decision.allowed,
-      candidate,
-      requirements: decision.requirements,
-      override,
-      evaluation: decision.evaluation,
-      ts: decision.evaluation.timestamp,
+    const persisted = this.#store.compareAndAppendBatch<TransitionDecision>(this.id, evaluationExpectedHead, {
+      transitionId,
+      expectedAttempt,
+      build: (canonical) => {
+        const currentEvents = canonical.events;
+        const expectationSets = foldExpectationSets(currentEvents);
+        const expectationConflicts = foldExpectationSetConflicts(currentEvents);
+        const expectationHistory = foldExpectationSetHistory(currentEvents);
+        const configuredSet = configuredResult.expectationSet;
+        const expectationConflict = expectationConflicts.get(configuredSet.expectationSetId);
+        const priorSet = [...expectationHistory]
+          .filter((set) => set.scope?.sourceStepId === 'lane')
+          .at(-1);
+        const expectationSet: ExpectationSet = expectationSets.get(configuredSet.expectationSetId) ?? {
+          ...configuredSet,
+          ...(priorSet === undefined || priorSet.expectationSetId === configuredSet.expectationSetId
+            ? {}
+            : { supersedes: priorSet.expectationSetId }),
+        };
+        const history = foldTransitionEvaluationHistory(currentEvents);
+        const previousAttempt = history.get(transitionId)?.at(-1);
+        const latestTransition = [...history.values()]
+          .flat()
+          .filter((evaluation) => evaluation.transitionId.startsWith(transitionPrefix))
+          .sort((left, right) => left.timestamp - right.timestamp)
+          .at(-1);
+        const evidence = foldEvidence(currentEvents);
+        const gateDecision = evaluateGate({
+          integration,
+          verify,
+          evidence,
+          candidateTree: candidate.tree,
+        });
+        const attempt: TransitionAttempt = {
+          transitionId,
+          attempt: (previousAttempt?.attempt ?? 0) + 1,
+          runId: this.#latestRun(agent)?.runId ?? null,
+          actor: 'user',
+          sourceStepId: 'lane',
+          targetStepId: 'workspace',
+          expectationSetId: expectationSet.expectationSetId,
+          candidate: candidateIdentity(candidate.tree, candidate.commit),
+          evidenceIds: gateDecision.requirements
+            .map((requirement) => requirement.evidenceId)
+            .filter((evidenceId): evidenceId is string => evidenceId !== null),
+          supersedesTransitionId:
+            latestTransition !== undefined && latestTransition.transitionId !== transitionId
+              ? latestTransition.transitionId
+              : null,
+        };
+        const invalidAttemptReason = expectationConflict !== undefined
+          ? 'The pinned expectation set has conflicting immutable definitions and cannot be evaluated.'
+          : configuredResult.conflicts.length > 0
+            ? `The attached guardrails have conflicting definitions for: ${configuredResult.conflicts.join(', ')}.`
+            : invalidSourceReason;
+        const decision = this.#store.withTrustedThreadContext(this.id, () => evaluateOwnedIntegrationTransition({
+          integration,
+          verify,
+          evidence,
+          candidateTree: candidate.tree,
+          attempt,
+          expectationSet,
+          timestamp: Date.now(),
+          override: transitionOverride,
+          ...(invalidOverrideReason === undefined ? {} : { invalidOverrideReason }),
+          ...(invalidAttemptReason === undefined ? {} : { invalidAttemptReason }),
+          guardrails: integrationGuardrails,
+          events: currentEvents,
+          producingWorkerProfileId: agent,
+        }));
+        const entries: CompareAndAppendEntry[] = [];
+        if (!expectationSets.has(expectationSet.expectationSetId)) {
+          entries.push({ agent: null, body: { kind: 'expectation.set.created', expectationSet } });
+          if (priorSet !== undefined && priorSet.expectationSetId !== expectationSet.expectationSetId) {
+            entries.push({
+              agent: null,
+              body: {
+                kind: 'expectation.set.superseded',
+                expectationSetId: priorSet.expectationSetId,
+                supersededByExpectationSetId: expectationSet.expectationSetId,
+                supersedesTransitionId: latestTransition?.transitionId ?? null,
+              },
+            });
+          }
+        }
+        entries.push({
+          agent,
+          body: {
+            kind: 'gate.evaluated',
+            gate: 'lane.integration',
+            allowed: decision.allowed,
+            candidate,
+            requirements: decision.requirements,
+            override,
+            evaluation: decision.evaluation,
+            ts: decision.evaluation.timestamp,
+          },
+        });
+        return { entries, value: decision };
+      },
     });
+    if (persisted === null) {
+      this.#throwEvaluationConflict(transitionId, expectedAttempt, evaluationExpectedHead);
+    }
+    const decision = persisted.value;
+    for (const event of persisted.events) this.#emit(event);
+    this.#onState();
 
     if (invalidOverrideReason !== undefined) {
       this.#record(agent, {
@@ -1163,6 +1255,20 @@ class Thread {
     evidenceIds?: readonly string[];
     answerId?: string;
   }): void {
+    const prepared = this.#prepareAnswerRecord(input);
+    if (prepared.body === null) return;
+    this.#record(null, prepared.body);
+    this.#onState();
+  }
+
+  #prepareAnswerRecord(input: {
+    expectationItemId: string;
+    expectationSetId: string;
+    answer: TypedAnswer;
+    candidate: CandidateIdentity;
+    evidenceIds?: readonly string[];
+    answerId?: string;
+  }): { answerId: string; body: AnswerRecordedBody | null } {
     if (input.expectationItemId.trim() === '' || input.expectationSetId.trim() === '') {
       throw new Error('A typed answer needs an expectation item and expectation set identity.');
     }
@@ -1179,11 +1285,11 @@ class Thread {
     }
     const existing = foldAnswers(events).find((answer) => answer.answerId === answerId);
     if (existing !== undefined) {
-      if (sameTypedAnswerDefinition(existing, input)) return;
+      if (sameTypedAnswerDefinition(existing, input)) return { answerId, body: null };
       throw new Error('The typed answer id already has a conflicting immutable definition.');
     }
     const recordedAt = Date.now();
-    this.#record(null, {
+    return { answerId, body: {
       kind: 'answer.recorded',
       answerId,
       expectationItemId: input.expectationItemId,
@@ -1194,8 +1300,7 @@ class Thread {
       candidate: { ...input.candidate },
       evidenceIds: [...(input.evidenceIds ?? [])],
       recordedAt,
-    });
-    this.#onState();
+    } };
   }
 
   /** Record an explicit user attestation with its immutable transition identities. */
@@ -1352,13 +1457,28 @@ class Thread {
     targetStepId: string;
     candidate: CandidateIdentity;
     transitionId?: string;
+    expectedAttempt?: number;
+    expectedHead?: number;
+    override?: TransitionOverride | null;
+    runId?: string | null;
+    supersedesTransitionId?: string | null;
+    recoveryCycleId?: string | null;
+    /** Recovery actions are staged here and committed with their resulting evaluation. */
+    prelude?: (canonical: CanonicalThreadLog) => readonly CompareAndAppendEntry[];
   }): Promise<TransitionDecision> {
     const summary = this.#store.get(this.id);
     if (!summary) throw new Error(`Unknown thread ${this.id}`);
+    // Hold the caller's observed revision across all asynchronous workspace reads. The
+    // evaluation CAS will reject any log change rather than evaluating cached history.
+    const evaluationExpectedHead = this.#store.head(this.id);
+    const evaluationInitialEvents = this.#store.events(this.id);
     if (input.sourceStepId.trim() === '' || input.targetStepId.trim() === '') {
       throw new Error('A planning transition needs source and target steps.');
     }
 
+    // Preserve the optimistic pre-CAS boundary even for an undeclared workspace whose
+    // source inspection does not otherwise await external work.
+    await Promise.resolve();
     const workspace = this.#workspace(summary.cwd);
     let sourceFailureReason: string | undefined;
     let source: ReferenceIdentity;
@@ -1394,87 +1514,873 @@ class Thread {
       guardrails,
       { workItemId: summary.workItemId, sourceStepId: input.sourceStepId, targetStepId: input.targetStepId },
     );
-    const currentEvents = this.#store.events(this.id);
-    const foldedSets = foldExpectationSets(currentEvents);
-    const conflicts = foldExpectationSetConflicts(currentEvents);
-    const prior = [...foldedSets.values()]
-      .filter((set) => set.scope?.sourceStepId === input.sourceStepId && set.scope?.targetStepId === input.targetStepId)
-      .at(-1);
-    const configuredSet = foldedSets.has(built.expectationSet.expectationSetId)
-      ? foldedSets.get(built.expectationSet.expectationSetId)!
-      : {
-          ...built.expectationSet,
-          ...(prior === undefined ? {} : { supersedes: prior.expectationSetId }),
+    const transitionId = input.transitionId ?? `${this.id}:planning:${input.sourceStepId}:${input.targetStepId}`;
+    const initialHistory = foldTransitionEvaluationHistory(evaluationInitialEvents);
+    const expectedAttempt = input.expectedAttempt ?? initialHistory.get(transitionId)?.at(-1)?.attempt ?? 0;
+    const expectedHead = input.expectedHead ?? evaluationExpectedHead;
+    const persisted = this.#store.compareAndAppendBatch<TransitionDecision>(this.id, expectedHead, {
+      transitionId,
+      expectedAttempt,
+      build: (canonical) => {
+        const preludeEntries = input.prelude?.(canonical) ?? [];
+        const currentEvents = [
+          ...canonical.events,
+          ...preludeEntries.map((entry, index) => previewEvent(canonical, entry, index)),
+        ];
+        const foldedSets = foldExpectationSets(currentEvents);
+        const conflicts = foldExpectationSetConflicts(currentEvents);
+        const prior = [...foldedSets.values()]
+          .filter((set) => set.scope?.sourceStepId === input.sourceStepId && set.scope?.targetStepId === input.targetStepId)
+          .at(-1);
+        const configuredSet = foldedSets.has(built.expectationSet.expectationSetId)
+          ? foldedSets.get(built.expectationSet.expectationSetId)!
+          : {
+              ...built.expectationSet,
+              ...(prior === undefined ? {} : { supersedes: prior.expectationSetId }),
+            };
+        const history = foldTransitionEvaluationHistory(currentEvents);
+        const previous = history.get(transitionId)?.at(-1);
+        if (input.recoveryCycleId !== undefined && input.recoveryCycleId !== null) {
+          if (previous !== undefined && configuredSet.expectationSetId !== previous.expectationSetId) {
+            throw new Error('The pinned recovery policy changed; repin before evaluating this transition again.');
+          }
+          const recovery = findRecoveryCycle(
+            currentEvents,
+            { cycleId: input.recoveryCycleId },
+            (runId) => this.isRunActive(runId),
+          );
+          if (recovery?.cancelled) throw new Error('The recovery cycle was cancelled before its evaluation was appended.');
+        }
+        const attempt: TransitionAttempt = {
+          transitionId,
+          attempt: (previous?.attempt ?? 0) + 1,
+          runId: input.runId ?? null,
+          actor: 'user',
+          sourceStepId: input.sourceStepId,
+          targetStepId: input.targetStepId,
+          expectationSetId: configuredSet.expectationSetId,
+          candidate: { ...input.candidate },
+          evidenceIds: [],
+          supersedesTransitionId: input.supersedesTransitionId ?? previous?.transitionId ?? null,
         };
-    if (!foldedSets.has(configuredSet.expectationSetId)) {
-      this.#record(null, { kind: 'expectation.set.created', expectationSet: configuredSet });
-      if (prior !== undefined && prior.expectationSetId !== configuredSet.expectationSetId) {
-        this.#record(null, {
-          kind: 'expectation.set.superseded',
-          expectationSetId: prior.expectationSetId,
-          supersededByExpectationSetId: configuredSet.expectationSetId,
-          supersedesTransitionId: null,
-        });
-      }
+        const evaluation = this.#store.withTrustedThreadContext(this.id, () => evaluateOwnedGuardedTransition({
+          attempt,
+          expectationSet: configuredSet,
+          timestamp: Date.now(),
+          override: input.override ?? null,
+          guardrails,
+          verify: workspace.status === 'ok' ? workspace.workspace.verify : [],
+          evidence: foldEvidence(currentEvents),
+          events: currentEvents,
+        }));
+        const invalidReason = workspace.status !== 'ok'
+          ? 'The workspace declaration is unavailable, so the planning transition was refused.'
+          : sourceFailureReason ?? (
+              conflicts.has(configuredSet.expectationSetId)
+                ? 'The pinned expectation set has conflicting immutable definitions and cannot be evaluated.'
+                : built.conflicts.length > 0
+                  ? `The attached guardrails have conflicting definitions for: ${built.conflicts.join(', ')}.`
+                  : undefined
+            );
+        const finalEvaluation = invalidReason === undefined
+          ? evaluation
+          : createTransitionEvaluation({
+              ...evaluation,
+              verdict: 'failed',
+              refusal: {
+                unmetRequirementIds: configuredSet.items.map((item) => item.id),
+                reason: invalidReason,
+                required: { kind: 'evidence', evidence: { requirementIds: configuredSet.items.map((item) => item.id), description: 'Provide a valid workspace policy and immutable expectation set.' } },
+                responsibleActor: 'user',
+                nextAction: 'escalate',
+                retryable: true,
+              },
+              override: null,
+            });
+        const entries: CompareAndAppendEntry[] = [...preludeEntries];
+        if (!foldedSets.has(configuredSet.expectationSetId)) {
+          entries.push({ agent: null, body: { kind: 'expectation.set.created', expectationSet: configuredSet } });
+          if (prior !== undefined && prior.expectationSetId !== configuredSet.expectationSetId) {
+            entries.push({
+              agent: null,
+              body: {
+                kind: 'expectation.set.superseded',
+                expectationSetId: prior.expectationSetId,
+                supersededByExpectationSetId: configuredSet.expectationSetId,
+                supersedesTransitionId: null,
+              },
+            });
+          }
+        }
+        entries.push({ agent: null, body: { kind: 'transition.evaluated', evaluation: finalEvaluation } });
+        return {
+          entries,
+          value: {
+            allowed: finalEvaluation.verdict === 'passed',
+            requirements: [],
+            evaluation: finalEvaluation,
+            verdict: finalEvaluation.verdict,
+            refusal: finalEvaluation.refusal,
+          },
+        };
+      },
+    });
+    if (persisted === null) {
+      this.#throwEvaluationConflict(transitionId, expectedAttempt, expectedHead);
+    }
+    for (const event of persisted.events) this.#emit(event);
+    this.#onState();
+    return persisted.value;
+  }
+
+  /** Read recovery state from the event log; no mutable recovery register is consulted. */
+  getRecovery(input: { transitionId?: string; cycleId?: string }): RecoveryCycle | null {
+    return findRecoveryCycle(
+      this.#store.events(this.id),
+      input,
+      (runId) => this.isRunActive(runId),
+    );
+  }
+
+  /**
+   * Start the next bounded correction, or return the durable wait/escalation state.
+   *
+   * The only event that reserves a correction is a compare-and-append against the current
+   * log head. This keeps two requests from starting two workers for one refusal even when
+   * both requests performed an asynchronous worker probe first.
+   */
+  async startRecovery(input: {
+    transitionId: string;
+    expectedAttempt: number;
+    expectedHead?: number;
+    agent: AgentId;
+    cycleId?: string;
+  }): Promise<RecoveryCycle | null> {
+    if (input.transitionId.trim() === '' || !Number.isInteger(input.expectedAttempt) || input.expectedAttempt < 1) {
+      throw new Error('A recovery start needs a transition id and positive expected attempt.');
     }
 
-    const transitionId = input.transitionId ?? `${this.id}:planning:${input.sourceStepId}:${input.targetStepId}`;
-    const history = foldTransitionEvaluationHistory(this.#store.events(this.id));
-    const previous = history.get(transitionId)?.at(-1);
-    const attempt: TransitionAttempt = {
-      transitionId,
-      attempt: (previous?.attempt ?? 0) + 1,
-      runId: null,
-      actor: 'user',
-      sourceStepId: input.sourceStepId,
-      targetStepId: input.targetStepId,
-      expectationSetId: configuredSet.expectationSetId,
-      candidate: { ...input.candidate },
-      evidenceIds: [],
-      supersedesTransitionId: previous?.transitionId ?? null,
+    const summary = this.#store.get(this.id);
+    if (!summary) throw new Error(`Unknown thread ${this.id}`);
+    const currentHead = this.#store.refresh(this.id);
+    if (input.expectedHead !== undefined && input.expectedHead !== currentHead) {
+      throw new Error(
+        `The recovery start is stale; expected log head ${input.expectedHead}, found ${currentHead}.`,
+      );
+    }
+    let cycle = this.getRecovery({ transitionId: input.transitionId, cycleId: input.cycleId });
+    const transitionCycle = this.getRecovery({ transitionId: input.transitionId });
+    if (cycle === null && transitionCycle !== null) {
+      throw new Error(
+        `Transition ${input.transitionId} already has recovery cycle ${transitionCycle.cycleId}; ` +
+          'a second cycle cannot be created for the same refusal attempt.',
+      );
+    }
+    let events = this.#store.events(this.id);
+    let history = foldTransitionEvaluationHistory(events).get(input.transitionId) ?? [];
+    let latest = history.at(-1) ?? null;
+    if (latest === null) throw new Error(`No evaluated transition ${input.transitionId} exists in this thread.`);
+    if (latest.attempt !== input.expectedAttempt) {
+      throw new Error(
+        `The transition changed before recovery could start; expected attempt ${input.expectedAttempt}, found ${latest.attempt}.`,
+      );
+    }
+
+    const workspace = this.#workspace(summary.cwd);
+    const guardrails = workspace.status === 'ok'
+      ? workspace.workspace.guardrails.filter((guardrail) => appliesToTransition(
+          guardrail,
+          latest!.sourceStepId,
+          latest!.targetStepId,
+        ))
+      : [];
+    if (cycle === null) {
+      const policy = recoveryPolicy(guardrails, latest);
+      const initialFingerprint = transitionFingerprint(latest, this.evidence());
+      const cycleId = input.cycleId ?? randomUUID();
+      const expectedHead = this.#store.head(this.id);
+      const started = this.#compareRecord(expectedHead, null, {
+        kind: 'recovery.cycle.started',
+        cycleId,
+        transitionId: latest.transitionId,
+        refusalAttempt: latest.attempt,
+        expectationSetId: latest.expectationSetId,
+        sourceStepId: latest.sourceStepId,
+        targetStepId: latest.targetStepId,
+        maxRuns: policy.maxRuns,
+        maxEvaluations: policy.maxEvaluations,
+        onExhausted: policy.onExhausted,
+        guardrailIds: [...policy.guardrailIds],
+        initialFingerprint,
+      }, { transitionId: latest.transitionId, attempt: latest.attempt });
+      if (started === null) {
+        // The winner may have created the cycle or a human may have appended a new
+        // evaluation. Re-read and never manufacture a second cycle in either case.
+        return this.getRecovery({ transitionId: input.transitionId, cycleId: input.cycleId });
+      }
+      cycle = this.getRecovery({ transitionId: input.transitionId, cycleId });
+      if (cycle === null) throw new Error('The recovery cycle could not be replayed after it was appended.');
+    }
+
+    if (cycle.cancelled) return cycle;
+    if (cycle.activeCorrection !== null) return cycle;
+
+    // Re-read after cycle creation. The append-only projection, not the values captured
+    // before the compare-and-append, decides what this request is allowed to do.
+    events = this.#store.events(this.id);
+    history = foldTransitionEvaluationHistory(events).get(input.transitionId) ?? [];
+    latest = history.at(-1) ?? null;
+    if (latest === null) return this.getRecovery({ cycleId: cycle.cycleId });
+    if (latest.attempt !== input.expectedAttempt) {
+      throw new Error(
+        `The transition changed while recovery was starting; expected attempt ${input.expectedAttempt}, found ${latest.attempt}.`,
+      );
+    }
+
+    if (latest.verdict === 'passed') return this.getRecovery({ cycleId: cycle.cycleId });
+    if (latest.refusal === null) throw new Error('A refused recovery evaluation must include its structured blocker.');
+
+    if (latest.verdict === 'blocked' || latest.verdict === 'failed') {
+      this.#escalateRecovery(cycle, latest, latest.verdict === 'blocked' ? 'absolute' : 'invalid');
+      return this.getRecovery({ cycleId: cycle.cycleId });
+    }
+    if (latest.verdict === 'waiting-for-human') {
+      this.#waitForRecovery(cycle, latest, 'human-action', latest.refusal.reason);
+      return this.getRecovery({ cycleId: cycle.cycleId });
+    }
+    if (isTransientEvaluatorRefusal(latest)) {
+      this.#waitForRecovery(cycle, latest, 'transient-evaluator', latest.refusal.reason);
+      return this.getRecovery({ cycleId: cycle.cycleId });
+    }
+
+    const fingerprint = transitionFingerprint(latest, this.evidence());
+    const previousCorrection = cycle.correctionRuns.at(-1);
+    if (previousCorrection !== undefined && sameTransitionFingerprint(previousCorrection.fingerprint, fingerprint)) {
+      this.#escalateRecovery(cycle, latest, 'unchanged-candidate');
+      return this.getRecovery({ cycleId: cycle.cycleId });
+    }
+    if (cycle.correctionsUsed >= cycle.maxRuns || cycle.evaluationsUsed >= cycle.maxEvaluations) {
+      this.#escalateRecovery(cycle, latest, 'exhausted');
+      return this.getRecovery({ cycleId: cycle.cycleId });
+    }
+    if (this.workItem() === null) {
+      // A correction is a work run, not an untracked conversational turn. Do not reserve
+      // a correction slot when the thread has no durable work item to link to.
+      this.#escalateRecovery(cycle, latest, 'invalid');
+      return this.getRecovery({ cycleId: cycle.cycleId });
+    }
+
+    let unavailable: { detail: string } | null;
+    try {
+      unavailable = await this.#correctionWorkerAvailability(workspace, latest, input.agent);
+    } catch (error) {
+      unavailable = {
+        detail: `Worker profile ${input.agent} could not be checked: ${error instanceof Error ? error.message : String(error)}.`,
+      };
+    }
+    if (unavailable !== null) {
+      this.#waitForRecovery(cycle, latest, 'worker-unavailable', unavailable.detail, input.agent);
+      return this.getRecovery({ cycleId: cycle.cycleId });
+    }
+
+    // The probe was asynchronous. Recheck the exact attempt and active reservation before
+    // consuming a correction slot.
+    const current = this.getRecovery({ cycleId: cycle.cycleId });
+    if (current?.activeCorrection !== null && current?.activeCorrection !== undefined) return current;
+    const latestAfterProbe = (foldTransitionEvaluationHistory(this.#store.events(this.id)).get(input.transitionId) ?? []).at(-1);
+    if (latestAfterProbe === undefined || latestAfterProbe.attempt !== input.expectedAttempt) {
+      throw new Error('The transition changed while the worker availability was being checked.');
+    }
+    if (current?.actions.some((action) => action.attempt >= latestAfterProbe.attempt)) {
+      return current;
+    }
+    const attempts = foldTransitionEvaluationHistory(this.#store.events(this.id)).get(input.transitionId) ?? [];
+    const actionHistory = current?.actions ?? [];
+    const correctionIndex = (current?.correctionsUsed ?? 0) + 1;
+    const context = buildRecoveryWorkerContext({
+      cycleId: cycle.cycleId,
+      correctionIndex,
+      refusalAttempt: cycle.refusalAttempt,
+      evaluation: latestAfterProbe,
+      attempts,
+      actions: actionHistory,
+      fingerprint: transitionFingerprint(latestAfterProbe, this.evidence()),
+    });
+    const correctionPrompt = recoveryWorkerPrompt(context);
+    const runId = randomUUID();
+    // Reuse the live-run map as the runtime reservation. It is cleared by send's normal
+    // finally path and is not persisted or treated as recovery truth after restart.
+    this.#activeRuns.set(input.agent, runId);
+    const reserved = this.#compareRecord(this.#store.head(this.id), input.agent, {
+      kind: 'recovery.correction.started',
+      cycleId: cycle.cycleId,
+      transitionId: latestAfterProbe.transitionId,
+      refusalAttempt: cycle.refusalAttempt,
+      correctionIndex,
+      runId,
+      workerProfileId: input.agent,
+      fingerprint: context.fingerprint,
+      context,
+    }, { transitionId: latestAfterProbe.transitionId, attempt: latestAfterProbe.attempt });
+    if (reserved === null) {
+      this.#activeRuns.delete(input.agent);
+      return this.getRecovery({ cycleId: cycle.cycleId });
+    }
+
+    try {
+      await this.send(input.agent, correctionPrompt, true, {
+        runId,
+        recoveryContext: context,
+        keepRunActive: true,
+      });
+    } catch (error) {
+      this.#activeRuns.delete(input.agent);
+      log.warn('recovery worker failed', {
+        threadId: this.id,
+        cycleId: cycle.cycleId,
+        runId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return this.getRecovery({ cycleId: cycle.cycleId });
+    }
+
+    // A human may cancel or repin while the worker turn is in flight. The completed
+    // worker must not append an evaluation to that superseded cycle.
+    const afterCorrection = this.getRecovery({ cycleId: cycle.cycleId });
+    if (afterCorrection?.cancelled) return afterCorrection;
+
+    // A completed correction is evaluated against the current candidate before another
+    // correction may be reserved. A concurrent typed human action wins the expected-attempt
+    // check and leaves the cycle waiting instead of silently overwriting it.
+    const afterState = await this.#workingState(input.agent);
+    const beforeEvaluation = this.getRecovery({ cycleId: cycle.cycleId });
+    if (beforeEvaluation?.cancelled) return beforeEvaluation;
+    const nextCandidate = latestAfterProbe.candidate.kind === 'working-tree'
+      ? candidateIdentity(afterState.tree, afterState.commit)
+      : latestAfterProbe.candidate;
+    let decision: TransitionDecision;
+    // `send` was asked to retain the live-run reservation through this post-turn
+    // evaluation, so a second start cannot race the correction between the worker turn
+    // and its evaluation append.
+    try {
+      decision = await this.evaluatePlanningTransition({
+        sourceStepId: latestAfterProbe.sourceStepId,
+        targetStepId: latestAfterProbe.targetStepId,
+        candidate: nextCandidate,
+        transitionId: latestAfterProbe.transitionId,
+        expectedAttempt: latestAfterProbe.attempt,
+        runId,
+        recoveryCycleId: cycle.cycleId,
+      });
+    } catch (error) {
+      if (error instanceof TransitionEvaluationConflictError) throw error;
+      log.warn('recovery evaluation was superseded', {
+        threadId: this.id,
+        cycleId: cycle.cycleId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return this.getRecovery({ cycleId: cycle.cycleId });
+    } finally {
+      if (this.#activeRuns.get(input.agent) === runId) this.#activeRuns.delete(input.agent);
+    }
+
+    if (decision.evaluation.verdict === 'retry' && decision.evaluation.refusal !== null) {
+      return this.startRecovery({
+        transitionId: decision.evaluation.transitionId,
+        expectedAttempt: decision.evaluation.attempt,
+        agent: input.agent,
+        cycleId: cycle.cycleId,
+      });
+    }
+    return this.getRecovery({ cycleId: cycle.cycleId });
+  }
+
+  /** Apply one typed human action and re-evaluate the same transition where appropriate. */
+  async applyRecoveryAction(input: RecoveryActionRequest): Promise<RecoveryCycle | null> {
+    this.#store.refresh(this.id);
+    const cycle = this.getRecovery({ cycleId: input.cycleId });
+    if (cycle === null) throw new Error(`No recovery cycle ${input.cycleId} exists in this thread.`);
+    // Check the displayed version before any terminal-state or payload branch. A stale
+    // action against a cycle that has since been cancelled is still a typed conflict.
+    this.#assertRecoveryActionFresh(cycle, input);
+    if (cycle.cancelled) throw new Error('This recovery cycle is cancelled; repin before acting on it.');
+    const latest = cycle.latestEvaluation;
+    if (latest === null || latest.refusal === null) throw new Error('This recovery cycle has no current refusal to act on.');
+    if (
+      cycle.activeCorrection !== null &&
+      input.kind !== 'cancel' &&
+      input.kind !== 'repin'
+    ) {
+      throw new Error('A recovery worker is active; wait for it to finish or cancel/repin the cycle first.');
+    }
+    if (
+      cycle.actions.some((action) => action.attempt >= latest.attempt) &&
+      input.kind !== 'cancel' &&
+      input.kind !== 'repin'
+    ) {
+      throw new Error('A recovery action for the current attempt is already being evaluated.');
+    }
+
+    const actionBase = {
+      actionId: randomUUID(),
+      cycleId: cycle.cycleId,
+      transitionId: cycle.transitionId,
+      attempt: latest.attempt,
+      expectedHead: input.expectedHead,
+      actor: 'user' as const,
+      authority: 'user' as const,
     };
-    const evaluation = this.#store.withTrustedThreadContext(this.id, () => evaluateOwnedGuardedTransition({
-      attempt,
-      expectationSet: configuredSet,
-      timestamp: Date.now(),
-      guardrails,
-      verify: workspace.status === 'ok' ? workspace.workspace.verify : [],
-      evidence: this.evidence(),
-      events: this.#store.events(this.id),
-    }));
-    const invalidReason = workspace.status !== 'ok'
-      ? 'The workspace declaration is unavailable, so the planning transition was refused.'
-      : sourceFailureReason ?? (
-          conflicts.has(configuredSet.expectationSetId)
-            ? 'The pinned expectation set has conflicting immutable definitions and cannot be evaluated.'
-            : built.conflicts.length > 0
-              ? `The attached guardrails have conflicting definitions for: ${built.conflicts.join(', ')}.`
-              : undefined
-        );
-    const finalEvaluation = invalidReason === undefined
-      ? evaluation
-      : createTransitionEvaluation({
-          ...evaluation,
-          verdict: 'failed',
-          refusal: {
-            unmetRequirementIds: configuredSet.items.map((item) => item.id),
-            reason: invalidReason,
-            required: { kind: 'evidence', evidence: { requirementIds: configuredSet.items.map((item) => item.id), description: 'Provide a valid workspace policy and immutable expectation set.' } },
-            responsibleActor: 'user',
-            nextAction: 'escalate',
-            retryable: true,
+
+    switch (input.kind) {
+      case 'cancel': {
+        this.#appendRecoveryAction(cycle, input, {
+          ...actionBase,
+          kind: 'cancel',
+          candidate: { ...latest.candidate },
+          evidenceIds: [...latest.evidenceIds],
+          reason: input.reason?.trim() || null,
+        }, [{
+          agent: null,
+          body: {
+            kind: 'recovery.cycle.cancelled',
+            cycleId: cycle.cycleId,
+            transitionId: cycle.transitionId,
+            reason: 'user',
+            supersededByTransitionId: null,
           },
-          override: null,
+        }]);
+        return this.getRecovery({ cycleId: cycle.cycleId });
+      }
+
+      case 'repin': {
+        if (input.sourceStepId.trim() === '' || input.targetStepId.trim() === '') {
+          throw new Error('A repin needs source and target step identities.');
+        }
+        if (
+          !input.candidate.pinned ||
+          input.candidate.id.trim() === '' ||
+          (input.candidate.revision === null && input.candidate.digest === null)
+        ) {
+          throw new Error('A repin needs a new pinned candidate/reference identity.');
+        }
+        if (sameCandidateIdentity(input.candidate, latest.candidate)) {
+          throw new Error('Repin needs a new immutable candidate/reference identity.');
+        }
+        const transitionId = repinTransitionId(this.id, cycle, input.sourceStepId, input.targetStepId, input.candidate);
+        if (transitionId === cycle.transitionId) {
+          throw new Error('The generated repin identity must differ from the superseded transition.');
+        }
+        const existingRepin = foldTransitionEvaluationHistory(this.#store.events(this.id)).get(transitionId);
+        if (existingRepin !== undefined) {
+          throw new Error(`The generated repin transition identity ${transitionId} already exists.`);
+        }
+        const action: RecoveryAction = {
+          ...actionBase,
+          kind: 'repin',
+          candidate: { ...input.candidate },
+          evidenceIds: [],
+          reason: 'The human repinned the candidate and started a new transition identity.',
+          supersededByTransitionId: transitionId,
+        };
+        await this.#evaluateRecoveryAction(cycle, input, action, [{
+          agent: null,
+          body: {
+            kind: 'recovery.cycle.cancelled',
+            cycleId: cycle.cycleId,
+            transitionId: cycle.transitionId,
+            reason: 'repinned',
+            supersededByTransitionId: transitionId,
+          },
+        }], {
+          sourceStepId: input.sourceStepId,
+          targetStepId: input.targetStepId,
+          candidate: { ...input.candidate },
+          transitionId,
+          expectedAttempt: 0,
+          supersedesTransitionId: cycle.transitionId,
         });
-    this.#record(null, { kind: 'transition.evaluated', evaluation: finalEvaluation });
-    this.#onState();
-    return {
-      allowed: finalEvaluation.verdict === 'passed',
-      requirements: [],
-      evaluation: finalEvaluation,
-      verdict: finalEvaluation.verdict,
-      refusal: finalEvaluation.refusal,
+        return this.getRecovery({ transitionId });
+      }
+
+      case 'answer': {
+        if (
+          latest.refusal.required.kind !== 'structured-answer' ||
+          latest.refusal.required.answer.questionId !== input.questionId ||
+          input.expectationItemId !== latest.refusal.required.answer.questionId ||
+          input.expectationSetId !== latest.expectationSetId ||
+          !sameCandidateIdentity(input.candidate, latest.candidate)
+        ) {
+          throw new Error('The typed answer does not match the current structured human blocker.');
+        }
+        const answerEvidenceIds = input.evidenceIds ?? [];
+        const knownEvidence = new Map(this.evidence().map((item) => [item.id, item]));
+        const answerEvidence = answerEvidenceIds.map((id) => knownEvidence.get(id));
+        if (answerEvidence.some((item) => item === undefined)) {
+          throw new Error('A typed answer referenced an unknown evidence id.');
+        }
+        if (answerEvidence.some((item) => item !== undefined && !sameCandidateIdentity(input.candidate, candidateFromEvidenceItem(item)))) {
+          throw new Error('Typed answer evidence must be pinned to the answered candidate.');
+        }
+        const answerId = input.answerId ?? randomUUID();
+        const preparedAnswer = this.#prepareAnswerRecord({
+          expectationItemId: input.expectationItemId,
+          expectationSetId: input.expectationSetId,
+          answer: input.answer,
+          candidate: input.candidate,
+          evidenceIds: input.evidenceIds,
+          answerId,
+        });
+        const action: RecoveryAction = {
+          ...actionBase,
+          kind: 'answer',
+          candidate: { ...input.candidate },
+          evidenceIds: [...answerEvidenceIds],
+          questionId: input.questionId,
+          answerId,
+          answer: input.answer,
+        };
+        await this.#evaluateRecoveryAction(cycle, input, action, preparedAnswer.body === null ? [] : [{ agent: null, body: preparedAnswer.body }], {
+          sourceStepId: latest.sourceStepId,
+          targetStepId: latest.targetStepId,
+          candidate: { ...input.candidate },
+          transitionId: cycle.transitionId,
+          expectedAttempt: latest.attempt,
+          recoveryCycleId: cycle.cycleId,
+        });
+        return this.getRecovery({ cycleId: cycle.cycleId });
+      }
+
+      case 'evidence': {
+        if (input.evidenceIds.length === 0) throw new Error('A recovery evidence action needs at least one evidence id.');
+        const evidence = this.evidence();
+        const known = new Map(evidence.map((item) => [item.id, item]));
+        const selected = input.evidenceIds.map((id) => known.get(id));
+        if (selected.some((item) => item === undefined)) throw new Error('A recovery evidence action referenced an unknown evidence id.');
+        if (selected.some((item) => item !== undefined && !sameCandidateIdentity(input.candidate, candidateFromEvidenceItem(item)))) {
+          throw new Error('Recovery evidence must be pinned to the candidate it claims to support.');
+        }
+        const action: RecoveryAction = {
+          ...actionBase,
+          kind: 'evidence',
+          candidate: { ...input.candidate },
+          evidenceIds: [...input.evidenceIds],
+        };
+        await this.#evaluateRecoveryAction(cycle, input, action, [], {
+          sourceStepId: latest.sourceStepId,
+          targetStepId: latest.targetStepId,
+          candidate: { ...input.candidate },
+          transitionId: cycle.transitionId,
+          expectedAttempt: latest.attempt,
+          recoveryCycleId: cycle.cycleId,
+        });
+        return this.getRecovery({ cycleId: cycle.cycleId });
+      }
+
+      case 'override': {
+        if (input.authorizedUserId.trim() === '' || input.reason.trim() === '') {
+          throw new Error('A recovery override needs an authorized user and a non-empty reason.');
+        }
+        const override = createRequiredTransitionOverride({
+          permissionGranted: true,
+          authorizedUserId: input.authorizedUserId,
+          reason: input.reason,
+        });
+        const action: RecoveryAction = {
+          ...actionBase,
+          kind: 'override',
+          candidate: { ...latest.candidate },
+          evidenceIds: [...latest.evidenceIds],
+          authorizedUserId: input.authorizedUserId,
+          reason: input.reason,
+        };
+        await this.#evaluateRecoveryAction(cycle, input, action, [], {
+          sourceStepId: latest.sourceStepId,
+          targetStepId: latest.targetStepId,
+          candidate: { ...latest.candidate },
+          transitionId: cycle.transitionId,
+          expectedAttempt: latest.attempt,
+          override,
+          recoveryCycleId: cycle.cycleId,
+        });
+        return this.getRecovery({ cycleId: cycle.cycleId });
+      }
+
+      case 'retry-evaluator': {
+        if (!isTransientEvaluatorRefusal(latest)) {
+          throw new Error('This refusal is not a transient evaluator failure.');
+        }
+        if (cycle.transientEvaluatorRetries >= RECOVERY_MAX_TRANSIENT_EVALUATOR_RETRIES) {
+          throw new Error('Transient evaluator retries are exhausted; the cycle remains waiting for a human.');
+        }
+        if (input.expectedAttempt !== latest.attempt) {
+          throw new Error(
+            `The transition changed before the evaluator retry; expected attempt ${input.expectedAttempt}, found ${latest.attempt}.`,
+          );
+        }
+        const action: RecoveryAction = {
+          ...actionBase,
+          kind: 'retry-evaluator',
+          candidate: { ...latest.candidate },
+          evidenceIds: [...latest.evidenceIds],
+        };
+        await this.#evaluateRecoveryAction(cycle, input, action, [], {
+          sourceStepId: latest.sourceStepId,
+          targetStepId: latest.targetStepId,
+          candidate: { ...latest.candidate },
+          transitionId: cycle.transitionId,
+          expectedAttempt: input.expectedAttempt,
+          recoveryCycleId: cycle.cycleId,
+        });
+        return this.getRecovery({ cycleId: cycle.cycleId });
+      }
+    }
+  }
+
+  #assertRecoveryActionFresh(cycle: RecoveryCycle, input: RecoveryActionRequest): void {
+    const latest = (foldTransitionEvaluationHistory(this.#store.events(this.id)).get(cycle.transitionId) ?? []).at(-1) ?? null;
+    const actualHead = this.#store.head(this.id);
+    if (
+      input.expectedTransitionId !== cycle.transitionId ||
+      input.expectedAttempt !== latest?.attempt ||
+      input.expectedHead !== actualHead
+    ) {
+      throw this.#recoveryConflict(cycle, input.kind, input.expectedAttempt, input.expectedTransitionId, input.expectedHead, latest, actualHead);
+    }
+  }
+
+  #recoveryConflict(
+    cycle: RecoveryCycle,
+    actionKind: RecoveryActionKind,
+    expectedAttempt: number,
+    expectedTransitionId: string,
+    expectedHead: number,
+    latest: TransitionEvaluation | null,
+    actualHead: number,
+  ): RecoveryConflictError {
+    const conflict: RecoveryConflict = {
+      kind: 'stale-action',
+      cycleId: cycle.cycleId,
+      transitionId: cycle.transitionId,
+      actionKind,
+      expectedAttempt,
+      actualAttempt: latest?.attempt ?? null,
+      expectedTransitionId,
+      actualTransitionId: latest?.transitionId ?? null,
+      expectedHead,
+      actualHead,
+      detail: `Recovery action ${actionKind} is stale; expected ${expectedTransitionId} attempt ${expectedAttempt} at log head ${expectedHead}, ` +
+        `but the canonical log is ${cycle.transitionId} attempt ${latest?.attempt ?? 'unknown'} at head ${actualHead}.`,
     };
+    return new RecoveryConflictError(conflict);
+  }
+
+  #throwEvaluationConflict(transitionId: string, expectedAttempt: number, expectedHead: number): never {
+    this.#store.refresh(this.id);
+    const actualHead = this.#store.head(this.id);
+    const actualAttempt = foldTransitionEvaluationHistory(this.#store.events(this.id))
+      .get(transitionId)
+      ?.at(-1)
+      ?.attempt ?? null;
+    throw new TransitionEvaluationConflictError({
+      kind: 'stale-evaluation',
+      transitionId,
+      expectedAttempt,
+      actualAttempt,
+      expectedHead,
+      actualHead,
+      detail: `Evaluation ${transitionId} is stale; expected attempt ${expectedAttempt} at log head ${expectedHead}, ` +
+        `but the canonical log is at attempt ${actualAttempt ?? 'none'} and head ${actualHead}.`,
+    });
+  }
+
+  /** Recheck human action eligibility inside the final evaluation CAS. */
+  #recoveryActionPrelude(
+    cycle: RecoveryCycle,
+    input: RecoveryActionRequest,
+    action: RecoveryAction,
+    additional: readonly CompareAndAppendEntry[],
+  ): (canonical: CanonicalThreadLog) => readonly CompareAndAppendEntry[] {
+    return (canonical) => {
+      const actualCycle = findRecoveryCycle(
+        canonical.events,
+        { cycleId: input.cycleId },
+        (runId) => this.isRunActive(runId),
+      );
+      const latest = (foldTransitionEvaluationHistory(canonical.events).get(cycle.transitionId) ?? []).at(-1) ?? null;
+      if (
+        actualCycle === null ||
+        actualCycle.transitionId !== cycle.transitionId ||
+        actualCycle.cancelled ||
+        latest === null ||
+        latest.refusal === null ||
+        canonical.revision !== input.expectedHead ||
+        input.expectedTransitionId !== cycle.transitionId ||
+        input.expectedAttempt !== latest.attempt ||
+        action.transitionId !== cycle.transitionId ||
+        action.attempt !== latest.attempt ||
+        (actualCycle.activeCorrection !== null && input.kind !== 'repin') ||
+        (actualCycle.actions.some((item) => item.attempt >= latest.attempt) && input.kind !== 'repin')
+      ) {
+        throw this.#recoveryConflict(
+          cycle,
+          input.kind,
+          input.expectedAttempt,
+          input.expectedTransitionId,
+          input.expectedHead,
+          latest,
+          canonical.revision,
+        );
+      }
+      return [
+        { agent: null, body: { kind: 'recovery.action.recorded', action } },
+        ...additional,
+      ];
+    };
+  }
+
+  async #evaluateRecoveryAction(
+    cycle: RecoveryCycle,
+    input: RecoveryActionRequest,
+    action: RecoveryAction,
+    additional: readonly CompareAndAppendEntry[],
+    evaluation: {
+      sourceStepId: string;
+      targetStepId: string;
+      candidate: CandidateIdentity;
+      transitionId: string;
+      expectedAttempt: number;
+      runId?: string | null;
+      supersedesTransitionId?: string | null;
+      recoveryCycleId?: string | null;
+      override?: TransitionOverride | null;
+    },
+  ): Promise<TransitionDecision> {
+    try {
+      return await this.evaluatePlanningTransition({
+        ...evaluation,
+        expectedHead: input.expectedHead,
+        prelude: this.#recoveryActionPrelude(cycle, input, action, additional),
+      });
+    } catch (error) {
+      if (!(error instanceof TransitionEvaluationConflictError)) throw error;
+      this.#store.refresh(this.id);
+      const latest = (foldTransitionEvaluationHistory(this.#store.events(this.id)).get(cycle.transitionId) ?? []).at(-1) ?? null;
+      throw this.#recoveryConflict(
+        cycle,
+        input.kind,
+        input.expectedAttempt,
+        input.expectedTransitionId,
+        input.expectedHead,
+        latest,
+        this.#store.head(this.id),
+      );
+    }
+  }
+
+  /** Append the authority-changing action and any linked ledger/cancellation event atomically. */
+  #appendRecoveryAction(
+    cycle: RecoveryCycle,
+    input: RecoveryActionRequest,
+    action: RecoveryAction,
+    additional: readonly CompareAndAppendEntry[] = [],
+  ): void {
+    const appended = this.#compareRecordBatch(
+      input.expectedHead,
+      [
+        { agent: null, body: { kind: 'recovery.action.recorded', action } },
+        ...additional,
+      ],
+      { transitionId: input.expectedTransitionId, attempt: input.expectedAttempt },
+    );
+    if (appended !== null) return;
+
+    const latest = (foldTransitionEvaluationHistory(this.#store.events(this.id)).get(cycle.transitionId) ?? []).at(-1) ?? null;
+    throw this.#recoveryConflict(
+      cycle,
+      input.kind,
+      input.expectedAttempt,
+      input.expectedTransitionId,
+      input.expectedHead,
+      latest,
+      this.#store.head(this.id),
+    );
+  }
+
+  #correctionWorkerAvailability(
+    workspace: WorkspaceResolution,
+    evaluation: TransitionEvaluation,
+    agent: AgentId,
+  ): Promise<{ detail: string } | null> {
+    if (workspace.status !== 'ok') {
+      return Promise.resolve({ detail: 'The workspace is unavailable; no correction worker may be selected.' });
+    }
+    const target = workspace.workspace.steps.find((step) => step.id === evaluation.targetStepId);
+    if (
+      target === undefined ||
+      !workspace.workspace.agents.includes(agent) ||
+      !target.workers.includes(agent)
+    ) {
+      return Promise.resolve({ detail: `Worker profile ${agent} is not authorized for transition target ${evaluation.targetStepId}.` });
+    }
+    return probeWorkerProfiles(this.#config, [agent]).then((availability) => {
+      const result = availability[0];
+      return result?.available === true ? null : {
+        detail: result?.detail ?? `Worker profile ${agent} is unavailable.`,
+      };
+    });
+  }
+
+  #waitForRecovery(
+    cycle: RecoveryCycle,
+    evaluation: TransitionEvaluation,
+    reason: 'human-action' | 'worker-unavailable' | 'transient-evaluator',
+    detail: string,
+    workerProfileId?: AgentId,
+  ): void {
+    if (
+      cycle.waiting?.reason === reason &&
+      cycle.waiting.detail === detail &&
+      (workerProfileId === undefined || cycle.worker.profileId === workerProfileId)
+    ) return;
+    if (evaluation.refusal === null) return;
+    this.#record(null, {
+      kind: 'recovery.cycle.waiting',
+      cycleId: cycle.cycleId,
+      transitionId: cycle.transitionId,
+      refusalAttempt: cycle.refusalAttempt,
+      reason,
+      required: evaluation.refusal.required,
+      authority: 'user',
+      detail,
+      ...(workerProfileId === undefined ? {} : { workerProfileId }),
+    });
+  }
+
+  #escalateRecovery(
+    cycle: RecoveryCycle,
+    evaluation: TransitionEvaluation,
+    reason: 'unchanged-candidate' | 'exhausted' | 'absolute' | 'invalid',
+  ): void {
+    if (cycle.escalation?.reason === reason) return;
+    if (evaluation.refusal === null) return;
+    const validHumanAction = hasValidHumanRecoveryAction(evaluation);
+    const action = reason === 'absolute' || reason === 'invalid' || !validHumanAction
+      ? 'blocked'
+      : cycle.onExhausted;
+    const detail = reason === 'unchanged-candidate'
+      ? 'The candidate and referenced evidence fingerprint did not change; no correction run was consumed.'
+      : reason === 'exhausted'
+        ? `The bounded correction budget of ${cycle.maxRuns} run(s) and ${cycle.maxEvaluations} evaluation(s) is exhausted.`
+        : evaluation.refusal.reason;
+    this.#record(null, {
+      kind: 'recovery.cycle.escalated',
+      cycleId: cycle.cycleId,
+      transitionId: cycle.transitionId,
+      refusalAttempt: cycle.refusalAttempt,
+      reason,
+      action,
+      detail,
+    });
   }
 
   /** The most recent run started by an agent in this thread, if any. */
@@ -1709,6 +2615,7 @@ class Thread {
       permissionBridge: this.#bridge,
       emit: (event) => this.#record(agent, event),
       onSessionId: (sessionId) => this.#store.setNativeSession(this.id, agent, sessionId),
+      onSessionLost: () => this.#store.clearNativeSession(this.id, agent),
     };
 
     const adapter = createWorkerAdapter(agent, ctx);
@@ -1723,7 +2630,7 @@ class Thread {
   }
 
   /** Persist, update derived state, broadcast. The single write path for events. */
-  #record(agent: AgentId | null, body: AdapterEvent): void {
+  #record(agent: AgentId | null, body: AdapterEvent): HarnessEvent {
     if (agent !== null && (body.kind === 'answer.recorded' || body.kind === 'attestation.recorded' || body.kind === 'human.attestation.recorded')) {
       throw new Error('Human answer and attestation records require the core human-authority boundary.');
     }
@@ -1776,7 +2683,75 @@ class Thread {
     ) {
       this.#onState();
     }
+    return event;
   }
+
+  /** Publish a recovery reservation only when the expected append-only head is current. */
+  #compareRecord(
+    expectedHead: number,
+    agent: AgentId | null,
+    body: AdapterEvent,
+    expectedAttempt?: ExpectedTransitionAttempt,
+  ): HarnessEvent | null {
+    const event = this.#store.compareAndAppend(this.id, expectedHead, agent, body, expectedAttempt);
+    if (event === null) return null;
+    this.#emit(event);
+    this.#onState();
+    return event;
+  }
+
+  #compareRecordBatch(
+    expectedHead: number,
+    entries: readonly CompareAndAppendEntry[],
+    expectedAttempt?: ExpectedTransitionAttempt,
+  ): HarnessEvent[] | null {
+    const events = this.#store.compareAndAppendBatch(this.id, expectedHead, entries, expectedAttempt);
+    if (events === null) return null;
+    for (const event of events) this.#emit(event);
+    this.#onState();
+    return events;
+  }
+}
+
+function repinTransitionId(
+  threadId: string,
+  cycle: RecoveryCycle,
+  sourceStepId: string,
+  targetStepId: string,
+  candidate: CandidateIdentity,
+): string {
+  const referenceDigest = createHash('sha256').update(JSON.stringify({
+    authorizedExpectationSetId: cycle.expectationSetId,
+    supersedesTransitionId: cycle.transitionId,
+    sourceStepId,
+    targetStepId,
+    referenceIdentity: {
+      kind: candidate.kind,
+      id: candidate.id,
+      revision: candidate.revision,
+      digest: candidate.digest,
+      pinned: candidate.pinned,
+    },
+  })).digest('hex');
+  return `${threadId}:planning:${sourceStepId}:${targetStepId}:repin:${referenceDigest}`;
+}
+
+function sameCandidateIdentity(left: CandidateIdentity, right: CandidateIdentity): boolean {
+  return left.kind === right.kind &&
+    left.id === right.id &&
+    left.revision === right.revision &&
+    left.digest === right.digest &&
+    left.pinned === right.pinned;
+}
+
+function candidateFromEvidenceItem(item: EvidenceItem): CandidateIdentity {
+  return {
+    kind: 'working-tree',
+    id: item.state.tree ?? item.state.commit ?? 'unidentified-working-tree',
+    revision: item.state.commit,
+    digest: item.state.tree,
+    pinned: item.state.tree !== null,
+  };
 }
 
 /**
@@ -2406,9 +3381,40 @@ export class Orchestrator extends EventEmitter {
       targetStepId: string;
       candidate: CandidateIdentity;
       transitionId?: string;
+      expectedAttempt?: number;
+      expectedHead?: number;
     },
   ): Promise<TransitionDecision> {
     return this.#thread(threadId).evaluatePlanningTransition(input);
+  }
+
+  /** Read the durable recovery projection for a transition or cycle. */
+  getRecovery(
+    threadId: string,
+    input: { transitionId?: string; cycleId?: string } = {},
+  ): RecoveryCycle | null {
+    // Recovery reads carry a head for the next human CAS. Refresh the canonical log
+    // before projecting it so a second process cannot hand the UI an old action version.
+    this.store.refresh(threadId);
+    return this.#thread(threadId).getRecovery(input);
+  }
+
+  /** Start an explicitly selected worker correction; the worker profile is never substituted. */
+  async startRecovery(
+    threadId: string,
+    input: { transitionId: string; expectedAttempt: number; expectedHead?: number; agent: AgentId; cycleId?: string },
+  ): Promise<RecoveryCycle | null> {
+    return this.#thread(threadId).startRecovery(input);
+  }
+
+  /** Apply a typed human recovery action through the distinct authority boundary. */
+  async applyRecoveryAction(
+    threadId: string,
+    input: RecoveryActionRequest,
+  ): Promise<RecoveryCycle | null> {
+    this.#requireHumanAuthorityCredential(input.humanCredential);
+    const { humanCredential: _humanCredential, ...action } = input;
+    return this.#thread(threadId).applyRecoveryAction(action);
   }
 
   /** Append a core-owned typed user answer for a planning expectation. */

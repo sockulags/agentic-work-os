@@ -50,6 +50,7 @@ export function idleRuntime(overrides: Partial<ThreadRuntimeState> = {}): Thread
     busyWith: null,
     busy: [],
     runStates: [],
+    recovery: [],
     lanes: {},
     currentTurnId: null,
     lastTurnAgent: null,
