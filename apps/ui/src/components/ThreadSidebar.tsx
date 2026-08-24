@@ -1,12 +1,20 @@
 import { useState } from 'react';
-import { Plus, Trash2, FolderOpen } from 'lucide-react';
+import { FolderOpen, Grid2X2, MessageSquare, Plus, Trash2 } from 'lucide-react';
 import { Button } from './ui/button';
 import { getAgentStyle } from './AgentBadge';
 import { useHarnessContext } from '@/state/HarnessContext';
 import { cn, formatRelative } from '@/lib/utils';
 import { chooseProjectFolder, supportsNativeFolderPicker } from '@/lib/project-folder';
 
-export function ThreadSidebar(): React.JSX.Element {
+export function ThreadSidebar({
+  overviewOpen,
+  onOpenOverview,
+  onOpenThreads,
+}: {
+  overviewOpen: boolean;
+  onOpenOverview: () => void;
+  onOpenThreads: () => void;
+}): React.JSX.Element {
   const { threads, activeThreadId, openThread, createThread, deleteThread, availability } = useHarnessContext();
   const defaultAgent = availability[0]?.profileId ?? 'claude';
   const [creating, setCreating] = useState(false);
@@ -22,12 +30,46 @@ export function ThreadSidebar(): React.JSX.Element {
         <Button
           size="icon"
           variant="ghost"
-          onClick={() => setCreating((v) => !v)}
+          onClick={() => {
+            onOpenThreads();
+            setCreating((v) => !v);
+          }}
           title="New thread"
         >
           <Plus className="h-4 w-4" />
         </Button>
       </div>
+
+      <nav className="space-y-0.5 border-b border-border px-2 pb-2" aria-label="Primary">
+        <button
+          type="button"
+          aria-current={overviewOpen ? 'page' : undefined}
+          onClick={onOpenOverview}
+          className={cn(
+            'awos-focus-ring flex min-h-9 w-full items-center gap-2 rounded-md border px-2.5 text-left text-xs transition-colors',
+            overviewOpen
+              ? 'border-border bg-surface-selected text-foreground'
+              : 'border-transparent text-muted-foreground hover:bg-surface-interactive hover:text-foreground',
+          )}
+        >
+          <Grid2X2 className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          Project overview
+        </button>
+        <button
+          type="button"
+          aria-current={!overviewOpen ? 'page' : undefined}
+          onClick={onOpenThreads}
+          className={cn(
+            'awos-focus-ring flex min-h-9 w-full items-center gap-2 rounded-md border px-2.5 text-left text-xs transition-colors',
+            !overviewOpen
+              ? 'border-border bg-surface-selected text-foreground'
+              : 'border-transparent text-muted-foreground hover:bg-surface-interactive hover:text-foreground',
+          )}
+        >
+          <MessageSquare className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          Threads
+        </button>
+      </nav>
 
       {creating && (
         <form
@@ -39,6 +81,7 @@ export function ThreadSidebar(): React.JSX.Element {
             setCreateError(null);
             setSubmitting(true);
             try {
+              onOpenThreads();
               await createThread(trimmed, defaultAgent);
               setCreating(false);
             } catch (error) {
@@ -122,7 +165,10 @@ export function ThreadSidebar(): React.JSX.Element {
                   active ? 'bg-surface-selected' : 'hover:bg-surface-interactive/60',
                 )}
                 style={style.cssVars}
-                onClick={() => void openThread(thread.id)}
+                onClick={() => {
+                  onOpenThreads();
+                  void openThread(thread.id);
+                }}
               >
                 <div className="flex items-center gap-1.5">
                   <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', style.dot)} />

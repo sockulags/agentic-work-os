@@ -17,6 +17,8 @@ import type {
   WorkSourceError,
   WorkspaceResolution,
   WorkspaceRoleSelection,
+  IssueOpenResult,
+  ProjectOverview,
 } from '@awos/protocol';
 import type { ClientRequest } from '@awos/protocol';
 import { HarnessClient, resolveClientOptions, type ConnectionStatus } from '@/lib/client';
@@ -33,6 +35,12 @@ import { foldRuns } from '@/lib/runs';
  * visible state is the pair that has neither failure mode.
  */
 const SAVE_DEBOUNCE_MS = 600;
+
+function normalizeThreads(threads: readonly ThreadSummary[]): ThreadSummary[] {
+  const byId = new Map<string, ThreadSummary>();
+  for (const thread of threads) byId.set(thread.id, thread);
+  return [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+}
 
 export type PinnedContextSave = 'saved' | 'unsaved' | 'saving' | 'failed';
 
@@ -63,6 +71,13 @@ export interface PinnedContext {
 export interface WorkspaceView {
   cwd: string;
   resolution: WorkspaceResolution;
+}
+
+export interface ProjectOverviewView {
+  cwd: string;
+  overview: ProjectOverview | null;
+  error: WorkSourceError | null;
+  busy: boolean;
 }
 
 /**
@@ -128,6 +143,7 @@ export function useHarness() {
   const [roleSelectionError, setRoleSelectionError] = useState<string | null>(null);
   const [work, setWork] = useState<WorkView | null>(null);
   const [gates, setGates] = useState<Partial<Record<AgentId, GateView>>>({});
+  const [projectOverview, setProjectOverview] = useState<ProjectOverviewView | null>(null);
 
   // Read inside the push handler without making it a dependency, which would tear down
   // and rebuild the subscription on every thread switch.
@@ -139,6 +155,11 @@ export function useHarness() {
 
   /** The open thread's directory, for telling a stale workspace reply from a wanted one. */
   const activeCwdRef = useRef<string | null>(null);
+  const projectOverviewCwdRef = useRef<string | null>(null);
+  const projectOverviewRequestRef = useRef(0);
+  const projectOverviewExplicitRefreshRef = useRef(false);
+  const projectOverviewPushPendingRef = useRef(false);
+  const refreshProjectOverviewRef = useRef<((cwd: string, refreshSource?: boolean) => Promise<void>) | null>(null);
 
   /**
    * Write out whatever the notes editor is holding that the core does not have yet.
@@ -203,18 +224,19 @@ export function useHarness() {
           setEvents((prev) => [...prev, push.event]);
           return;
         case 'state':
-          if (push.state.threadId !== activeThreadRef.current) return;
-          setRuntime(push.state);
+          if (push.state.threadId === activeThreadRef.current) setRuntime(push.state);
+          if (projectOverviewCwdRef.current !== null) {
+            void refreshProjectOverviewRef.current?.(projectOverviewCwdRef.current);
+          }
           return;
         case 'thread.updated':
-          setThreads((prev) => {
-            const next = prev.filter((t) => t.id !== push.thread.id);
-            next.unshift(push.thread);
-            return next.sort((a, b) => b.updatedAt - a.updatedAt);
-          });
+          setThreads((prev) => normalizeThreads([...prev, push.thread]));
+          if (projectOverviewCwdRef.current !== null) {
+            void refreshProjectOverviewRef.current?.(projectOverviewCwdRef.current);
+          }
           return;
         case 'thread.removed':
-          setThreads((prev) => prev.filter((t) => t.id !== push.threadId));
+          setThreads((prev) => normalizeThreads(prev.filter((t) => t.id !== push.threadId)));
           if (activeThreadRef.current === push.threadId) {
             setActiveThreadId(null);
             setEvents([]);
@@ -227,6 +249,9 @@ export function useHarness() {
             setWork(null);
             setGates({});
             activeCwdRef.current = null;
+            if (projectOverviewCwdRef.current !== null) {
+              void refreshProjectOverviewRef.current?.(projectOverviewCwdRef.current);
+            }
           }
           return;
         case 'notice':
@@ -272,27 +297,136 @@ export function useHarness() {
     [client],
   );
 
-  const setWorkspaceRole = useCallback(
-    async (roleId: string | null) => {
-      const cwd = activeCwdRef.current;
+  const refreshProjectOverview = useCallback(
+    async (cwd: string, refreshSource = false) => {
+      if (!refreshSource && projectOverviewExplicitRefreshRef.current) {
+        projectOverviewPushPendingRef.current = true;
+        return;
+      }
+      if (refreshSource) projectOverviewExplicitRefreshRef.current = true;
+      projectOverviewCwdRef.current = cwd;
+      const requestId = ++projectOverviewRequestRef.current;
+      setProjectOverview((previous) => ({
+        cwd,
+        overview: previous?.cwd === cwd ? previous.overview : null,
+        error: previous?.cwd === cwd ? previous.error : null,
+        busy: true,
+      }));
+
+      try {
+        let refreshError: WorkSourceError | null = null;
+        if (refreshSource) {
+          const refreshed = await client.request({ type: 'catalog.refresh', cwd }).catch((error: unknown) => {
+            refreshError = {
+              kind: 'offline',
+              message: error instanceof Error ? error.message : 'Could not refresh GitHub.',
+              retryable: true,
+            };
+            return null;
+          });
+          if (refreshed?.type === 'catalog' && refreshed.error !== null) refreshError = refreshed.error;
+        }
+
+        const response = await client.request({
+          type: 'project.overview.get',
+          cwd,
+        }).catch((error: unknown) => {
+          refreshError ??= {
+            kind: 'offline',
+            message: error instanceof Error ? error.message : 'Could not read the project overview.',
+            retryable: true,
+          };
+          return null;
+        });
+        if (requestId !== projectOverviewRequestRef.current || projectOverviewCwdRef.current !== cwd) return;
+
+        if (response?.type !== 'project.overview') {
+          setProjectOverview((previous) => ({
+            cwd,
+            overview: previous?.cwd === cwd ? previous.overview : null,
+            error: refreshError,
+            busy: false,
+          }));
+          return;
+        }
+        setProjectOverview({
+          cwd,
+          overview: response.overview,
+          error: response.error ?? refreshError,
+          busy: false,
+        });
+      } finally {
+        if (refreshSource) {
+          projectOverviewExplicitRefreshRef.current = false;
+          if (projectOverviewPushPendingRef.current && projectOverviewCwdRef.current === cwd) {
+            projectOverviewPushPendingRef.current = false;
+            void refreshProjectOverviewRef.current?.(cwd);
+          }
+        }
+      }
+    },
+    [client],
+  );
+
+  refreshProjectOverviewRef.current = refreshProjectOverview;
+
+  const openProjectOverview = useCallback(
+    (cwd: string) => refreshProjectOverview(cwd),
+    [refreshProjectOverview],
+  );
+
+  const closeProjectOverview = useCallback((cwd: string) => {
+    if (projectOverviewCwdRef.current !== cwd) return;
+    projectOverviewCwdRef.current = null;
+    projectOverviewExplicitRefreshRef.current = false;
+    projectOverviewPushPendingRef.current = false;
+    projectOverviewRequestRef.current += 1;
+  }, []);
+
+  const setWorkspaceRoleAt = useCallback(
+    async (cwd: string | null, roleId: string | null) => {
       if (cwd === null) return;
+      const isRelevant = () => activeCwdRef.current === cwd || projectOverviewCwdRef.current === cwd;
+      if (!isRelevant()) return;
       setRoleSelectionSave('saving');
       setRoleSelectionError(null);
       try {
         const res = await client.request({ type: 'workspace.role.set', cwd, roleId });
-        if (activeCwdRef.current !== cwd) return;
+        if (!isRelevant()) return;
         if (res.type !== 'workspace.role') {
           setRoleSelectionSave('failed');
           setRoleSelectionError('The harness returned an unexpected role-selection response.');
           return;
         }
-        setRoleSelection(res.selection);
+        if (activeCwdRef.current === cwd) setRoleSelection(res.selection);
         setRoleSelectionSave('saved');
+        void refreshProjectOverview(cwd);
       } catch (error) {
-        if (activeCwdRef.current !== cwd) return;
+        if (!isRelevant()) return;
         setRoleSelectionSave('failed');
         setRoleSelectionError(error instanceof Error ? error.message : 'Could not save the local role preference.');
       }
+    },
+    [client, refreshProjectOverview],
+  );
+
+  const setWorkspaceRole = useCallback(
+    (roleId: string | null) => setWorkspaceRoleAt(activeCwdRef.current, roleId),
+    [setWorkspaceRoleAt],
+  );
+
+  const setProjectOverviewRole = useCallback(
+    (cwd: string, roleId: string | null) => setWorkspaceRoleAt(cwd, roleId),
+    [setWorkspaceRoleAt],
+  );
+
+  const openIssue = useCallback(
+    async (cwd: string, number: number): Promise<IssueOpenResult> => {
+      const response = await client.request({ type: 'issue.open', cwd, number });
+      if (response.type !== 'issue.open') {
+        throw new Error('The harness returned an unexpected issue-opening response.');
+      }
+      return response.result;
     },
     [client],
   );
@@ -464,12 +598,17 @@ export function useHarness() {
 
   const refreshThreads = useCallback(async () => {
     const res = await client.request({ type: 'thread.list' });
-    if (res.type === 'thread.list') setThreads(res.threads);
+    if (res.type === 'thread.list') setThreads(normalizeThreads(res.threads));
   }, [client]);
 
   const probeAgents = useCallback(async () => {
     const res = await client.request({ type: 'agents.probe' });
-    if (res.type === 'agents.probe') setAvailability(res.agents);
+    if (res.type === 'agents.probe') {
+      setAvailability(res.agents);
+      if (projectOverviewCwdRef.current !== null) {
+        void refreshProjectOverviewRef.current?.(projectOverviewCwdRef.current);
+      }
+    }
   }, [client]);
 
   const openThread = useCallback(
@@ -509,7 +648,7 @@ export function useHarness() {
       // the sidebar — keeps the notes in place. Blanking them would read to the editor as
       // a thread change and throw away whatever is being typed.
       setPinnedContext((prev) => (prev?.threadId === threadId ? prev : null));
-      setThreads((prev) => prev.map((t) => (t.id === threadId ? res.thread : t)));
+      setThreads((prev) => normalizeThreads([...prev, res.thread]));
 
       // Caught here so a failed notes fetch can't fail the open and take the transcript
       // down with it. Said out loud, because the panel would otherwise sit on a loading
@@ -550,6 +689,10 @@ export function useHarness() {
     void refreshThreads();
     void probeAgents();
 
+    if (projectOverviewCwdRef.current !== null) {
+      void refreshProjectOverviewRef.current?.(projectOverviewCwdRef.current);
+    }
+
     const threadId = activeThreadRef.current;
     if (threadId === null) return;
 
@@ -574,7 +717,7 @@ export function useHarness() {
     async (cwd: string, agent: AgentId) => {
       const res = await client.request({ type: 'thread.create', cwd, agent });
       if (res.type !== 'thread.created') return;
-      setThreads((prev) => [res.thread, ...prev]);
+      setThreads((prev) => normalizeThreads([...prev, res.thread]));
       await openThread(res.thread.id);
     },
     [client, openThread],
@@ -637,13 +780,21 @@ export function useHarness() {
     [client],
   );
 
+  const setThreadAgent = useCallback(
+    async (threadId: string, agent: AgentId) => {
+      const response = await client.request({ type: 'thread.setAgent', threadId, agent });
+      if (response.type !== 'ok') throw new Error('The harness returned an unexpected worker-selection response.');
+    },
+    [client],
+  );
+
   const setAgent = useCallback(
     async (agent: AgentId) => {
       const threadId = activeThreadRef.current;
       if (threadId === null) return;
-      await client.request({ type: 'thread.setAgent', threadId, agent });
+      await setThreadAgent(threadId, agent);
     },
-    [client],
+    [setThreadAgent],
   );
 
   const setPermissionMode = useCallback(
@@ -710,9 +861,17 @@ export function useHarness() {
     interrupt,
     resolveApproval,
     setAgent,
+    setThreadAgent,
     setPermissionMode,
     setParallel,
     integrateLane,
+    projectOverview,
+    openProjectOverview,
+    closeProjectOverview,
+    refreshProjectOverview,
+    refreshProjectCatalog: (cwd: string) => refreshProjectOverview(cwd, true),
+    setProjectOverviewRole,
+    openIssue,
   };
 }
 

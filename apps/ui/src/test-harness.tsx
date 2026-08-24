@@ -83,6 +83,7 @@ function stubHarness(overrides: Partial<Harness>): Harness {
     interrupt: vi.fn(),
     resolveApproval: vi.fn(),
     setAgent: vi.fn(),
+    setThreadAgent: vi.fn(),
     setPermissionMode: vi.fn(),
     setParallel: vi.fn(),
     integrateLane: vi.fn(),
@@ -105,6 +106,13 @@ function stubHarness(overrides: Partial<Harness>): Harness {
     recordEvidence: vi.fn(),
     retainContext: vi.fn(),
     amendRetained: vi.fn(),
+    projectOverview: null,
+    openProjectOverview: vi.fn(),
+    closeProjectOverview: vi.fn(),
+    refreshProjectOverview: vi.fn(),
+    refreshProjectCatalog: vi.fn(),
+    setProjectOverviewRole: vi.fn(),
+    openIssue: vi.fn(),
     ...overrides,
   } as Harness;
 }

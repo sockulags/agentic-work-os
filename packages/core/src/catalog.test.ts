@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket, type RawData } from 'ws';
+import { WORKSPACE_FILE, WORKSPACE_SCHEMA_VERSION } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
 import { Orchestrator } from './orchestrator.js';
 import { HarnessServer } from './server.js';
@@ -14,7 +15,7 @@ const fakeGh = join(import.meta.dirname, 'testing', 'fake-gh.js');
 const fakeClaude = join(import.meta.dirname, 'testing', 'fake-claude.js');
 const workspaceRoot = resolve(import.meta.dirname, '../../..');
 
-function config(dataDir: string): HarnessConfig {
+function config(dataDir: string, overrides: Partial<HarnessConfig> = {}): HarnessConfig {
   return {
     dataDir,
     claudeBin: process.execPath,
@@ -35,7 +36,14 @@ function config(dataDir: string): HarnessConfig {
     ghBin: process.execPath,
     ghBinArgs: [fakeGh, '--catalog-orchestrator-test'],
     ghTimeoutMs: 10_000,
+    ...overrides,
   };
+}
+
+function deterministicProbe(root: string): string {
+  const path = join(root, 'overview-worker-probe.cjs');
+  writeFileSync(path, "process.stdout.write('fake-worker 1.0\\n');\n", 'utf8');
+  return path;
 }
 
 function tempDir(): string {
@@ -175,4 +183,52 @@ test('catalog RPC separates local get from explicit refresh', async () => {
   const refreshedCatalog = refreshed['catalog'] as { source: { freshness: string } };
   assert.equal(beforeCatalog.source.freshness, 'not-fetched');
   assert.equal(refreshedCatalog.source.freshness, 'current');
+});
+
+test('project overview RPC returns the core-owned route and availability projection', async () => {
+  const dataDir = tempDir();
+  const cwd = tempDir();
+  mkdirSync(join(cwd, '.awos'), { recursive: true });
+  writeFileSync(
+    join(cwd, WORKSPACE_FILE),
+    JSON.stringify({
+      version: WORKSPACE_SCHEMA_VERSION,
+      name: 'Overview test workspace',
+      repository: { github: 'owner/repo' },
+      roles: [{ id: 'implementer', label: 'Implementer' }],
+      steps: [{ id: 'implement', action: 'Implement issue', role: 'implementer', workers: ['claude'] }],
+      routes: [{ id: 'enhancement', match: { anyLabels: ['enhancement'] }, step: 'implement' }],
+    }),
+    'utf8',
+  );
+
+  const cfg = config(dataDir, {
+    claudeBin: process.execPath,
+    claudeBinArgs: [deterministicProbe(cwd)],
+  });
+  const orch = new Orchestrator(cfg);
+  await orch.setWorkspaceRoleSelection(cwd, 'implementer');
+  const refreshed = await orch.refreshIssueCatalog(cwd);
+  assert.equal(refreshed.error, null);
+
+  const server = new HarnessServer(cfg, orch);
+  const port = await server.listen();
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  await new Promise<void>((resolve, reject) => {
+    socket.once('open', () => resolve());
+    socket.once('error', reject);
+  });
+
+  try {
+    await request(socket, 'hello', { token: server.token });
+    const response = await request(socket, 'project.overview.get', { cwd });
+    assert.equal(response['type'], 'project.overview');
+    const overview = response['overview'] as { items: Array<{ action: string; group: string; reasonCode: string }> };
+    assert.equal(overview.items[0]?.action, 'take');
+    assert.equal(overview.items[0]?.group, 'available');
+    assert.equal(overview.items[0]?.reasonCode, 'available');
+  } finally {
+    socket.close();
+    await server.close();
+  }
 });

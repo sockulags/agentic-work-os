@@ -329,6 +329,13 @@ export class HarnessServer {
           }),
         };
 
+      case 'project.overview.get':
+        return {
+          type: 'project.overview',
+          cwd: msg.cwd,
+          ...(await orchestrator.getProjectOverview(msg.cwd)),
+        };
+
       case 'agents.probe':
         return { type: 'agents.probe', agents: await this.#probeAgents() };
 
