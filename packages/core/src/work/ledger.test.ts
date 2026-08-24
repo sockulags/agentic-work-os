@@ -1,7 +1,24 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { HarnessEvent } from '@awos/protocol';
-import { foldEvidence, foldOutcomes, foldRetained, selectedForContext } from './ledger.js';
+import {
+  createExpectationSet,
+  createTransitionEvaluation,
+  type HarnessEvent,
+  type TransitionEvaluation,
+} from '@awos/protocol';
+import {
+  foldEvidence,
+  foldExpectationSetConflicts,
+  foldExpectationSets,
+  foldExpectationSetHistory,
+  foldExpectationSetSupersessions,
+  foldOutcomes,
+  foldRetained,
+  foldTransitionEvaluations,
+  foldTransitionEvaluationConflicts,
+  foldTransitionEvaluationHistory,
+  selectedForContext,
+} from './ledger.js';
 
 let seq = 0;
 
@@ -163,6 +180,174 @@ describe('selectedForContext', () => {
     assert.deepEqual(
       selectedForContext(items).map((entry) => entry.text),
       ['first', 'second'],
+    );
+  });
+});
+
+function evaluation(
+  attempt: number,
+  verdict: 'passed' | 'retry',
+  supersedesTransitionId: string | null = null,
+  transitionId = 'transition-a',
+): TransitionEvaluation {
+  const common = {
+    transitionId,
+    attempt,
+    runId: 'run-a',
+    actor: 'user' as const,
+    sourceStepId: 'draft',
+    targetStepId: 'approved',
+    expectationSetId: 'set-a',
+    candidate: { kind: 'working-tree' as const, id: `tree-${attempt}`, revision: `commit-${attempt}`, digest: `digest-${attempt}`, pinned: true },
+    evidenceIds: [],
+    facts: [],
+    provenance: [],
+    enforcement: [],
+    timestamp: 1_000 + attempt,
+    supersedesTransitionId,
+  };
+  if (verdict === 'passed') {
+    return createTransitionEvaluation({ ...common, verdict, refusal: null, override: null });
+  }
+  return createTransitionEvaluation({
+    ...common,
+    verdict,
+    refusal: {
+      unmetRequirementIds: ['test'],
+      reason: 'needs evidence',
+      required: { kind: 'evidence', evidence: { requirementIds: ['test'], description: 'run test' } },
+      responsibleActor: 'user',
+      nextAction: 'provide-evidence',
+      retryable: true,
+    },
+    override: null,
+  });
+}
+
+function expectationSet(id: string, supersedes: string | null = null) {
+  return createExpectationSet({
+    expectationSetId: id,
+    manifestDigest: `manifest-${id}`,
+    items: [],
+    authority: { sourceOwner: 'project', pinnedBy: 'user' },
+    supersedes,
+  });
+}
+
+describe('transition and expectation folds', () => {
+  test('keeps latest attempt and all earlier attempts after replay', () => {
+    const events = [
+      event({ kind: 'transition.evaluated', evaluation: evaluation(1, 'retry') }),
+      event({ kind: 'transition.evaluated', evaluation: evaluation(2, 'passed') }),
+    ];
+
+    assert.equal(foldTransitionEvaluations(events).get('transition-a')?.verdict, 'passed');
+    assert.deepEqual(
+      foldTransitionEvaluationHistory(events).get('transition-a')?.map((entry) => entry.attempt),
+      [1, 2],
+    );
+    assert.equal(events.filter((entry) => entry.kind === 'transition.evaluated').length, 2);
+  });
+
+  test('does not let duplicate or out-of-order attempts redefine replay truth', () => {
+    const attemptOne = event({ kind: 'transition.evaluated', evaluation: evaluation(1, 'retry') });
+    const attemptTwo = event({ kind: 'transition.evaluated', evaluation: evaluation(2, 'passed') });
+    const duplicateAttemptTwo = event({ kind: 'transition.evaluated', evaluation: evaluation(2, 'retry') });
+    const lateAttemptOne = event({ kind: 'transition.evaluated', evaluation: evaluation(1, 'passed') });
+    const events = [attemptOne, attemptTwo, duplicateAttemptTwo, lateAttemptOne];
+
+    assert.equal(foldTransitionEvaluations(events).get('transition-a')?.verdict, 'passed');
+    assert.deepEqual(
+      foldTransitionEvaluationHistory(events).get('transition-a')?.map((entry) => entry.attempt),
+      [1, 2],
+    );
+    assert.deepEqual(
+      foldTransitionEvaluationConflicts(events).get('transition-a')?.map((entry) => entry.attempt),
+      [2, 1],
+    );
+  });
+
+  test('rejects a fabricated passed evaluation and preserves the prior accepted truth', () => {
+    const first = evaluation(1, 'retry', null, 'transition-c');
+    const fabricated = {
+      ...evaluation(2, 'passed', null, 'transition-c'),
+      facts: [],
+      provenance: [],
+      enforcement: [{ requirementId: 'test', enforcement: 'required' as const }],
+    } as TransitionEvaluation;
+    const events = [
+      event({ kind: 'transition.evaluated', evaluation: first }),
+      event({ kind: 'transition.evaluated', evaluation: fabricated }),
+    ];
+
+    assert.equal(foldTransitionEvaluations(events).get('transition-c')?.attempt, 1);
+    assert.equal(foldTransitionEvaluations(events).get('transition-c')?.verdict, 'retry');
+    assert.deepEqual(
+      foldTransitionEvaluationHistory(events).get('transition-c')?.map((entry) => entry.attempt),
+      [1],
+    );
+    assert.deepEqual(
+      foldTransitionEvaluationConflicts(events).get('transition-c')?.map((entry) => entry.attempt),
+      [2],
+    );
+  });
+
+  test('rejects a replay that starts above the first attempt', () => {
+    const events = [
+      event({ kind: 'transition.evaluated', evaluation: evaluation(2, 'passed', null, 'transition-b') }),
+      event({ kind: 'transition.evaluated', evaluation: evaluation(1, 'retry', null, 'transition-b') }),
+    ];
+
+    assert.equal(foldTransitionEvaluations(events).get('transition-b')?.attempt, 1);
+    assert.deepEqual(
+      foldTransitionEvaluationConflicts(events).get('transition-b')?.map((entry) => entry.attempt),
+      [2],
+    );
+  });
+
+  test('replacement sets are additive and retain their supersession link', () => {
+    const first = expectationSet('set-a');
+    const replacement = expectationSet('set-b', 'set-a');
+    const events = [
+      event({ kind: 'expectation.set.created', expectationSet: first }),
+      event({ kind: 'expectation.set.created', expectationSet: replacement }),
+      event({
+        kind: 'expectation.set.superseded',
+        expectationSetId: 'set-a',
+        supersededByExpectationSetId: 'set-b',
+        supersedesTransitionId: 'transition-a',
+      }),
+      event({
+        kind: 'transition.evaluated',
+        evaluation: evaluation(1, 'passed', 'transition-a', 'transition-b'),
+      }),
+    ];
+
+    const sets = foldExpectationSets(events);
+    assert.equal(sets.size, 2);
+    assert.equal(sets.get('set-a')?.supersedes, null);
+    assert.equal(sets.get('set-b')?.supersedes, 'set-a');
+    assert.deepEqual(foldExpectationSetHistory(events).map((set) => set.expectationSetId), ['set-a', 'set-b']);
+    assert.equal(foldExpectationSetSupersessions(events).get('set-a'), 'set-b');
+    assert.equal(foldTransitionEvaluations(events).get('transition-b')?.supersedesTransitionId, 'transition-a');
+  });
+
+  test('keeps the first immutable set when a duplicate id is redefined', () => {
+    const first = expectationSet('set-a');
+    const conflicting = createExpectationSet({
+      ...first,
+      manifestDigest: 'manifest-conflict',
+    });
+    const events = [
+      event({ kind: 'expectation.set.created', expectationSet: first }),
+      event({ kind: 'expectation.set.created', expectationSet: conflicting }),
+    ];
+
+    assert.equal(foldExpectationSets(events).get('set-a')?.manifestDigest, 'manifest-set-a');
+    assert.deepEqual(foldExpectationSetHistory(events).map((set) => set.manifestDigest), ['manifest-set-a']);
+    assert.deepEqual(
+      foldExpectationSetConflicts(events).get('set-a')?.map((set) => set.manifestDigest),
+      ['manifest-conflict'],
     );
   });
 });

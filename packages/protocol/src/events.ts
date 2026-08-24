@@ -14,12 +14,14 @@
 
 import type {
   CheckResult,
+  ExpectationSet,
   EvidenceKind,
   EvidenceRef,
   GateOverride,
   RequirementResult,
   RetainedKind,
   RunClaim,
+  TransitionEvaluation,
   WorkingState,
 } from './evidence.js';
 
@@ -301,6 +303,31 @@ export interface GateEvaluatedBody {
   requirements: RequirementResult[];
   /** Present only when the project permits an override and somebody used one. */
   override: GateOverride | null;
+  /**
+   * The shared transition result. Optional only for transcripts written before the
+   * transition contract existed; new integration events always carry it.
+   */
+  evaluation?: TransitionEvaluation;
+}
+
+/** A general transition evaluation, kept separate from the reserved integration event. */
+export interface TransitionEvaluatedBody {
+  kind: 'transition.evaluated';
+  evaluation: TransitionEvaluation;
+}
+
+/** A newly pinned immutable expectation set. */
+export interface ExpectationSetCreatedBody {
+  kind: 'expectation.set.created';
+  expectationSet: ExpectationSet;
+}
+
+/** An append-only link from an old expectation set to its authorized replacement. */
+export interface ExpectationSetSupersededBody {
+  kind: 'expectation.set.superseded';
+  expectationSetId: string;
+  supersededByExpectationSetId: string;
+  supersedesTransitionId: string | null;
 }
 
 /**
@@ -446,6 +473,9 @@ export type HarnessEventBody =
   | RunClosedBody
   | EvidenceRecordedBody
   | GateEvaluatedBody
+  | TransitionEvaluatedBody
+  | ExpectationSetCreatedBody
+  | ExpectationSetSupersededBody
   | ContextRetainedBody
   | ArtifactUpdatedBody
   | ApprovalRequestedBody

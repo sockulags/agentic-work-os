@@ -17,6 +17,9 @@ import type {
   EvidenceKind,
   EvidenceRef,
   GateOverride,
+  ExpectationSet,
+  TransitionAttempt,
+  TransitionOverride,
   RetainedItem,
   RetainedKind,
   RunClaim,
@@ -38,8 +41,16 @@ import type {
   ProjectIssueDetail,
   ProjectIssueDetailSource,
   ProjectIssueThreadHistory,
+  ReferenceIdentity,
 } from '@awos/protocol';
-import { AGENT_IDS, PINNED_CONTEXT_MAX_CHARS, RETAINED_FILE, RUN_CONTEXT_MAX_CHARS } from '@awos/protocol';
+import {
+  AGENT_IDS,
+  PINNED_CONTEXT_MAX_CHARS,
+  RETAINED_FILE,
+  RUN_CONTEXT_MAX_CHARS,
+  WORKSPACE_FILE,
+  WORKSPACE_LOCAL_FILE,
+} from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
 import type { WorkerAdapter, AdapterContext } from './adapters/agent.js';
 import { createWorkerAdapter, probeWorkerProfiles, registeredWorkerProfiles } from './adapters/registry.js';
@@ -58,9 +69,25 @@ import {
   buildRetainedBlock,
   buildWorkItemBlock,
 } from './work/prompt.js';
-import { foldEvidence, foldOutcomes, foldRetained, selectedForContext } from './work/ledger.js';
+import {
+  foldEvidence,
+  foldExpectationSetConflicts,
+  foldExpectationSets,
+  foldExpectationSetHistory,
+  foldOutcomes,
+  foldRetained,
+  foldTransitionEvaluationHistory,
+  selectedForContext,
+} from './work/ledger.js';
 import { projectRunEvidence } from './work/runs.js';
-import { evaluateGate, explainGate, type GateDecision } from './work/gate.js';
+import {
+  buildIntegrationExpectationSet,
+  candidateIdentity,
+  evaluateGate,
+  evaluateIntegrationTransition,
+  explainGate,
+  type GateDecision,
+} from './work/gate.js';
 import { fetchIssue, parseIssueRef } from './work/github.js';
 import { explainIssueRoute } from './work/issue-route-presentation.js';
 import { projectIssueRoute } from './work/issue-route.js';
@@ -79,6 +106,57 @@ const execAsync = promisify(exec);
 
 function emptyAgentRecord<T>(factory: () => T): Record<AgentId, T> {
   return Object.fromEntries(AGENT_IDS.map((agent) => [agent, factory()])) as Record<AgentId, T>;
+}
+
+/** Pin every declaration that contributed to the effective integration/verify contract. */
+function workspaceIntegrationSource(
+  workspace: Extract<WorkspaceResolution, { status: 'ok' }>['workspace'],
+  head: string | null,
+): ReferenceIdentity {
+  const relevantFiles = new Set<string>(
+    [workspace.origins.integration, workspace.origins.verify].map((origin) =>
+      origin === 'local' ? WORKSPACE_LOCAL_FILE : WORKSPACE_FILE,
+    ),
+  );
+  const sources = workspace.sources.filter((source) => relevantFiles.has(source));
+  if (sources.length === 0) {
+    throw new Error('The effective integration and verification contract has no canonical source.');
+  }
+  const files = sources.map((source) => {
+    const locator = resolvePath(workspace.root, source);
+    const digest = contentHash(readFileSync(locator, 'utf8'));
+    return {
+      locator,
+      contentDigest: digest,
+      nativeRevision: `git:${head ?? 'none'};content:${digest}`,
+    };
+  });
+  const contentDigest = contentHash(JSON.stringify({
+    files,
+    origins: {
+      integration: workspace.origins.integration,
+      verify: workspace.origins.verify,
+    },
+  }));
+  return {
+    sourceKind: 'workspace-declaration',
+    locator: files.map((file) => file.locator).join('|'),
+    nativeRevision:
+      `git:${head ?? 'none'};origins:integration=${workspace.origins.integration},verify=${workspace.origins.verify}` +
+      `;sources:${files.map((file) => file.contentDigest).join(',')}`,
+    contentDigest,
+  };
+}
+
+/** Keep an invalid/no-workspace attempt recordable without pretending a config source exists. */
+function integrationFailureSource(cwd: string, candidate: WorkingState): ReferenceIdentity {
+  const digest = candidate.tree ?? contentHash(`${candidate.commit ?? 'unidentified'}:${resolvePath(cwd)}`);
+  return {
+    sourceKind: 'external-digest',
+    locator: resolvePath(cwd),
+    nativeRevision: candidate.commit ?? `working-tree:${digest}`,
+    contentDigest: digest,
+  };
 }
 
 /**
@@ -604,35 +682,162 @@ class Thread {
     }
 
     const workspace = this.#workspace(summary.cwd);
-    const allowOverride =
-      workspace.status === 'ok' ? workspace.workspace.integration.allowOverride : false;
-    if (override !== null && !allowOverride) {
-      // Refused rather than ignored: a caller that asked to bypass the gate has to learn
-      // that it did not happen, and a project that never opted in has no bypass to offer.
-      throw new Error(
-        'This workspace does not permit overriding the integration gate. Set integration.allowOverride if it should.',
-      );
+    const integration =
+      workspace.status === 'ok'
+        ? workspace.workspace.integration
+        : { requires: [], allowOverride: false };
+    const verify = workspace.status === 'ok' ? workspace.workspace.verify : [];
+    const invalidOverrideReason = override === null
+      ? undefined
+      : !integration.allowOverride
+        ? 'This workspace does not permit overriding the integration gate. Set integration.allowOverride if it should.'
+        : override.actor !== 'user'
+          ? 'An integration override needs an authorized user.'
+          : override.reason.trim() === ''
+            ? 'An override has to say why. It is going into the record.'
+            : undefined;
+
+    const candidate = await this.#workingState(agent);
+    let workspaceSource: ReferenceIdentity;
+    let invalidSourceReason: string | undefined;
+    if (workspace.status === 'ok') {
+      try {
+        workspaceSource = workspaceIntegrationSource(workspace.workspace, await headCommit(summary.cwd));
+      } catch {
+        workspaceSource = integrationFailureSource(summary.cwd, candidate);
+        invalidSourceReason = 'The workspace integration source could not be pinned, so the transition was refused.';
+      }
+    } else {
+      workspaceSource = integrationFailureSource(summary.cwd, candidate);
+      invalidSourceReason = 'The workspace has no valid canonical integration source, so the transition was refused.';
     }
-    if (override !== null && override.reason.trim() === '') {
-      throw new Error('An override has to say why. It is going into the record.');
+    const gateDecision = evaluateGate({
+      integration,
+      verify,
+      evidence: this.evidence(),
+      candidateTree: candidate.tree,
+    });
+    const configuredSet = buildIntegrationExpectationSet(integration, verify, workspaceSource);
+    const currentEvents = this.#store.events(this.id);
+    const expectationSets = foldExpectationSets(currentEvents);
+    const expectationConflicts = foldExpectationSetConflicts(currentEvents);
+    const expectationHistory = foldExpectationSetHistory(currentEvents);
+    const expectationConflict = expectationConflicts.get(configuredSet.expectationSetId);
+    const priorSet = [...expectationHistory]
+      .filter((set) => set.scope?.sourceStepId === 'lane')
+      .at(-1);
+    const expectationSet: ExpectationSet = expectationSets.get(configuredSet.expectationSetId) ?? {
+      ...configuredSet,
+      ...(priorSet === undefined || priorSet.expectationSetId === configuredSet.expectationSetId
+        ? {}
+        : { supersedes: priorSet.expectationSetId }),
+    };
+    if (!expectationSets.has(expectationSet.expectationSetId)) {
+      this.#record(null, {
+        kind: 'expectation.set.created',
+        expectationSet,
+      });
+      if (priorSet !== undefined && priorSet.expectationSetId !== expectationSet.expectationSetId) {
+        const previousHistory = foldTransitionEvaluationHistory(this.#store.events(this.id));
+        const previous = [...previousHistory.values()]
+          .flat()
+          .filter((evaluation) => evaluation.expectationSetId === priorSet.expectationSetId)
+          .sort((left, right) => left.timestamp - right.timestamp)
+          .at(-1);
+        this.#record(null, {
+          kind: 'expectation.set.superseded',
+          expectationSetId: priorSet.expectationSetId,
+          supersededByExpectationSetId: expectationSet.expectationSetId,
+          supersedesTransitionId: previous?.transitionId ?? null,
+        });
+      }
     }
 
-    const decision = await this.gate(agent);
-    const allowed = decision.allowed || override !== null;
+    const transitionPrefix = `${this.id}:lane.integration:${agent}:`;
+    const history = foldTransitionEvaluationHistory(this.#store.events(this.id));
+    const transitionId = `${transitionPrefix}${expectationSet.expectationSetId}`;
+    const previousAttempt = history.get(transitionId)?.at(-1);
+    const previousTransition = [...history.values()]
+      .flat()
+      .filter((evaluation) => evaluation.transitionId.startsWith(transitionPrefix))
+      .sort((left, right) => left.timestamp - right.timestamp)
+      .at(-1);
+    const attempt: TransitionAttempt = {
+      transitionId,
+      attempt: (previousAttempt?.attempt ?? 0) + 1,
+      runId: this.#latestRun(agent)?.runId ?? null,
+      actor: 'user',
+      sourceStepId: 'lane',
+      targetStepId: 'workspace',
+      expectationSetId: expectationSet.expectationSetId,
+      candidate: candidateIdentity(candidate.tree, candidate.commit),
+      evidenceIds: gateDecision.requirements
+        .map((requirement) => requirement.evidenceId)
+        .filter((evidenceId): evidenceId is string => evidenceId !== null),
+      supersedesTransitionId:
+        previousTransition !== undefined && previousTransition.transitionId !== transitionId
+          ? previousTransition.transitionId
+          : null,
+    };
+    const transitionOverride: TransitionOverride | null = invalidOverrideReason === undefined && override !== null
+      ? {
+          enforcement: 'required',
+          permission: 'explicit',
+          permissionGranted: true,
+          actor: 'user',
+          authorizedUserId: 'user',
+          reason: override.reason,
+        }
+      : null;
+    const invalidAttemptReason = expectationConflict !== undefined
+      ? 'The pinned expectation set has conflicting immutable definitions and cannot be evaluated.'
+      : invalidSourceReason;
+    const decision = evaluateIntegrationTransition({
+      integration,
+      verify,
+      evidence: this.evidence(),
+      candidateTree: candidate.tree,
+      attempt,
+      expectationSet,
+      timestamp: Date.now(),
+      override: transitionOverride,
+      ...(invalidOverrideReason === undefined ? {} : { invalidOverrideReason }),
+      ...(invalidAttemptReason === undefined ? {} : { invalidAttemptReason }),
+    });
 
     // Recorded before anything is applied, so the decision exists in the log whether or
-    // not the patch that follows works out.
+    // not the patch that follows works out. The legacy fields stay on the same event for
+    // existing transcript and gate consumers; `evaluation` is the shared truth.
     this.#record(agent, {
       kind: 'gate.evaluated',
       gate: 'lane.integration',
-      allowed,
-      candidate: decision.candidate,
+      allowed: decision.allowed,
+      candidate,
       requirements: decision.requirements,
       override,
+      evaluation: decision.evaluation,
+      ts: decision.evaluation.timestamp,
     });
 
-    if (!allowed) {
-      const detail = `integration is gated: ${explainGate(decision)}`;
+    if (invalidOverrideReason !== undefined) {
+      this.#record(agent, {
+        kind: 'lane.updated',
+        status: 'refused',
+        path: lane.path,
+        detail: invalidOverrideReason,
+      });
+      this.#onState();
+      // The invalid attempt is recorded, but preserve the existing request boundary and
+      // error text for callers that used the old integration API.
+      throw new Error(invalidOverrideReason);
+    }
+
+    if (!decision.allowed) {
+      const detail = `integration is gated: ${
+        decision.requirements.length === 0 && decision.refusal !== null
+          ? decision.refusal.reason
+          : explainGate(decision)
+      }`;
       this.#record(agent, {
         kind: 'lane.updated',
         status: 'refused',
@@ -644,7 +849,10 @@ class Thread {
       return { ok: false, detail };
     }
 
-    const result = await integrateLane(lane, summary.cwd);
+    const result = await integrateLane(lane, summary.cwd, {
+      expectedTree: candidate.tree,
+      expectedRevision: candidate.commit,
+    });
     if (!result.ok) {
       this.#record(agent, {
         kind: 'lane.updated',

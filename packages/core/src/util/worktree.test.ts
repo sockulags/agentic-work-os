@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { provisionLane, laneDiff, integrateLane, removeLane } from './worktree.js';
+import { headCommit, snapshotWorkingTree } from './git.js';
 
 /**
  * These drive real git in throwaway repos. A lane is a real worktree, and the failure
@@ -89,6 +90,50 @@ describe('lanes', () => {
     assert.equal(readFileSync(join(base, 'a.txt'), 'utf8'), 'changed in the lane\n');
     assert.equal(readFileSync(join(base, 'added.txt'), 'utf8'), 'new from the lane\n');
     assert.equal(readFileSync(join(lane.path, 'a.txt'), 'utf8'), 'changed in the lane\n');
+  });
+
+  test('refuses a lane that changed after its evaluated tree was captured', async () => {
+    const base = makeRepo();
+    const result = await provisionLane(base, lanePath());
+    assert.ok(result.ok);
+    const lane = result.lane;
+
+    writeFileSync(join(lane.path, 'a.txt'), 'the evaluated version\n');
+    const evaluatedTree = await snapshotWorkingTree(lane.path);
+    assert.ok(evaluatedTree);
+
+    writeFileSync(join(lane.path, 'a.txt'), 'a different version\n');
+    const integrated = await integrateLane(lane, base, { expectedTree: evaluatedTree });
+
+    assert.equal(integrated.ok, false);
+    assert.match(integrated.ok ? '' : integrated.reason, /changed after evaluation/);
+    assert.equal(readFileSync(join(base, 'a.txt'), 'utf8'), 'one\n');
+  });
+
+  test('refuses a lane whose revision changed even when its tree did not', async () => {
+    const base = makeRepo();
+    const result = await provisionLane(base, lanePath());
+    assert.ok(result.ok);
+    const lane = result.lane;
+
+    writeFileSync(join(lane.path, 'a.txt'), 'the evaluated version\n');
+    const evaluatedTree = await snapshotWorkingTree(lane.path);
+    const evaluatedRevision = await headCommit(lane.path);
+    assert.ok(evaluatedTree);
+    assert.ok(evaluatedRevision);
+
+    execFileSync('git', ['add', 'a.txt'], { cwd: lane.path });
+    execFileSync('git', ['commit', '-qm', 'lane revision'], { cwd: lane.path });
+    assert.equal(await snapshotWorkingTree(lane.path), evaluatedTree);
+
+    const integrated = await integrateLane(lane, base, {
+      expectedTree: evaluatedTree,
+      expectedRevision: evaluatedRevision,
+    });
+
+    assert.equal(integrated.ok, false);
+    assert.match(integrated.ok ? '' : integrated.reason, /changed after evaluation/);
+    assert.equal(readFileSync(join(base, 'a.txt'), 'utf8'), 'one\n');
   });
 
   test('integrating twice is not integrating twice', async () => {
