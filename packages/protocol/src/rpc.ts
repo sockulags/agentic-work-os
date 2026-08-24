@@ -255,6 +255,11 @@ export type ClientRequest =
 
 export type ClientMessage = ClientRequest & { requestId: string };
 
+/** Ordinary evidence writes must never carry adapter-produced visual evidence. */
+export function hasVisualEvidencePayload(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && Object.prototype.hasOwnProperty.call(value, 'visual');
+}
+
 // ---------------------------------------------------------------------------
 // Server → client
 // ---------------------------------------------------------------------------

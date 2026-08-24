@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, appendFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ThreadStore } from './thread-store.js';
+import type { AdapterEvent, HarnessEvent } from '@awos/protocol';
+import { isCurrentEventLogSnapshot, isEventLogSnapshot, ThreadStore } from './thread-store.js';
 
 let dir: string;
 
@@ -16,6 +17,36 @@ afterEach(() => {
 });
 
 describe('ThreadStore', () => {
+  test('rejects worker-attributed visual evidence before appending it', () => {
+    const store = new ThreadStore(dir);
+    const thread = store.create({ cwd: '/repo' });
+    const visualEvent: AdapterEvent = {
+      kind: 'evidence.recorded',
+      evidenceId: 'visual-worker-evidence',
+      runId: null,
+      workItemId: null,
+      evidenceKind: 'artifact',
+      ref: { eventId: null, url: null, label: 'visual' },
+      summary: 'visual',
+      state: { commit: null, tree: null, dirty: false },
+      check: null,
+      visual: {
+        kind: 'model-rubric',
+        reference: { eventId: 'ref-event', artifactId: 'ref', locator: 'artifact://ref', revision: '1', digest: 'ref' },
+        candidate: { eventId: 'candidate-event', artifactId: 'candidate', locator: 'artifact://candidate', revision: '1', digest: 'candidate' },
+        rubric: { eventId: 'rubric-event', id: 'visual', revision: '1', digest: 'rubric' },
+        evaluator: { eventId: 'capability-event', id: 'independent-model', version: '1' },
+        outcome: 'satisfied',
+      },
+    };
+
+    assert.throws(
+      () => store.append(thread.id, 'codex', visualEvent),
+      /trusted core adapter/,
+    );
+    assert.equal(store.events(thread.id).length, 0);
+  });
+
   test('assigns strictly increasing seq across agents', () => {
     const store = new ThreadStore(dir);
     const thread = store.create({ cwd: '/repo' });
@@ -27,6 +58,36 @@ describe('ThreadStore', () => {
     // Ordering must come from the store, not from two racing child processes.
     assert.deepEqual([a.seq, b.seq, c.seq], [1, 2, 3]);
     assert.equal(store.head(thread.id), 3);
+  });
+
+  test('creates a frozen store-owned snapshot that becomes stale after append', () => {
+    const store = new ThreadStore(dir);
+    const thread = store.create({ cwd: '/repo' });
+    store.append(thread.id, 'codex', { kind: 'message.completed', itemId: '1', text: 'a' });
+
+    const snapshot = store.snapshot(thread.id);
+    assert.equal(isEventLogSnapshot(snapshot), true);
+    assert.equal(isCurrentEventLogSnapshot(snapshot), true);
+    assert.equal(Object.isFrozen(snapshot), true);
+    assert.equal(Object.isFrozen(snapshot.events), true);
+    assert.equal(Object.isFrozen(snapshot.events[0]), true);
+    assert.throws(() => (snapshot.events as HarnessEvent[]).push(snapshot.events[0]!));
+    assert.throws(() => ((snapshot.events[0] as HarnessEvent & { text: string }).text = 'changed'));
+
+    const copied = [...snapshot.events];
+    assert.equal(isEventLogSnapshot(copied), false);
+    assert.equal(isEventLogSnapshot({ ...snapshot }), false);
+
+    // Public transcript reads cannot mutate the append-only records used by a future view.
+    store.events(thread.id).push(snapshot.events[0]!);
+    assert.equal(store.snapshot(thread.id).events.length, 1);
+
+    store.append(thread.id, 'codex', { kind: 'message.completed', itemId: '2', text: 'b' });
+    assert.equal(snapshot.events.length, 1);
+    assert.equal(isCurrentEventLogSnapshot(snapshot), false);
+    const current = store.snapshot(thread.id);
+    assert.equal(isCurrentEventLogSnapshot(current), true);
+    assert.equal(current.events.length, 2);
   });
 
   test('eventsSince returns only events above the watermark', () => {

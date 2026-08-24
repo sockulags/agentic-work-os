@@ -28,7 +28,7 @@ export const CORE_EXPECTATION_ITEM_IDS: readonly string[] = Object.freeze(
   CORE_EXPECTATION_MANIFEST.map((entry) => entry.id),
 );
 
-/** No model/pixel provider is registered by core; these are the four closed built-ins. */
+/** Core owns the closed evaluator kinds but registers no model provider or runtime capability. */
 export const CORE_RESOLVER_EVALUATOR_KINDS: readonly CoreEvaluatorKind[] = CORE_EVALUATOR_KINDS;
 export const CORE_EVALUATOR_PROFILE_IDS: readonly string[] = Object.freeze([]);
 

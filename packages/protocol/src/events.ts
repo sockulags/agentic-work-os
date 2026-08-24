@@ -21,11 +21,13 @@ import type {
   EvidenceRef,
   GateOverride,
   HumanAuthority,
+  PixelCaptureContract,
   RequirementResult,
   RetainedKind,
   RunClaim,
   TypedAnswer,
   TransitionEvaluation,
+  VisualEvidence,
   WorkingState,
 } from './evidence.js';
 
@@ -285,10 +287,47 @@ export interface EvidenceRecordedBody {
   state: WorkingState;
   /** Set when this came from running a check the workspace names. */
   check: CheckResult | null;
+  /** Optional structured visual evidence; only a trusted core adapter may populate this. */
+  visual?: VisualEvidence;
   /** Optional explicit association for evidence-backed planning expectations. */
   expectationSetId?: string | null;
   expectationItemId?: string | null;
 }
+
+/** Immutable visual artifact source published by a trusted core adapter. */
+export interface VisualArtifactRecordedBody {
+  kind: 'visual.artifact.recorded';
+  /** Whether this immutable image is the pinned reference or the evaluated candidate. */
+  role: 'reference' | 'candidate';
+  artifactId: string;
+  locator: string;
+  revision: string;
+  digest: string;
+  selector?: string | null;
+  /** Capture identity is required for pixel comparisons and may be null for semantic-only use. */
+  capture: PixelCaptureContract | null;
+}
+
+/** Immutable rubric source published by a trusted core adapter. */
+export interface VisualRubricRecordedBody {
+  kind: 'visual.rubric.recorded';
+  rubricId: string;
+  revision: string;
+  digest: string;
+}
+
+/** Immutable evaluator capability identity published by a trusted core adapter. */
+export interface VisualEvaluatorCapabilityRecordedBody {
+  kind: 'visual.evaluator-capability.recorded';
+  evaluatorId: string;
+  version: string;
+  independent: boolean;
+}
+
+export type TrustedVisualEventBody =
+  | VisualArtifactRecordedBody
+  | VisualRubricRecordedBody
+  | VisualEvaluatorCapabilityRecordedBody;
 
 /** A typed answer submitted by the authorized human, never inferred from a message. */
 export interface AnswerRecordedBody {
@@ -510,6 +549,7 @@ export type HarnessEventBody =
   | RunCompletedBody
   | RunClosedBody
   | EvidenceRecordedBody
+  | TrustedVisualEventBody
   | AnswerRecordedBody
   | HumanAttestationRecordedBody
   | GateEvaluatedBody
@@ -531,6 +571,25 @@ export type HarnessEvent = HarnessEventMeta & HarnessEventBody;
 
 /** What an adapter emits, before the store stamps identity and ordering. */
 export type AdapterEvent = HarnessEventBody & {
+  turnId?: string | null;
+  ts?: number;
+};
+
+const TRUSTED_VISUAL_EVENT_KINDS: readonly TrustedVisualEventBody['kind'][] = [
+  'visual.artifact.recorded',
+  'visual.rubric.recorded',
+  'visual.evaluator-capability.recorded',
+];
+
+export function isTrustedVisualEventKind(value: unknown): value is TrustedVisualEventBody['kind'] {
+  return typeof value === 'string' && (TRUSTED_VISUAL_EVENT_KINDS as readonly string[]).includes(value);
+}
+
+/** Adapter-facing event contract; visual evidence is reserved for the trusted core path. */
+export type WorkerAdapterEvent = (
+  | Exclude<HarnessEventBody, EvidenceRecordedBody | TrustedVisualEventBody>
+  | Omit<EvidenceRecordedBody, 'visual'>
+) & {
   turnId?: string | null;
   ts?: number;
 };

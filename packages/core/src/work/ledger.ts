@@ -1,15 +1,19 @@
 import type {
   ClaimSource,
+  EvaluatorCapabilityIdentity,
   EvidenceItem,
   ExpectationSet,
   HarnessEvent,
   HumanAttestationRecord,
+  PixelCaptureContract,
   RetainedItem,
+  RubricIdentity,
   RunOutcome,
   TypedAnswerRecord,
   TransitionEvaluation,
+  VisualArtifactIdentity,
 } from '@awos/protocol';
-import { validateTransitionEvaluation } from '@awos/protocol';
+import { isTrustedVisualEventKind, validateTransitionEvaluation } from '@awos/protocol';
 
 /**
  * Reading outcomes, evidence and retained context back out of the log.
@@ -32,6 +36,113 @@ function sameRecord(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+interface VisualArtifactSourceRecord {
+  readonly eventId: string;
+  readonly role: 'reference' | 'candidate';
+  readonly identity: VisualArtifactIdentity;
+  readonly capture: PixelCaptureContract | null;
+}
+
+interface VisualRubricSourceRecord extends RubricIdentity {
+  readonly eventId: string;
+}
+
+interface VisualCapabilitySourceRecord extends EvaluatorCapabilityIdentity {
+  readonly eventId: string;
+  readonly independent: boolean;
+}
+
+interface VisualSourceIndex {
+  readonly artifacts: ReadonlyMap<string, VisualArtifactSourceRecord>;
+  readonly rubrics: ReadonlyMap<string, VisualRubricSourceRecord>;
+  readonly capabilities: ReadonlyMap<string, VisualCapabilitySourceRecord>;
+  /** Duplicate event identities with different immutable content are never usable. */
+  readonly conflicts: ReadonlySet<string>;
+}
+
+/**
+ * Fold only immutable visual source events. The first event identity remains authoritative;
+ * a later redefinition never replaces it and instead makes that identity unusable.
+ *
+ * This index is intentionally private to the evaluator boundary. Callers provide the
+ * append-only HarnessEvent log, never a source map or array they can author independently.
+ */
+export function foldVisualSourceEvents(events: readonly HarnessEvent[], expectedThreadId?: string): VisualSourceIndex {
+  const artifacts = new Map<string, VisualArtifactSourceRecord>();
+  const rubrics = new Map<string, VisualRubricSourceRecord>();
+  const capabilities = new Map<string, VisualCapabilitySourceRecord>();
+  const conflicts = new Set<string>();
+  const seen = new Map<string, string>();
+
+  for (const event of events) {
+    if (event === null || typeof event !== 'object') continue;
+    if (!isTrustedVisualEventKind(event.kind)) continue;
+    if (!validEventEnvelope(event)) {
+      if (typeof event.id === 'string') conflicts.add(event.id);
+      continue;
+    }
+    if (expectedThreadId !== undefined && event.threadId !== expectedThreadId) {
+      conflicts.add(event.id);
+      continue;
+    }
+    if (event.agent !== null) {
+      conflicts.add(event.id);
+      continue;
+    }
+
+    const fingerprint = JSON.stringify(event);
+    const prior = seen.get(event.id);
+    if (prior !== undefined) {
+      if (prior !== fingerprint) conflicts.add(event.id);
+      continue;
+    }
+    seen.set(event.id, fingerprint);
+
+    switch (event.kind) {
+      case 'visual.artifact.recorded':
+        artifacts.set(event.id, {
+          eventId: event.id,
+          role: event.role,
+          identity: {
+            eventId: event.id,
+            artifactId: event.artifactId,
+            locator: event.locator,
+            revision: event.revision,
+            digest: event.digest,
+            ...(event.selector === undefined ? {} : { selector: event.selector }),
+          },
+          capture: event.capture,
+        });
+        break;
+      case 'visual.rubric.recorded':
+        rubrics.set(event.id, {
+          eventId: event.id,
+          id: event.rubricId,
+          revision: event.revision,
+          digest: event.digest,
+        });
+        break;
+      case 'visual.evaluator-capability.recorded':
+        capabilities.set(event.id, {
+          eventId: event.id,
+          id: event.evaluatorId,
+          version: event.version,
+          independent: event.independent,
+        });
+        break;
+    }
+  }
+
+  return { artifacts, rubrics, capabilities, conflicts };
+}
+
+function validEventEnvelope(event: HarnessEvent): boolean {
+  return typeof event.id === 'string' && event.id.trim() !== '' && event.id.length <= 512 &&
+    Number.isInteger(event.seq) && event.seq > 0 &&
+    typeof event.threadId === 'string' && event.threadId.trim() !== '' &&
+    Number.isFinite(event.ts);
+}
+
 /** The current outcome of each run, keyed by run id. */
 export function foldOutcomes(events: readonly HarnessEvent[]): Map<string, RunOutcome> {
   const outcomes = new Map<string, RunOutcome>();
@@ -48,11 +159,16 @@ export function foldOutcomes(events: readonly HarnessEvent[]): Map<string, RunOu
   return outcomes;
 }
 
-/** Every evidence item, oldest first, each at its latest version. */
+/** Every evidence item, oldest first; visual identities remain at their first definition. */
 export function foldEvidence(events: readonly HarnessEvent[]): EvidenceItem[] {
   const items = new Map<string, EvidenceItem>();
   for (const event of events) {
     if (event.kind !== 'evidence.recorded') continue;
+    const visual = event.agent === null ? event.visual : undefined;
+    const prior = items.get(event.evidenceId);
+    // Visual identities are immutable. A changed reference, candidate, capture or
+    // measurement gets a new evidence id; it must not rewrite the record being judged.
+    if (prior !== undefined && (prior.visual !== undefined || visual !== undefined)) continue;
     items.set(event.evidenceId, {
       id: event.evidenceId,
       runId: event.runId,
@@ -63,6 +179,7 @@ export function foldEvidence(events: readonly HarnessEvent[]): EvidenceItem[] {
       summary: event.summary,
       state: event.state,
       check: event.check,
+      ...(visual === undefined ? {} : { visual: cloneVisualEvidence(visual) }),
       ...(event.expectationSetId === undefined ? {} : { expectationSetId: event.expectationSetId }),
       ...(event.expectationItemId === undefined ? {} : { expectationItemId: event.expectationItemId }),
       source: sourceOf(event),
@@ -70,6 +187,12 @@ export function foldEvidence(events: readonly HarnessEvent[]): EvidenceItem[] {
     });
   }
   return [...items.values()];
+}
+
+function cloneVisualEvidence<T>(visual: T): T {
+  // Visual evidence is a structured immutable boundary. Clone the JSON-shaped contract so
+  // callers cannot mutate the folded record through an event object they already hold.
+  return JSON.parse(JSON.stringify(visual)) as T;
 }
 
 /** Every typed answer, oldest first, with corrections folded by answer identity. */

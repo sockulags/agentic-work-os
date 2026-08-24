@@ -49,6 +49,7 @@ import type {
 import {
   AGENT_IDS,
   createTransitionEvaluation,
+  isTrustedVisualEventKind,
   PINNED_CONTEXT_MAX_CHARS,
   RETAINED_FILE,
   RUN_CONTEXT_MAX_CHARS,
@@ -94,8 +95,8 @@ import {
   buildGuardrailExpectationSet,
   candidateIdentity,
   evaluateGate,
-  evaluateIntegrationTransition,
-  evaluateGuardedTransition,
+  evaluateOwnedGuardedTransition,
+  evaluateOwnedIntegrationTransition,
   explainGate,
   type GateDecision,
   type TransitionDecision,
@@ -906,7 +907,7 @@ class Thread {
       : configuredResult.conflicts.length > 0
         ? `The attached guardrails have conflicting definitions for: ${configuredResult.conflicts.join(', ')}.`
       : invalidSourceReason;
-    const decision = evaluateIntegrationTransition({
+    const decision = this.#store.withTrustedThreadContext(this.id, () => evaluateOwnedIntegrationTransition({
       integration,
       verify,
       evidence: this.evidence(),
@@ -919,7 +920,8 @@ class Thread {
       ...(invalidAttemptReason === undefined ? {} : { invalidAttemptReason }),
       guardrails: integrationGuardrails,
       events: currentEvents,
-    });
+      producingWorkerProfileId: agent,
+    }));
 
     // Recorded before anything is applied, so the decision exists in the log whether or
     // not the patch that follows works out. The legacy fields stay on the same event for
@@ -1135,9 +1137,10 @@ class Thread {
     const started = this.#runStarted(input.runId);
     if (!started) throw new Error(`No run ${input.runId} in this thread.`);
 
+    const evidenceId = input.evidenceId ?? randomUUID();
     this.#record(null, {
       kind: 'evidence.recorded',
-      evidenceId: input.evidenceId ?? randomUUID(),
+      evidenceId,
       runId: input.runId,
       workItemId: started.workItemId,
       evidenceKind: input.kind,
@@ -1430,7 +1433,7 @@ class Thread {
       evidenceIds: [],
       supersedesTransitionId: previous?.transitionId ?? null,
     };
-    const evaluation = evaluateGuardedTransition({
+    const evaluation = this.#store.withTrustedThreadContext(this.id, () => evaluateOwnedGuardedTransition({
       attempt,
       expectationSet: configuredSet,
       timestamp: Date.now(),
@@ -1438,7 +1441,7 @@ class Thread {
       verify: workspace.status === 'ok' ? workspace.workspace.verify : [],
       evidence: this.evidence(),
       events: this.#store.events(this.id),
-    });
+    }));
     const invalidReason = workspace.status !== 'ok'
       ? 'The workspace declaration is unavailable, so the planning transition was refused.'
       : sourceFailureReason ?? (
@@ -1723,6 +1726,12 @@ class Thread {
   #record(agent: AgentId | null, body: AdapterEvent): void {
     if (agent !== null && (body.kind === 'answer.recorded' || body.kind === 'attestation.recorded' || body.kind === 'human.attestation.recorded')) {
       throw new Error('Human answer and attestation records require the core human-authority boundary.');
+    }
+    if (agent !== null && (
+      (body.kind === 'evidence.recorded' && body.visual !== undefined) ||
+      isTrustedVisualEventKind(body.kind)
+    )) {
+      throw new Error('Visual evidence can only be recorded by a trusted core adapter.');
     }
     const event = this.#store.append(this.id, agent, body);
 

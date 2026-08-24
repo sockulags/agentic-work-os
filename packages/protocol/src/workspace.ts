@@ -16,7 +16,7 @@
  * the shape both ends agree on.
  */
 
-import type { EvidenceKind, Enforcement } from './evidence.js';
+import type { EvidenceKind, Enforcement, PixelCaptureContract } from './evidence.js';
 import type { AgentId, WorkerProfileId } from './events.js';
 
 /**
@@ -135,17 +135,8 @@ export interface WorkspaceGuardrailCorrection {
   onExhausted: WorkspaceGuardrailExhaustedAction;
 }
 
-/** Capture inputs that must be fixed for an exact-pixel guardrail. */
-export interface WorkspacePixelCaptureContract {
-  browser: string;
-  runtime: string;
-  viewport: string;
-  dpr: number;
-  fonts: string;
-  data: string;
-  animation: string;
-  region: string;
-}
+/** Workspace declarations reuse the bounded, runtime-neutral capture contract. */
+export type WorkspacePixelCaptureContract = PixelCaptureContract;
 
 export interface WorkspaceVerificationParameters {
   checks: string[];
@@ -170,6 +161,8 @@ export interface WorkspaceHumanAttestationParameters extends WorkspaceExpectatio
 
 export interface WorkspacePixelDiffParameters extends WorkspaceExpectationParameters {
   capture?: WorkspacePixelCaptureContract;
+  /** Exact pixel comparison may be selected, but absolute enforcement requires it explicitly. */
+  exact?: boolean;
 }
 
 export interface WorkspaceModelRubricParameters extends WorkspaceExpectationParameters {
