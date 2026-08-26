@@ -193,6 +193,41 @@ describe('QwenCodeAdapter', () => {
     assert.equal(events.some((event) => event.kind === 'turn.completed' && event.reason === 'completed'), true);
   });
 
+  test('records a stream that ends without a result as an error, not a completion', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    const adapter = new QwenCodeAdapter(context(events), target, {
+      query: () => fakeQuery([
+        { type: 'system', subtype: 'init', uuid: 's', session_id: 'qwen-session-1', model: 'qwen3.8-27b-local' },
+        { type: 'assistant', uuid: 'final-uuid', session_id: 'qwen-session-1', parent_tool_use_id: null, message: { id: 'message', type: 'message', role: 'assistant', model: 'qwen3.8-27b-local', content: [{ type: 'text', text: 'half an answer' }], usage: { input_tokens: 1, output_tokens: 1 } } },
+      ]),
+    });
+
+    await adapter.sendTurn('inspect');
+
+    const terminal = events.filter((event) => event.kind === 'turn.completed');
+    assert.equal(terminal.length, 1);
+    assert.equal(terminal[0]?.kind === 'turn.completed' ? terminal[0].reason : null, 'error');
+    const detail = terminal[0]?.kind === 'turn.completed' ? terminal[0].error : null;
+    assert.match(detail ?? '', /stream ended without a result/);
+    assert.match(detail ?? '', /2 messages arrived, the last of kind assistant/);
+    const failure = events.find((event) => event.kind === 'error');
+    assert.equal(failure?.kind === 'error' ? failure.severity : null, 'turn');
+    assert.equal(failure?.kind === 'error' ? failure.message : null, detail);
+  });
+
+  test('reports an empty stream as an error that records no message arrived', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    const adapter = new QwenCodeAdapter(context(events), target, { query: () => fakeQuery([]) });
+
+    await adapter.sendTurn('inspect');
+
+    const terminal = events.find((event) => event.kind === 'turn.completed');
+    assert.equal(terminal?.kind === 'turn.completed' ? terminal.reason : null, 'error');
+    assert.match(terminal?.kind === 'turn.completed' ? terminal.error ?? '' : '', /no messages arrived/);
+  });
+
   test('rejects a concurrent inference without queuing and releases the slot', async () => {
     resetQwenInferenceSlotForTests();
     const first = new QwenCodeAdapter(context([]), target, { query: () => fakeQuery([], 30) });

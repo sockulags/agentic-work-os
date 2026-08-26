@@ -226,6 +226,9 @@ export class QwenCodeAdapter implements WorkerAdapter {
   #timedOut = false;
   #terminalEmitted = false;
   #turnError: string | null = null;
+  #sawResult = false;
+  #messageCount = 0;
+  #lastMessageKind: string | null = null;
   #resumeNotFound: QwenResumeNotFoundError | null = null;
   #sawModelOrToolContent = false;
   #verifyCommands: string[];
@@ -279,6 +282,9 @@ export class QwenCodeAdapter implements WorkerAdapter {
       this.#timedOut = false;
       this.#terminalEmitted = false;
       this.#turnError = null;
+      this.#sawResult = false;
+      this.#messageCount = 0;
+      this.#lastMessageKind = null;
       this.#resumeNotFound = null;
       this.#sawModelOrToolContent = false;
       this.#turnId = randomUUID();
@@ -356,7 +362,18 @@ export class QwenCodeAdapter implements WorkerAdapter {
       const resumeNotFound = this.#recoverableResumeNotFound();
       if (resumeNotFound !== null) throw resumeNotFound;
       if (this.#turnError !== null) throw new Error(this.#turnError);
-      if (!this.#terminalEmitted) this.#emitCompleted(this.#interrupted ? 'interrupted' : 'completed', null);
+      if (!this.#terminalEmitted) {
+        // Iterator exhaustion only proves the stream stopped. Without a recognised SDK
+        // result there is no evidence the turn finished, and the canonical transcript must
+        // not claim one: a later worker replays this record as the state of the thread.
+        if (this.#interrupted) this.#emitCompleted('interrupted', null);
+        else if (this.#sawResult) this.#emitCompleted('completed', null);
+        else {
+          const detail = this.#unterminatedStreamDetail();
+          this.#ctx.emit({ kind: 'error', severity: 'turn', message: detail, turnId: this.#turnId });
+          this.#emitCompleted('error', detail);
+        }
+      }
     } catch (error) {
       if (this.#interrupted && !this.#timedOut) {
         if (!this.#terminalEmitted) this.#emitCompleted('interrupted', null);
@@ -470,6 +487,8 @@ export class QwenCodeAdapter implements WorkerAdapter {
   }
 
   #onMessage(message: SDKMessage): void {
+    this.#messageCount += 1;
+    this.#lastMessageKind = message.type;
     if (isSDKSystemMessage(message)) {
       this.#sessionId = message.session_id;
       this.#ctx.onSessionId(message.session_id);
@@ -503,6 +522,7 @@ export class QwenCodeAdapter implements WorkerAdapter {
     }
     if (isSDKResultMessage(message)) {
       if (this.#recoverableResumeNotFound() !== null) return;
+      this.#sawResult = true;
       this.#sessionId = message.session_id;
       this.#ctx.onSessionId(message.session_id);
       this.#model = this.#model ?? this.#target.model;
@@ -586,6 +606,14 @@ export class QwenCodeAdapter implements WorkerAdapter {
     if (this.#terminalEmitted) return;
     this.#terminalEmitted = true;
     this.#ctx.emit({ kind: 'turn.completed', turnId: this.#turnId, reason, error, durationMs: Date.now() - this.#turnStartedAt });
+  }
+
+  /** Says which of the two silent endings happened: nothing arrived, or a stream cut short. */
+  #unterminatedStreamDetail(): string {
+    const observed = this.#messageCount === 0
+      ? 'no messages arrived'
+      : `${this.#messageCount} message${this.#messageCount === 1 ? '' : 's'} arrived, the last of kind ${this.#lastMessageKind ?? 'unknown'}`;
+    return `The Qwen Code stream ended without a result (${observed}).`;
   }
 
   #recoverableResumeNotFound(): QwenResumeNotFoundError | null {
