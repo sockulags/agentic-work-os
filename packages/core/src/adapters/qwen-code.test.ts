@@ -40,6 +40,16 @@ function context(events: AdapterEvent[], permissionMode: PermissionMode = 'defau
   };
 }
 
+// A turn only counts as finished when the SDK reports a result. Tests that are about
+// something else still have to terminate their stream, or the adapter rejects the turn.
+function successResult(): unknown {
+  return {
+    type: 'result', subtype: 'success', uuid: 'result', session_id: 'qwen-session-1',
+    is_error: false, duration_ms: 1, duration_api_ms: 1, num_turns: 1, result: 'done',
+    usage: { input_tokens: 1, output_tokens: 1 }, permission_denials: [],
+  };
+}
+
 function fakeQuery(messages: unknown[], delayMs = 0): Query {
   const iterator = {
     async *[Symbol.asyncIterator](): AsyncGenerator<unknown> {
@@ -94,7 +104,7 @@ describe('QwenCodeAdapter', () => {
       const adapter = new QwenCodeAdapter(context([]), target, {
         query: (args) => {
           options.env = args.options.env as Record<string, string> | undefined;
-          return fakeQuery([]);
+          return fakeQuery([successResult()]);
         },
       });
       await adapter.sendTurn('inspect environment');
@@ -127,6 +137,7 @@ describe('QwenCodeAdapter', () => {
           const canUseTool = args.options.canUseTool;
           if (!canUseTool) throw new Error('canUseTool missing');
           decision = await canUseTool('edit', { file_path: 'README.md' }, { signal: new AbortController().signal });
+          yield successResult();
         },
         getSessionId: () => 'qwen-session-1', interrupt: async () => {}, close: async () => {},
       } as unknown as Query),
@@ -153,6 +164,7 @@ describe('QwenCodeAdapter', () => {
           const canUseTool = args.options.canUseTool;
           if (!canUseTool) throw new Error('canUseTool missing');
           decision = await canUseTool('edit', { file_path: 'README.md' }, { signal: approvalController.signal });
+          yield successResult();
         },
         getSessionId: () => 'qwen-session-1', interrupt: async () => {}, close: async () => {},
       } as unknown as Query),
@@ -193,7 +205,7 @@ describe('QwenCodeAdapter', () => {
     assert.equal(events.some((event) => event.kind === 'turn.completed' && event.reason === 'completed'), true);
   });
 
-  test('records a stream that ends without a result as an error, not a completion', async () => {
+  test('rejects a stream that ends without a result and records it as an error', async () => {
     resetQwenInferenceSlotForTests();
     const events: AdapterEvent[] = [];
     const adapter = new QwenCodeAdapter(context(events), target, {
@@ -203,7 +215,7 @@ describe('QwenCodeAdapter', () => {
       ]),
     });
 
-    await adapter.sendTurn('inspect');
+    await assert.rejects(() => adapter.sendTurn('inspect'), /stream ended without a result/);
 
     const terminal = events.filter((event) => event.kind === 'turn.completed');
     assert.equal(terminal.length, 1);
@@ -211,27 +223,30 @@ describe('QwenCodeAdapter', () => {
     const detail = terminal[0]?.kind === 'turn.completed' ? terminal[0].error : null;
     assert.match(detail ?? '', /stream ended without a result/);
     assert.match(detail ?? '', /2 messages arrived, the last of kind assistant/);
-    const failure = events.find((event) => event.kind === 'error');
+    const failures = events.filter((event) => event.kind === 'error');
+    assert.equal(failures.length, 1, 'the rethrow must not emit a second error');
+    const failure = failures[0];
     assert.equal(failure?.kind === 'error' ? failure.severity : null, 'turn');
     assert.equal(failure?.kind === 'error' ? failure.message : null, detail);
   });
 
-  test('reports an empty stream as an error that records no message arrived', async () => {
+  test('rejects an empty stream with an error that records no message arrived', async () => {
     resetQwenInferenceSlotForTests();
     const events: AdapterEvent[] = [];
     const adapter = new QwenCodeAdapter(context(events), target, { query: () => fakeQuery([]) });
 
-    await adapter.sendTurn('inspect');
+    await assert.rejects(() => adapter.sendTurn('inspect'), /no messages arrived/);
 
-    const terminal = events.find((event) => event.kind === 'turn.completed');
-    assert.equal(terminal?.kind === 'turn.completed' ? terminal.reason : null, 'error');
-    assert.match(terminal?.kind === 'turn.completed' ? terminal.error ?? '' : '', /no messages arrived/);
+    const terminal = events.filter((event) => event.kind === 'turn.completed');
+    assert.equal(terminal.length, 1);
+    assert.equal(terminal[0]?.kind === 'turn.completed' ? terminal[0].reason : null, 'error');
+    assert.match(terminal[0]?.kind === 'turn.completed' ? terminal[0].error ?? '' : '', /no messages arrived/);
   });
 
   test('rejects a concurrent inference without queuing and releases the slot', async () => {
     resetQwenInferenceSlotForTests();
-    const first = new QwenCodeAdapter(context([]), target, { query: () => fakeQuery([], 30) });
-    const second = new QwenCodeAdapter(context([]), target, { query: () => fakeQuery([]) });
+    const first = new QwenCodeAdapter(context([]), target, { query: () => fakeQuery([successResult()], 30) });
+    const second = new QwenCodeAdapter(context([]), target, { query: () => fakeQuery([successResult()]) });
     const running = first.sendTurn('first');
     await assert.rejects(() => second.sendTurn('second'), /not queued/);
     await running;
@@ -325,10 +340,10 @@ describe('QwenCodeAdapter', () => {
     const broken = context([]);
     broken.emit = () => { throw new Error('emit failed'); };
     let constructed = false;
-    const first = new QwenCodeAdapter(broken, target, { query: () => { constructed = true; return fakeQuery([]); } });
+    const first = new QwenCodeAdapter(broken, target, { query: () => { constructed = true; return fakeQuery([successResult()]); } });
     await assert.rejects(() => first.sendTurn('first'), /emit failed/);
     assert.equal(constructed, false);
-    const second = new QwenCodeAdapter(context([]), target, { query: () => fakeQuery([]) });
+    const second = new QwenCodeAdapter(context([]), target, { query: () => fakeQuery([successResult()]) });
     await second.sendTurn('second');
   });
 });
