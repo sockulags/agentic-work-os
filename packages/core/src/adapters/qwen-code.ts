@@ -372,6 +372,11 @@ export class QwenCodeAdapter implements WorkerAdapter {
           const detail = this.#unterminatedStreamDetail();
           this.#ctx.emit({ kind: 'error', severity: 'turn', message: detail, turnId: this.#turnId });
           this.#emitCompleted('error', detail);
+          // The caller has to see the same failure the transcript records. Resolving here
+          // would let the orchestrator close the run as non-failing while `turn.completed`
+          // says `error`, which is the one disagreement this adapter must not produce. The
+          // catch below re-raises without emitting again, since the terminal event is out.
+          throw new Error(detail);
         }
       }
     } catch (error) {
