@@ -8,7 +8,7 @@
  * mock. Behaviour is scripted through argv so one binary covers several scenarios.
  *
  * Usage: fake-claude.js [--tool] [--tools] [--permission] [--slow] [--markdown] [--think]
- *   [--think-omit-final] [--late-result] [--drop-result] [--stall-second]
+ *   [--think-omit-final] [--late-result] [--drop-result] [--stall-second] [--silent-first]
  */
 
 import { LineDecoder } from '../util/jsonl.js';
@@ -48,10 +48,16 @@ let turn = 0;
  * a third arrives, so two turns in a row outlive their deadline. The second one only then
  * runs, replaying its input and closing with its own result while a third turn is in
  * flight — the straggler that must not be taken for that third turn's.
+ * `--silent-first` replays the first input and then says nothing whatsoever about it — no
+ * init, no text, no result. A CLI that took the turn up and hung before producing a word,
+ * which is the shape a hang most often has. The second turn runs normally, and the only
+ * thing marking the boundary between them is its replayed input.
  */
 const lateResult = args.has('--late-result');
 const dropResult = args.has('--drop-result');
 const stallSecond = args.has('--stall-second');
+const silentFirst = args.has('--silent-first');
+let sentInit = false;
 let withheldResult: unknown = null;
 
 /**
@@ -166,11 +172,15 @@ async function runTurn(text: string): Promise<void> {
     session_id: SESSION_ID,
   });
 
+  // Taken up and then silent: the replay above is the only thing this turn ever says.
+  if (silentFirst && turn === 1) return;
+
   if (args.has('--recovery-edit')) {
     writeFileSync(`.awos-recovery-edit-${turn}.txt`, `correction ${turn}\n`, 'utf8');
   }
 
-  if (turn === 1) {
+  if (!sentInit) {
+    sentInit = true;
     emit({
       type: 'system',
       subtype: 'init',

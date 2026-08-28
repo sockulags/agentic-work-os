@@ -240,6 +240,50 @@ describe('ClaudeAdapter turn deadline', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test('takes the next turn after one that timed out having said nothing at all', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-claude-silent-'));
+    // The CLI takes the first turn up — it replays the input — and then hangs before
+    // producing a single word of it. A turn that says nothing is still a turn that ended,
+    // so the replay of the next input is the only mark that the CLI moved on, and reading
+    // it as anything less strands the healthy turn behind an abandoned one.
+    const { adapter, of, config } = claudeHarness(dir, ['--silent-first'], {
+      claudeTurnTimeoutMs: 120,
+    });
+    let stopped = false;
+
+    try {
+      await assert.rejects(adapter.sendTurn('silent turn'), /did not complete the turn/);
+      // Nothing of that turn reached the transcript, which is what makes it the case the
+      // boundary has to be moved on without: there was no output to move on from.
+      assert.equal(of('message.completed').length, 0);
+
+      // Reachable, but short enough that a turn stranded behind the abandoned one fails
+      // here rather than stalling the suite for a minute.
+      config.claudeTurnTimeoutMs = 10_000;
+      await adapter.sendTurn('healthy turn');
+      await adapter.stop();
+      stopped = true;
+
+      const second = of('turn.started')[1]?.turnId;
+      assert.deepEqual(
+        of('turn.completed').map((event) => event.reason),
+        ['error', 'completed'],
+      );
+      assert.equal(of('turn.completed')[1]?.turnId, second);
+      assert.ok(
+        of('message.completed').some(
+          (event) => event.turnId === second && event.text.includes('healthy turn'),
+        ),
+        'the healthy turn produced no visible reply',
+      );
+      assert.equal(of('usage').length, 1);
+      assert.equal(of('usage')[0]?.turnId, second);
+    } finally {
+      if (!stopped) await adapter.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('classifyClaudeTool', () => {

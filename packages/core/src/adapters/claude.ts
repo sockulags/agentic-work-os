@@ -47,10 +47,9 @@ type PendingInput = {
   readonly turnId: string;
   /** The exact text written, which is what the CLI's replay of it is matched against. */
   readonly text: string;
-  /** Set when the CLI replayed this input, which is the CLI saying it took the turn up. */
+  /** Set when the CLI replayed this input, so a second turn sending the same text
+   * is matched against its own entry rather than this one. */
   started: boolean;
-  /** Set once anything but that replay arrived while this input was the current one. */
-  sawOutput: boolean;
   /** Set when the watchdog gave up on the turn, so nothing it says is ours to report. */
   abandoned: boolean;
 };
@@ -113,9 +112,8 @@ export class ClaudeAdapter implements WorkerAdapter {
    * - the CLI replaying a *later* input, which says it has taken that later line up.
    *
    * The second is what keeps a release that renames or drops `result` from muting the
-   * worker for good, and it is where the ordering assumption lives: it reads the replay
-   * as "the CLI has started this turn", not "the CLI has buffered this line". See
-   * #passTo for what the code does when that reading looks wrong.
+   * worker for good. It is also where this adapter's one assumption about the CLI lives;
+   * #passTo states it and says what it costs.
    */
   readonly #inputs: PendingInput[] = [];
 
@@ -343,7 +341,6 @@ export class ClaudeAdapter implements WorkerAdapter {
         turnId,
         text,
         started: false,
-        sawOutput: false,
         abandoned: false,
       });
       // Armed with the write rather than on any acknowledgement: the CLI sends nothing to
@@ -501,7 +498,6 @@ export class ClaudeAdapter implements WorkerAdapter {
       return false;
     }
 
-    if (replayed === null) current.sawOutput = true;
     if (!current.abandoned) return true;
     log.debug('event from an abandoned turn ignored', {
       type: msg.type,
@@ -518,32 +514,27 @@ export class ClaudeAdapter implements WorkerAdapter {
    * disowned until its own input is behind us, so two turns that both timed out are two
    * separate stretches of stream to drop rather than one.
    *
-   * This reads a replay as "the CLI has started this turn". Nothing in the repo pins down
-   * whether the CLI replays a line when it reads it or when it begins running it, and the
-   * two differ here: if it read ahead, the replay of a later input would arrive while an
-   * earlier turn was still talking, and that turn's tail — its `result` included — would
-   * be taken for the next turn's. The two guards below are what keeps the reading honest:
-   * an input we cannot place, and an input the CLI never said anything about, do not move
-   * the boundary. Both leave the stream on the abandoned turn, so the cost of being wrong
-   * is a turn that goes quiet and times out rather than one reported as completed on
-   * another turn's `result`.
+   * The text is what makes this an answer rather than a guess, and it is the only guard:
+   * a replay that matches none of the inputs we sent moves nothing. Matching also means a
+   * turn's own replay never retires that turn, since its entry is not strictly before
+   * itself — which is what keeps a CLI that was wedged before it ever read the line from
+   * having its late replay open the gate on the very turn the deadline disowned.
+   *
+   * The assumption left is that the CLI replays a line when it takes the turn up, not when
+   * it buffers the line. Nothing in the repo pins that down. If it read ahead, the replay
+   * of a later input would arrive while an earlier turn was still talking, and that turn's
+   * tail — its `result` included — would be taken for the next turn's. That is not
+   * defended against here, because the defence tried first (refusing to move on from a
+   * turn that had said nothing) assumed a turn the CLI ran always says something, and a
+   * turn can be taken up, say nothing and be over. Refusing on that basis failed the
+   * healthy turn after it, which is the wedge #88 exists to remove; read-ahead is
+   * unestablished and, once the abandoned turn has streamed, indistinguishable on this
+   * stream from a `result` the CLI simply dropped.
    */
   #passTo(text: string): void {
     const index = this.#inputs.findIndex((input) => !input.started && input.text === text);
     if (index === -1) {
       log.warn('replayed input matches no turn we sent; leaving the boundary where it is');
-      return;
-    }
-
-    for (const passed of this.#inputs.slice(0, index)) {
-      if (passed.sawOutput) continue;
-      // The CLI replayed a later line without ever having said a word about this one.
-      // A turn it actually ran says something — an assistant message at the very least —
-      // so this is the read-ahead shape, and moving on would hand this turn's stream to
-      // the next one. Wait for its `result` instead.
-      log.warn('replayed input arrived before the previous turn said anything', {
-        turnId: passed.turnId,
-      });
       return;
     }
 
