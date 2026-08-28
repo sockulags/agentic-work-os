@@ -8,7 +8,7 @@
  * mock. Behaviour is scripted through argv so one binary covers several scenarios.
  *
  * Usage: fake-claude.js [--tool] [--tools] [--permission] [--slow] [--markdown] [--think]
- *   [--think-omit-final]
+ *   [--think-omit-final] [--late-result] [--drop-result]
  */
 
 import { LineDecoder } from '../util/jsonl.js';
@@ -34,6 +34,19 @@ const ECHO_CHARS = 600;
 const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 
 let turn = 0;
+
+/**
+ * Two ways a first turn can be accepted, stream, and then never end. The CLI stays alive
+ * either way; only the `result` that would have closed the turn is missing.
+ *
+ * `--late-result` holds it until the next turn's input arrives — a CLI that was merely
+ * slow, so the straggler lands mid-way through a turn it does not belong to.
+ * `--drop-result` never sends it at all — a CLI whose result event was renamed or dropped,
+ * where nothing but the replayed input ever shows that the turn ended.
+ */
+const lateResult = args.has('--late-result');
+const dropResult = args.has('--drop-result');
+let withheldResult: unknown = null;
 
 /**
  * A realistic burst of parallel tool calls for `--tools`.
@@ -131,6 +144,21 @@ function markdownChunks(prompt: string): string[] {
 async function runTurn(text: string): Promise<void> {
   turn += 1;
   const messageId = `msg_${turn}`;
+
+  // The stalled turn reports in at last, ahead of the turn that is about to run.
+  if (withheldResult !== null) {
+    emit(withheldResult);
+    withheldResult = null;
+  }
+
+  // `--replay-user-messages` is always on, so the CLI echoes every line it takes off
+  // stdin. It is the only mark on this stream that says which input is being worked on.
+  emit({
+    type: 'user',
+    message: { role: 'user', content: text },
+    parent_tool_use_id: null,
+    session_id: SESSION_ID,
+  });
 
   if (args.has('--recovery-edit')) {
     writeFileSync(`.awos-recovery-edit-${turn}.txt`, `correction ${turn}\n`, 'utf8');
@@ -287,7 +315,7 @@ async function runTurn(text: string): Promise<void> {
 
   if (args.has('--tools')) await runToolBurst(messageId);
 
-  emit({
+  const result = {
     type: 'result',
     subtype: 'success',
     is_error: false,
@@ -297,7 +325,17 @@ async function runTurn(text: string): Promise<void> {
     total_cost_usd: 0.001,
     usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 5 },
     session_id: SESSION_ID,
-  });
+  };
+
+  if (turn === 1) {
+    if (dropResult) return;
+    if (lateResult) {
+      withheldResult = result;
+      return;
+    }
+  }
+
+  emit(result);
 }
 
 /** Several calls in one turn, then a closing sentence they were supposed to inform. */
