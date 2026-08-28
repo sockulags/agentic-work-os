@@ -35,6 +35,27 @@ function semanticItemId(messageId: string, ordinal: number): string {
 }
 
 /**
+ * One input written to stdin whose turn the CLI has not finished on this stream.
+ *
+ * The stream carries no turn id, so the only thing that separates one turn from the next
+ * is where its input sits in the order they were written. Keeping the inputs themselves
+ * is what lets an event be placed: the CLI replays each line back as it takes it up, and
+ * that echo names the boundary the events after it fall behind.
+ */
+type PendingInput = {
+  /** The turn this input opened. Kept so a dropped event can name what it belonged to. */
+  readonly turnId: string;
+  /** The exact text written, which is what the CLI's replay of it is matched against. */
+  readonly text: string;
+  /** Set when the CLI replayed this input, which is the CLI saying it took the turn up. */
+  started: boolean;
+  /** Set once anything but that replay arrived while this input was the current one. */
+  sawOutput: boolean;
+  /** Set when the watchdog gave up on the turn, so nothing it says is ours to report. */
+  abandoned: boolean;
+};
+
+/**
  * Drives `claude -p` in bidirectional stream-json mode.
  *
  * One process per thread, alive across many turns: the CLI keeps reading stdin and
@@ -79,21 +100,24 @@ export class ClaudeAdapter implements WorkerAdapter {
   #turnTimer: NodeJS.Timeout | null = null;
 
   /**
-   * How many turns the watchdog gave up on are still, as far as this stream shows,
-   * the turn the CLI is talking about.
+   * Inputs written to stdin whose turn the CLI has not finished, oldest first.
    *
-   * Nothing in an event says which turn it belongs to. What separates turns is the order:
-   * the CLI reads stdin one line at a time and closes each turn with one `result`, so
-   * anything arriving before that `result` still belongs to the abandoned turn and must
-   * not be stamped with the turn in flight after it.
+   * Entry zero is the turn the stream is currently talking about; the rest are lines the
+   * CLI has not taken up yet. Only the last entry can be a live turn, because `#busy`
+   * refuses a second one — everything ahead of it is a turn the watchdog abandoned, and
+   * every event of those is dropped rather than stamped with the turn in flight.
    *
-   * Two things discharge the debt, because the first of them is exactly what a broken CLI
-   * withholds: the owed `result`, or the CLI replaying a later input back at us. Waiting
-   * only for the `result` would mean a release that renames or drops it mutes the worker
-   * for good — every later turn accepted, and every event of it disowned — which is worse
-   * than the wedge this watchdog exists to prevent.
+   * Two things move entry zero on, and each moves it exactly one turn:
+   *
+   * - the `result` that closes it, which is unambiguous;
+   * - the CLI replaying a *later* input, which says it has taken that later line up.
+   *
+   * The second is what keeps a release that renames or drops `result` from muting the
+   * worker for good, and it is where the ordering assumption lives: it reads the replay
+   * as "the CLI has started this turn", not "the CLI has buffered this line". See
+   * #passTo for what the code does when that reading looks wrong.
    */
-  #abandonedTurns = 0;
+  readonly #inputs: PendingInput[] = [];
 
   /** Pending approvals keyed by our approvalId. */
   readonly #approvals = new Map<
@@ -229,7 +253,7 @@ export class ClaudeAdapter implements WorkerAdapter {
       log.info('exited', { code });
       this.#child = null;
       // Whatever it still owed died with it, so nothing is left to disown.
-      this.#abandonedTurns = 0;
+      this.#inputs.length = 0;
       this.#emitStatus('exited', code === null ? null : `exit code ${code}`);
       this.#failTurn(new Error(`Claude Code exited (code ${code ?? 'null'})`));
     });
@@ -280,7 +304,8 @@ export class ClaudeAdapter implements WorkerAdapter {
     if (this.#busy) throw new Error('Claude is already working on a turn.');
 
     this.#busy = true;
-    this.#turnId = randomUUID();
+    const turnId = randomUUID();
+    this.#turnId = turnId;
     this.#blockItemIds.clear();
     this.#blockOrdinals.clear();
     this.#streamMessageId = null;
@@ -312,6 +337,15 @@ export class ClaudeAdapter implements WorkerAdapter {
         },
       };
       this.#turnStartedAt = startedAt;
+      // The boundary is recorded with the write, not with the CLI's replay of it: a line
+      // it has not read yet is still a turn whose events have to be told from the next.
+      this.#inputs.push({
+        turnId,
+        text,
+        started: false,
+        sawOutput: false,
+        abandoned: false,
+      });
       // Armed with the write rather than on any acknowledgement: the CLI sends nothing to
       // confirm it took the turn, so the whole wait — including a CLI that never reads the
       // line — is what has to be bounded.
@@ -369,7 +403,7 @@ export class ClaudeAdapter implements WorkerAdapter {
     // tool call must not be shown as the current turn's, or the operator answers for work
     // they are not looking at. Denying still answers the bridge, which is what keeps that
     // call from blocking forever.
-    if (this.#abandonedTurns > 0) {
+    if (this.#currentInputAbandoned()) {
       log.warn('approval from an abandoned turn denied', { tool: request.toolName });
       return Promise.resolve({
         behavior: 'deny',
@@ -437,22 +471,91 @@ export class ClaudeAdapter implements WorkerAdapter {
   // Event translation
   // -------------------------------------------------------------------------
 
-  #onEvent(msg: ClaudeWire.ClaudeOutputEvent): void {
-    // A turn the watchdog abandoned goes on running, and the CLI keeps reporting on it.
-    // Those events belong to a turn that is over here, so they are dropped rather than
-    // attributed to whatever turn is in flight now. Control responses are correlated by
-    // request id rather than by turn, so they still get through.
-    if (this.#abandonedTurns > 0 && msg.type !== 'control_response') {
-      if (msg.type === 'result') {
-        this.#abandonedTurns -= 1;
-      } else if (isReplayedUserInput(msg)) {
-        // The CLI has taken a later line off stdin, so it is done with everything before
-        // it whether or not it ever said so. Anything still owed is never coming.
-        this.#abandonedTurns = 0;
-      }
-      log.debug('event from an abandoned turn ignored', { type: msg.type });
+  /** Is the CLI, as far as this stream shows, working on a turn we gave up on? */
+  #currentInputAbandoned(): boolean {
+    return this.#inputs[0]?.abandoned === true;
+  }
+
+  /**
+   * Place an event against the input queue and say whether it is ours to report.
+   *
+   * A turn the watchdog abandoned goes on running, and the CLI keeps reporting on it.
+   * Those events belong to a turn that is over here, so they are dropped rather than
+   * attributed to whatever turn is in flight now.
+   */
+  #ownsEvent(msg: ClaudeWire.ClaudeOutputEvent): boolean {
+    const replayed = replayedInputText(msg);
+    if (replayed !== null) this.#passTo(replayed);
+
+    const current = this.#inputs[0];
+    // Nothing outstanding — a stray event with no turn to place it against. The handlers
+    // below already refuse to close a turn that does not exist.
+    if (current === undefined) return true;
+
+    if (msg.type === 'result') {
+      // One `result` per input, so this closes the turn at the front of the queue —
+      // whether or not that is the turn in flight, and never the one after it.
+      this.#inputs.shift();
+      if (!current.abandoned) return true;
+      log.debug('result from an abandoned turn ignored', { turnId: current.turnId });
+      return false;
+    }
+
+    if (replayed === null) current.sawOutput = true;
+    if (!current.abandoned) return true;
+    log.debug('event from an abandoned turn ignored', {
+      type: msg.type,
+      turnId: current.turnId,
+    });
+    return false;
+  }
+
+  /**
+   * The CLI replayed an input back at us. Move the front of the queue to that input.
+   *
+   * Each input is passed on its own: the replay of input three says the CLI has taken up
+   * input three, which retires input two and nothing else. An abandoned turn stays
+   * disowned until its own input is behind us, so two turns that both timed out are two
+   * separate stretches of stream to drop rather than one.
+   *
+   * This reads a replay as "the CLI has started this turn". Nothing in the repo pins down
+   * whether the CLI replays a line when it reads it or when it begins running it, and the
+   * two differ here: if it read ahead, the replay of a later input would arrive while an
+   * earlier turn was still talking, and that turn's tail — its `result` included — would
+   * be taken for the next turn's. The two guards below are what keeps the reading honest:
+   * an input we cannot place, and an input the CLI never said anything about, do not move
+   * the boundary. Both leave the stream on the abandoned turn, so the cost of being wrong
+   * is a turn that goes quiet and times out rather than one reported as completed on
+   * another turn's `result`.
+   */
+  #passTo(text: string): void {
+    const index = this.#inputs.findIndex((input) => !input.started && input.text === text);
+    if (index === -1) {
+      log.warn('replayed input matches no turn we sent; leaving the boundary where it is');
       return;
     }
+
+    for (const passed of this.#inputs.slice(0, index)) {
+      if (passed.sawOutput) continue;
+      // The CLI replayed a later line without ever having said a word about this one.
+      // A turn it actually ran says something — an assistant message at the very least —
+      // so this is the read-ahead shape, and moving on would hand this turn's stream to
+      // the next one. Wait for its `result` instead.
+      log.warn('replayed input arrived before the previous turn said anything', {
+        turnId: passed.turnId,
+      });
+      return;
+    }
+
+    this.#inputs.splice(0, index);
+    const current = this.#inputs[0];
+    if (current !== undefined) current.started = true;
+  }
+
+  #onEvent(msg: ClaudeWire.ClaudeOutputEvent): void {
+    // Control responses are correlated by request id rather than by turn, so they are
+    // never anyone else's; everything else has to be placed against the input queue.
+    if (msg.type !== 'control_response' && !this.#ownsEvent(msg)) return;
 
     switch (msg.type) {
       case 'system':
@@ -748,9 +851,9 @@ export class ClaudeAdapter implements WorkerAdapter {
     const message = `Claude did not complete the turn within ${deadline}ms.`;
     log.warn('turn timed out', { turnId: this.#turnId, deadline });
 
-    // The CLI is still on this turn, and until it moves off it nothing it says can be
-    // told apart from the next turn's. Record that before anything else clears the id.
-    this.#abandonedTurns += 1;
+    // The CLI still has this turn's input, and everything it says about it up to that
+    // input's own boundary has to be dropped. Mark it before anything clears the id.
+    this.#abandon(this.#turnId);
 
     this.#ctx.emit({ kind: 'error', severity: 'turn', turnId: this.#turnId, message });
     for (const [approvalId] of this.#approvals) {
@@ -771,9 +874,18 @@ export class ClaudeAdapter implements WorkerAdapter {
     this.#turnTimer = null;
   }
 
+  /** The turn is over here but its input is still the CLI's, so disown what it says. */
+  #abandon(turnId: string | null): void {
+    const input = this.#inputs.find((candidate) => candidate.turnId === turnId);
+    if (input) input.abandoned = true;
+  }
+
   #failTurn(err: Error): void {
     this.#clearTurnTimer();
     if (!this.#busy) return;
+    // The CLI was never told the turn ended, so anything it still owes on that input is
+    // no more ours than a timed-out turn's would be.
+    this.#abandon(this.#turnId);
     this.#busy = false;
     this.#ctx.emit({
       kind: 'turn.completed',
@@ -792,24 +904,33 @@ export class ClaudeAdapter implements WorkerAdapter {
 // ---------------------------------------------------------------------------
 
 /**
- * Is this the CLI replaying an input line back at us?
+ * The input text the CLI is replaying back at us, or null if this is not a replay.
  *
- * `--replay-user-messages` echoes each line we write as a `user` event, which is how the
- * adapter can tell an accepted turn from a dropped one. Only the main stream counts: a
- * subagent's user message names the tool call it belongs to, and that call is inside the
- * turn being disowned rather than evidence of the next one. On the main stream a tool
- * result is the only other thing that arrives as a user message, so a body with no
- * `tool_result` is an echo. The string body is the shape the CLI uses today; matching on
- * the absence of a tool result covers the array form too.
+ * `--replay-user-messages` echoes each line we write as a `user` event, which is the only
+ * mark on this stream that says which input the CLI has taken up. The text is what makes
+ * it an answer rather than a guess: a `user` event that carries none of the inputs we
+ * sent is some other message the CLI chose to put on the stream, and it must not be read
+ * as the CLI moving on.
+ *
+ * Only the main stream counts: a subagent's user message names the tool call it belongs
+ * to, and that call is inside the turn being placed rather than evidence of the next one.
+ * The other main-stream user message is a tool result, which carries a `tool_result`
+ * block. The string body is the shape the CLI uses today; the array form is the shape we
+ * write, and both are read here so a replay is recognised either way.
  */
-function isReplayedUserInput(msg: ClaudeWire.ClaudeOutputEvent): boolean {
-  if (msg.type !== 'user') return false;
+function replayedInputText(msg: ClaudeWire.ClaudeOutputEvent): string | null {
+  if (msg.type !== 'user') return null;
   const event = msg as ClaudeWire.ClaudeUserEvent;
-  if (event.parent_tool_use_id != null) return false;
+  if (event.parent_tool_use_id != null) return null;
   const content = event.message?.content;
-  if (typeof content === 'string') return content.length > 0;
-  if (!Array.isArray(content) || content.length === 0) return false;
-  return !content.some((block) => block.type === 'tool_result');
+  if (typeof content === 'string') return content.length > 0 ? content : null;
+  if (!Array.isArray(content) || content.length === 0) return null;
+  if (content.some((block) => block.type === 'tool_result')) return null;
+  const text = content
+    .filter((block): block is ClaudeWire.ClaudeTextBlock => block.type === 'text')
+    .map((block) => block.text ?? '')
+    .join('');
+  return text.length > 0 ? text : null;
 }
 
 export function classifyClaudeTool(name: string): ToolKind {

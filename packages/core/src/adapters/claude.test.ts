@@ -72,7 +72,7 @@ function claudeHarness(dir: string, fakeArgs: string[], overrides: Partial<Harne
   ): Array<Extract<AdapterEvent, { kind: K }>> =>
     events.filter((event): event is Extract<AdapterEvent, { kind: K }> => event.kind === kind);
 
-  return { adapter, of, config };
+  return { adapter, of, config, events };
 }
 
 describe('ClaudeAdapter turn deadline', () => {
@@ -172,6 +172,69 @@ describe('ClaudeAdapter turn deadline', () => {
       );
       assert.equal(of('usage').length, 1);
       assert.equal(of('usage')[0]?.turnId, second);
+    } finally {
+      if (!stopped) await adapter.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps two abandoned turns apart instead of discharging both at the first replay', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-claude-two-abandoned-'));
+    // The CLI stays blocked long enough for two submitted turns to outlive their
+    // deadline. It then replays the second input and runs that second — also abandoned —
+    // turn while a third is in flight, closing it with a `result` of its own. Reading
+    // that replay as "everything before it is over" would hand the second turn's stream,
+    // and its result, to the third.
+    const { adapter, of, config, events } = claudeHarness(dir, ['--stall-second'], {
+      claudeTurnTimeoutMs: 120,
+    });
+    let stopped = false;
+
+    try {
+      await assert.rejects(adapter.sendTurn('first turn'), /did not complete the turn/);
+      await assert.rejects(adapter.sendTurn('second turn'), /did not complete the turn/);
+
+      // The deadline is read when a turn arms it, so the third turn gets a reachable one.
+      config.claudeTurnTimeoutMs = 60_000;
+      await adapter.sendTurn('third turn');
+      await adapter.stop();
+      stopped = true;
+
+      const third = of('turn.started')[2]?.turnId;
+      assert.equal(of('turn.started').length, 3);
+      assert.deepEqual(
+        of('turn.completed').map((event) => event.reason),
+        ['error', 'error', 'completed'],
+      );
+      assert.equal(of('turn.completed')[2]?.turnId, third);
+
+      // The second turn was disowned when its deadline passed and stays disowned until
+      // its own input is behind us, so nothing it said reached the transcript at all.
+      assert.deepEqual(
+        of('message.completed').filter((event) => event.text.includes('second turn')),
+        [],
+      );
+      assert.ok(
+        of('message.completed').some(
+          (event) => event.turnId === third && event.text.includes('third turn'),
+        ),
+        'the third turn produced no visible reply',
+      );
+
+      // The third turn was closed by its own `result`, which arrives after its reply.
+      // The abandoned turn's result came first and would have closed it before that.
+      const reply = events.findIndex(
+        (event) => event.kind === 'message.completed' && event.text.includes('third turn'),
+      );
+      const completed = events.findIndex(
+        (event) => event.kind === 'turn.completed' && event.turnId === third,
+      );
+      assert.ok(reply >= 0 && completed > reply, 'the third turn was closed by another result');
+
+      // The second turn's result landed mid-way through the third; its tokens are not
+      // the third turn's to bank.
+      assert.equal(of('usage').length, 1);
+      assert.equal(of('usage')[0]?.turnId, third);
     } finally {
       if (!stopped) await adapter.stop();
       rmSync(dir, { recursive: true, force: true });

@@ -8,7 +8,7 @@
  * mock. Behaviour is scripted through argv so one binary covers several scenarios.
  *
  * Usage: fake-claude.js [--tool] [--tools] [--permission] [--slow] [--markdown] [--think]
- *   [--think-omit-final] [--late-result] [--drop-result]
+ *   [--think-omit-final] [--late-result] [--drop-result] [--stall-second]
  */
 
 import { LineDecoder } from '../util/jsonl.js';
@@ -36,16 +36,22 @@ const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 let turn = 0;
 
 /**
- * Two ways a first turn can be accepted, stream, and then never end. The CLI stays alive
- * either way; only the `result` that would have closed the turn is missing.
+ * Three ways a turn can be accepted, stream, and then never end in time. The CLI stays
+ * alive in all of them; what differs is when — or whether — the closing `result` shows up.
  *
- * `--late-result` holds it until the next turn's input arrives — a CLI that was merely
- * slow, so the straggler lands mid-way through a turn it does not belong to.
- * `--drop-result` never sends it at all — a CLI whose result event was renamed or dropped,
- * where nothing but the replayed input ever shows that the turn ended.
+ * `--late-result` holds the first turn's result until the next turn's input arrives — a
+ * CLI that was merely slow, so the straggler lands mid-way through a turn it does not
+ * belong to.
+ * `--drop-result` never sends the first turn's result at all — a CLI whose result event
+ * was renamed or dropped, where nothing but the replayed input ever shows the turn ended.
+ * `--stall-second` drops the first turn's result and then sits on the second input until
+ * a third arrives, so two turns in a row outlive their deadline. The second one only then
+ * runs, replaying its input and closing with its own result while a third turn is in
+ * flight — the straggler that must not be taken for that third turn's.
  */
 const lateResult = args.has('--late-result');
 const dropResult = args.has('--drop-result');
+const stallSecond = args.has('--stall-second');
 let withheldResult: unknown = null;
 
 /**
@@ -328,7 +334,7 @@ async function runTurn(text: string): Promise<void> {
   };
 
   if (turn === 1) {
-    if (dropResult) return;
+    if (dropResult || stallSecond) return;
     if (lateResult) {
       withheldResult = result;
       return;
@@ -391,13 +397,23 @@ function main(): void {
   const decoder = new LineDecoder();
   const queue: string[] = [];
   let running = false;
+  let arrived: (() => void) | null = null;
+
+  /** Resolves once another input is queued behind the one being held. */
+  const nextInput = (): Promise<void> =>
+    queue.length > 0 ? Promise.resolve() : new Promise<void>((resolve) => (arrived = resolve));
 
   const drain = async (): Promise<void> => {
     if (running) return;
     running = true;
     while (queue.length > 0) {
       const next = queue.shift();
-      if (next !== undefined) await runTurn(next);
+      if (next === undefined) continue;
+      // The second input is read but not acted on, so nothing at all is said about it
+      // until a third turn is in flight. The adapter's only clue that it ever ran is the
+      // replay it emits at that point, long after its own deadline passed.
+      if (stallSecond && turn === 1) await nextInput();
+      await runTurn(next);
     }
     running = false;
   };
@@ -414,6 +430,9 @@ function main(): void {
       if (msg.type !== 'user') continue;
       const text = msg.message?.content?.[0]?.text ?? '';
       queue.push(text);
+      const waiter = arrived;
+      arrived = null;
+      waiter?.();
       void drain();
     }
   });
