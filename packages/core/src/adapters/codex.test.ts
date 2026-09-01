@@ -231,6 +231,22 @@ async function until(label: string, check: () => boolean, timeoutMs = 10_000): P
 }
 
 /**
+ * A turn nothing in the case bounds, because the server is expected to complete it.
+ *
+ * The timer is a failsafe on a wedged turn rather than something a case decides on: a
+ * completion the server has already sent arrives in milliseconds. Without it a turn that
+ * never ends would hang the run instead of failing it.
+ */
+function completes(label: string, turn: Promise<void>): Promise<void> {
+  return Promise.race([
+    turn,
+    new Promise<never>((_resolve, reject) => {
+      setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), 10_000).unref();
+    }),
+  ]);
+}
+
+/**
  * The turn watchdog under the case's control rather than the clock's.
  *
  * The adapter arms its deadline here and nothing fires it until a case says so. That is
@@ -270,7 +286,17 @@ function manualDeadlines() {
 function codexTurnServer(body: string): string {
   return String.raw`import { appendFileSync } from 'node:fs';
 
-const emit = (value) => process.stdout.write(JSON.stringify(value) + '\n');
+// Collected and written in one go at the end of the chunk, because that is what Codex
+// on a pipe looks like: the acceptance and the notifications that follow it arrive in a
+// single read, and every line of a read is handled before an awaiting continuation gets
+// to run. Writing a line at a time would hide the ordering CI actually gets.
+const out = [];
+const emit = (value) => out.push(JSON.stringify(value));
+const flush = () => {
+  if (out.length === 0) return;
+  process.stdout.write(out.join('\n') + '\n');
+  out.length = 0;
+};
 let buffer = '';
 let turns = 0;
 process.stdin.setEncoding('utf8');
@@ -302,6 +328,7 @@ process.stdin.on('data', (chunk) => {
 ` + body + String.raw`
     }
   }
+  flush();
 });
 process.stdin.on('end', () => process.exit(0));`;
 }
@@ -446,7 +473,7 @@ process.stdin.on('end', () => process.exit(0));`,
       // its own completion — carrying the usage only it sends — and not turn 1's, which
       // lands in the middle of it. Nothing fires this turn's deadline, so a turn that
       // takes its time is still a turn that succeeds.
-      await adapter.sendTurn('and now a normal one');
+      await completes('the next turn', adapter.sendTurn('and now a normal one'));
       assert.equal(of('usage').length, 1);
       assert.equal(of('usage')[0]?.inputTokens, 7);
       assert.equal(of('turn.completed').length, 2);
@@ -578,8 +605,9 @@ describe('CodexAdapter abandoned turns', () => {
       ]);
 
       // Nothing fires the second turn's deadline: it ends on the server's own completion,
-      // however long that round trip took.
-      await adapter.sendTurn('and now a normal one');
+      // however long that round trip took. The abandoned turn is still outstanding when
+      // that completion is read, in the same read as the acceptance that names this turn.
+      await completes('the next turn', adapter.sendTurn('and now a normal one'));
 
       // The abandoned turn's patch would have replaced the live one's wholesale: the diff
       // is a snapshot of the whole turn, not an addition to it.

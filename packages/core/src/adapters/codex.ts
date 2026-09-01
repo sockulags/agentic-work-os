@@ -281,12 +281,29 @@ export class CodexAdapter implements WorkerAdapter {
       };
     });
 
-    let accepted: CodexWire.CodexTurnStartResult | undefined;
     try {
-      accepted = (await this.#request(CODEX_METHODS.turnStart, {
-        threadId: this.#threadId,
-        input: [{ type: 'text', text }],
-      } satisfies CodexWire.CodexTurnStartParams)) as CodexWire.CodexTurnStartResult | undefined;
+      await this.#request(
+        CODEX_METHODS.turnStart,
+        {
+          threadId: this.#threadId,
+          input: [{ type: 'text', text }],
+        } satisfies CodexWire.CodexTurnStartParams,
+        // The acceptance already names the turn. Waiting for `turn/started` instead would
+        // leave a turn that hangs before it — the case the watchdog exists for — nameless,
+        // and a nameless turn cannot be told apart from the one that follows it.
+        //
+        // Read here rather than after the await, because Codex can put the acceptance and
+        // the turn's first notifications in one read and every line of a read is handled
+        // before an awaiting continuation gets to run. A turn still unnamed while its own
+        // notifications are judged is a turn whose completion is taken for another's and
+        // thrown away, and then nothing ends it.
+        (result) => {
+          const id = (result as CodexWire.CodexTurnStartResult | undefined)?.turn?.id;
+          if (typeof id === 'string' && this.#busy && this.#turnId === turnId) {
+            this.#serverTurnId = id;
+          }
+        },
+      );
     } catch (err) {
       this.#failTurn(err as Error);
       throw err;
@@ -298,11 +315,6 @@ export class CodexAdapter implements WorkerAdapter {
     // window needs no watchdog — and must not have this turn's bookkeeping written over
     // whatever started after it, hence the check that we are still the turn in flight.
     if (this.#busy && this.#turnId === turnId) {
-      // The acceptance already names the turn. Waiting for `turn/started` instead would
-      // leave a turn that hangs before it — the case the watchdog exists for — nameless,
-      // and a nameless turn cannot be told apart from the one that follows it.
-      if (typeof accepted?.turn?.id === 'string') this.#serverTurnId = accepted.turn.id;
-
       const deadline = this.#ctx.config.codexTurnTimeoutMs ?? CODEX_TURN_TIMEOUT_DEFAULT_MS;
       const arm = this.#ctx.armTurnDeadline ?? armWithTimeout;
       this.#cancelTurnDeadline = arm(() => this.#timeOutTurn(deadline), deadline);
@@ -375,7 +387,17 @@ export class CodexAdapter implements WorkerAdapter {
     child.stdin.write(encodeJsonLine(payload));
   }
 
-  #request(method: string, params: unknown): Promise<unknown> {
+  /**
+   * Sends a request and resolves on its response.
+   *
+   * `onResult` runs with the response line itself rather than a microtask later, which is
+   * what bookkeeping the rest of that same read depends on has to do.
+   */
+  #request(
+    method: string,
+    params: unknown,
+    onResult?: (result: unknown) => void,
+  ): Promise<unknown> {
     const id = this.#nextRequestId++;
     return new Promise<unknown>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -388,6 +410,7 @@ export class CodexAdapter implements WorkerAdapter {
         method,
         resolve: (result) => {
           clearTimeout(timeout);
+          onResult?.(result);
           resolve(result);
         },
         reject: (err) => {
