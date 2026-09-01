@@ -8,7 +8,13 @@ import {
   type ToolKind,
 } from '@awos/protocol';
 import { NativeResumeNotFoundError } from './agent.js';
-import type { WorkerAdapter, AgentCapabilities, AdapterContext, WorkerTurnOptions } from './agent.js';
+import type {
+  WorkerAdapter,
+  AgentCapabilities,
+  AdapterContext,
+  ArmDeadline,
+  WorkerTurnOptions,
+} from './agent.js';
 import { CODEX_TURN_TIMEOUT_DEFAULT_MS } from '../config.js';
 import { spawnCli, type StdioChild } from '../util/spawn.js';
 import { readJsonLines, encodeJsonLine } from '../util/jsonl.js';
@@ -33,6 +39,12 @@ export const CODEX_CAPABILITIES: AgentCapabilities = {
   turnDiff: true,
   approvals: true,
   resumableSessions: true,
+};
+
+/** The deadline every caller but a test gets: the clock, through `setTimeout`. */
+const armWithTimeout: ArmDeadline = (fire, ms) => {
+  const timer = setTimeout(fire, ms);
+  return () => clearTimeout(timer);
 };
 
 export class CodexAdapter implements WorkerAdapter {
@@ -67,8 +79,11 @@ export class CodexAdapter implements WorkerAdapter {
 
   #turnSettle: { resolve: () => void; reject: (e: Error) => void } | null = null;
 
-  /** Armed for the whole turn; the only thing that bounds the wait for `turn/completed`. */
-  #turnTimer: NodeJS.Timeout | null = null;
+  /**
+   * Cancels the deadline armed for the whole turn — the only thing that bounds the wait
+   * for `turn/completed`. Null while no turn is being watched.
+   */
+  #cancelTurnDeadline: (() => void) | null = null;
 
   /**
    * Server turn ids the watchdog gave up on and has not seen end.
@@ -289,7 +304,8 @@ export class CodexAdapter implements WorkerAdapter {
       if (typeof accepted?.turn?.id === 'string') this.#serverTurnId = accepted.turn.id;
 
       const deadline = this.#ctx.config.codexTurnTimeoutMs ?? CODEX_TURN_TIMEOUT_DEFAULT_MS;
-      this.#turnTimer = setTimeout(() => this.#timeOutTurn(deadline), deadline);
+      const arm = this.#ctx.armTurnDeadline ?? armWithTimeout;
+      this.#cancelTurnDeadline = arm(() => this.#timeOutTurn(deadline), deadline);
     }
 
     // turn/start returns as soon as the turn is accepted; completion arrives later
@@ -565,7 +581,7 @@ export class CodexAdapter implements WorkerAdapter {
           durationMs: Date.now() - this.#turnStartedAt,
         });
 
-        this.#clearTurnTimer();
+        this.#clearTurnDeadline();
         this.#busy = false;
         this.#turnId = null;
         this.#serverTurnId = null;
@@ -753,14 +769,14 @@ export class CodexAdapter implements WorkerAdapter {
     this.#emitStatus('idle', null);
   }
 
-  #clearTurnTimer(): void {
-    if (this.#turnTimer === null) return;
-    clearTimeout(this.#turnTimer);
-    this.#turnTimer = null;
+  #clearTurnDeadline(): void {
+    if (this.#cancelTurnDeadline === null) return;
+    this.#cancelTurnDeadline();
+    this.#cancelTurnDeadline = null;
   }
 
   #failTurn(err: Error): void {
-    this.#clearTurnTimer();
+    this.#clearTurnDeadline();
     if (!this.#busy) return;
     this.#busy = false;
     this.#ctx.emit({

@@ -13,7 +13,7 @@ import {
   extractCodexPlan,
   describeCodexApproval,
 } from './codex.js';
-import type { AdapterContext } from './agent.js';
+import type { AdapterContext, ArmDeadline } from './agent.js';
 import type { HarnessConfig } from '../config.js';
 
 describe('itemType', () => {
@@ -216,6 +216,133 @@ process.stdin.on('end', () => process.exit(0));`,
   });
 });
 
+/**
+ * Poll until `check` holds, rather than sleeping a guessed interval.
+ *
+ * The timeout is a failsafe on a hang: everything waited for below happens within
+ * milliseconds of being asked for, and no case decides anything on how long it took.
+ */
+async function until(label: string, check: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+/**
+ * The turn watchdog under the case's control rather than the clock's.
+ *
+ * The adapter arms its deadline here and nothing fires it until a case says so. That is
+ * what tells the turn meant to hang apart from the turn meant to finish: a real deadline
+ * short enough to keep the suite quick also expires on a healthy turn once the machine is
+ * loaded, and the two turns then differ by the runner's speed rather than by anything the
+ * case did.
+ */
+function manualDeadlines() {
+  const armed: Array<{ ms: number; fire: () => void; cancelled: boolean }> = [];
+
+  const arm: ArmDeadline = (fire, ms) => {
+    const deadline = { ms, fire, cancelled: false };
+    armed.push(deadline);
+    return () => {
+      deadline.cancelled = true;
+    };
+  };
+
+  /** The nth deadline the adapter armed, 1-based, once it has armed it. */
+  const nth = async (n: number) => {
+    await until(`the adapter to arm deadline ${n}`, () => armed.length >= n);
+    return armed[n - 1]!;
+  };
+
+  /** Fires the nth deadline, as the clock would have. */
+  const fire = async (n: number): Promise<void> => {
+    const deadline = await nth(n);
+    assert.equal(deadline.cancelled, false, `deadline ${n} was already cancelled`);
+    deadline.fire();
+  };
+
+  return { arm, nth, fire };
+}
+
+/** Boilerplate every abandoned-turn case repeats: handshake, thread, and a turn counter. */
+function codexTurnServer(body: string): string {
+  return String.raw`import { appendFileSync } from 'node:fs';
+
+const emit = (value) => process.stdout.write(JSON.stringify(value) + '\n');
+let buffer = '';
+let turns = 0;
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  for (;;) {
+    const newline = buffer.indexOf('\n');
+    if (newline < 0) break;
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    const message = JSON.parse(line);
+    if (message.method === 'initialize') emit({ id: message.id, result: {} });
+    if (message.method === 'thread/start') {
+      emit({ id: message.id, result: { thread: { id: 'thread-1' } } });
+    }
+    if (message.method === 'turn/interrupt') {
+      // Recorded, and deliberately not acted on: a server that acknowledges an interrupt
+      // and keeps going is what the bookkeeping has to survive.
+      appendFileSync(
+        new URL('interrupts.jsonl', import.meta.url),
+        JSON.stringify(message.params) + '\n',
+      );
+      emit({ id: message.id, result: {} });
+    }
+    if (message.method === 'turn/start') {
+      turns += 1;
+      const turnId = 'turn-' + turns;
+      emit({ id: message.id, result: { turn: { id: turnId } } });
+` + body + String.raw`
+    }
+  }
+});
+process.stdin.on('end', () => process.exit(0));`;
+}
+
+/**
+ * One adapter over a fake server: a typed reader for what it emitted, a wait for the
+ * event that says the server has been heard, and the turn deadline it armed.
+ */
+function codexHarness(dir: string, server: string, overrides: Partial<HarnessConfig> = {}) {
+  const events: AdapterEvent[] = [];
+  const deadlines = manualDeadlines();
+  const adapter = new CodexAdapter({
+    threadId: 'thread-1',
+    cwd: dir,
+    config: codexTestConfig(dir, server, overrides),
+    permissionMode: 'default',
+    permissionBridge: {} as AdapterContext['permissionBridge'],
+    resumeSessionId: null,
+    armTurnDeadline: deadlines.arm,
+    emit: (event) => events.push(event),
+    onSessionId: () => {},
+  });
+
+  const of = <K extends AdapterEvent['kind']>(
+    kind: K,
+  ): Array<Extract<AdapterEvent, { kind: K }>> =>
+    events.filter((event): event is Extract<AdapterEvent, { kind: K }> => event.kind === kind);
+
+  /**
+   * Waits for an event of this kind.
+   *
+   * The server's lines are read in order, so an event is also evidence that everything
+   * sent before it has been handled — which is how a case fires a deadline against a turn
+   * that has provably already seen what the server said.
+   */
+  const waitFor = (kind: AdapterEvent['kind']): Promise<void> =>
+    until(`a ${kind} event`, () => events.some((event) => event.kind === kind));
+
+  return { adapter, of, waitFor, deadlines };
+}
+
 describe('CodexAdapter turn watchdog', () => {
   test('fails a turn whose completion never arrives and takes the next one', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'awos-codex-watchdog-'));
@@ -278,36 +405,27 @@ process.stdin.on('end', () => process.exit(0));`,
       'utf8',
     );
 
-    const events: AdapterEvent[] = [];
-    const config = codexTestConfig(dir, server, { codexTurnTimeoutMs: 120 });
-    const adapter = new CodexAdapter({
-      threadId: 'thread-1',
-      cwd: dir,
-      config,
-      permissionMode: 'default',
-      permissionBridge: {} as AdapterContext['permissionBridge'],
-      resumeSessionId: null,
-      emit: (event) => events.push(event),
-      onSessionId: () => {},
+    const { adapter, of, waitFor, deadlines } = codexHarness(dir, server, {
+      codexTurnTimeoutMs: 120,
     });
 
-    const of = <K extends AdapterEvent['kind']>(
-      kind: K,
-    ): Array<Extract<AdapterEvent, { kind: K }>> =>
-      events.filter(
-        (event): event is Extract<AdapterEvent, { kind: K }> => event.kind === kind,
-      );
-
     try {
-      const startedAt = Date.now();
-      await assert.rejects(
-        adapter.sendTurn('hang forever'),
-        /did not complete the turn within 120ms/,
-      );
-      // The wait came from this deadline rather than the ten-minute default; spawning the
-      // fake server accounts for most of what is left of this window.
-      const elapsed = Date.now() - startedAt;
-      assert.ok(elapsed < 2_000, `the turn should fail on its own deadline, took ${elapsed}ms`);
+      await Promise.all([
+        assert.rejects(
+          adapter.sendTurn('hang forever'),
+          /did not complete the turn within 120ms/,
+        ),
+        (async () => {
+          // The turn is watched with the deadline this thread configured rather than the
+          // ten-minute default — the number the message quotes, and the only reason a
+          // case about a turn that never ends gets an answer at all.
+          assert.equal((await deadlines.nth(1)).ms, 120);
+          // Fired once the server is blocked on its approval, because releasing that
+          // approval is part of what giving up on the turn has to do.
+          await waitFor('approval.requested');
+          await deadlines.fire(1);
+        })(),
+      ]);
 
       assert.equal(of('error').length, 1);
       assert.equal(of('error')[0]?.severity, 'turn');
@@ -326,7 +444,8 @@ process.stdin.on('end', () => process.exit(0));`,
 
       // The next turn starts before the abandoned one reports in. What must settle it is
       // its own completion — carrying the usage only it sends — and not turn 1's, which
-      // lands in the middle of it.
+      // lands in the middle of it. Nothing fires this turn's deadline, so a turn that
+      // takes its time is still a turn that succeeds.
       await adapter.sendTurn('and now a normal one');
       assert.equal(of('usage').length, 1);
       assert.equal(of('usage')[0]?.inputTokens, 7);
@@ -339,68 +458,6 @@ process.stdin.on('end', () => process.exit(0));`,
     }
   });
 });
-
-/** Boilerplate every abandoned-turn case repeats: handshake, thread, and a turn counter. */
-function codexTurnServer(body: string): string {
-  return String.raw`import { appendFileSync } from 'node:fs';
-
-const emit = (value) => process.stdout.write(JSON.stringify(value) + '\n');
-let buffer = '';
-let turns = 0;
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => {
-  buffer += chunk;
-  for (;;) {
-    const newline = buffer.indexOf('\n');
-    if (newline < 0) break;
-    const line = buffer.slice(0, newline);
-    buffer = buffer.slice(newline + 1);
-    const message = JSON.parse(line);
-    if (message.method === 'initialize') emit({ id: message.id, result: {} });
-    if (message.method === 'thread/start') {
-      emit({ id: message.id, result: { thread: { id: 'thread-1' } } });
-    }
-    if (message.method === 'turn/interrupt') {
-      // Recorded, and deliberately not acted on: a server that acknowledges an interrupt
-      // and keeps going is what the bookkeeping has to survive.
-      appendFileSync(
-        new URL('interrupts.jsonl', import.meta.url),
-        JSON.stringify(message.params) + '\n',
-      );
-      emit({ id: message.id, result: {} });
-    }
-    if (message.method === 'turn/start') {
-      turns += 1;
-      const turnId = 'turn-' + turns;
-      emit({ id: message.id, result: { turn: { id: turnId } } });
-` + body + String.raw`
-    }
-  }
-});
-process.stdin.on('end', () => process.exit(0));`;
-}
-
-/** One adapter over a fake server, plus a typed reader for what it emitted. */
-function codexHarness(dir: string, server: string, overrides: Partial<HarnessConfig> = {}) {
-  const events: AdapterEvent[] = [];
-  const adapter = new CodexAdapter({
-    threadId: 'thread-1',
-    cwd: dir,
-    config: codexTestConfig(dir, server, overrides),
-    permissionMode: 'default',
-    permissionBridge: {} as AdapterContext['permissionBridge'],
-    resumeSessionId: null,
-    emit: (event) => events.push(event),
-    onSessionId: () => {},
-  });
-
-  const of = <K extends AdapterEvent['kind']>(
-    kind: K,
-  ): Array<Extract<AdapterEvent, { kind: K }>> =>
-    events.filter((event): event is Extract<AdapterEvent, { kind: K }> => event.kind === kind);
-
-  return { adapter, of };
-}
 
 describe('CodexAdapter abandoned turns', () => {
   test('ignores a completion for a turn only the acceptance ever named', async () => {
@@ -418,25 +475,47 @@ describe('CodexAdapter abandoned turns', () => {
           method: 'turn/completed',
           params: { turn: { id: 'turn-1', status: 'completed', usage: { inputTokens: 99 } } },
         });
+        // Turn 2 carries on afterwards. Seeing this is how the case knows the straggler
+        // has already been read, so turn 2's deadline is fired against a turn that has
+        // seen it and stayed its own.
+        emit({ method: 'turn/diff/updated', params: { turnId: turnId, diff: 'live patch' } });
       }`),
       'utf8',
     );
 
-    const { adapter, of } = codexHarness(dir, server, { codexTurnTimeoutMs: 120 });
+    const { adapter, of, waitFor, deadlines } = codexHarness(dir, server, {
+      codexTurnTimeoutMs: 120,
+    });
 
     try {
-      await assert.rejects(
-        adapter.sendTurn('hang before you start'),
-        /did not complete the turn within 120ms/,
-      );
+      await Promise.all([
+        assert.rejects(
+          adapter.sendTurn('hang before you start'),
+          /did not complete the turn within 120ms/,
+        ),
+        deadlines.fire(1),
+      ]);
+
       // Turn 1's completion lands here. Settling this turn on it would report a turn that
       // has done nothing as finished, and bank the other turn's token usage against it.
-      await assert.rejects(
-        adapter.sendTurn('and now the next one'),
-        /did not complete the turn within 120ms/,
-      );
+      await Promise.all([
+        assert.rejects(
+          adapter.sendTurn('and now the next one'),
+          /did not complete the turn within 120ms/,
+        ),
+        (async () => {
+          await waitFor('diff.updated');
+          await deadlines.fire(2);
+        })(),
+      ]);
 
       assert.equal(of('usage').length, 0);
+      // Turn 2 kept its own patch through the straggler, which is what says it was still
+      // the turn in flight when the straggler was ignored.
+      assert.deepEqual(
+        of('diff.updated').map((event) => event.patch),
+        ['live patch'],
+      );
       assert.deepEqual(
         of('turn.completed').map((event) => event.reason),
         ['error', 'error'],
@@ -487,10 +566,19 @@ describe('CodexAdapter abandoned turns', () => {
       'utf8',
     );
 
-    const { adapter, of } = codexHarness(dir, server, { codexTurnTimeoutMs: 120 });
+    const { adapter, of, deadlines } = codexHarness(dir, server, { codexTurnTimeoutMs: 120 });
 
     try {
-      await assert.rejects(adapter.sendTurn('hang forever'), /did not complete the turn/);
+      await Promise.all([
+        assert.rejects(
+          adapter.sendTurn('hang forever'),
+          /did not complete the turn within 120ms/,
+        ),
+        deadlines.fire(1),
+      ]);
+
+      // Nothing fires the second turn's deadline: it ends on the server's own completion,
+      // however long that round trip took.
       await adapter.sendTurn('and now a normal one');
 
       // The abandoned turn's patch would have replaced the live one's wholesale: the diff

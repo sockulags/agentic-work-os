@@ -73,6 +73,15 @@ export interface WorkerTurnOptions {
 // The capability shape now lives in @awos/protocol, because the UI branches on it too.
 export type { AgentCapabilities };
 
+/**
+ * Arms a deadline and returns the cancel for it.
+ *
+ * Exists so a turn deadline is something an adapter is given rather than something it
+ * reads off the clock: left unset it is `setTimeout`, and a test supplies one it fires
+ * itself so a case about a turn that hangs never depends on how fast the machine ran.
+ */
+export type ArmDeadline = (fire: () => void, ms: number) => () => void;
+
 export interface AdapterContext {
   threadId: string;
   cwd: string;
@@ -88,4 +97,6 @@ export interface AdapterContext {
   onSessionId: (sessionId: string) => void;
   /** Called when a persisted native id is proven unusable before a fresh session starts. */
   onSessionLost?: () => void;
+  /** How the turn watchdog is armed. Defaults to `setTimeout`; only tests pass one. */
+  armTurnDeadline?: ArmDeadline;
 }
