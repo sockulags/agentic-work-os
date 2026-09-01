@@ -110,6 +110,57 @@ describe('lanes', () => {
     assert.equal(readFileSync(join(base, 'a.txt'), 'utf8'), 'one\n');
   });
 
+  test('refuses a lane whose state git cannot establish rather than calling it empty', async () => {
+    const base = makeRepo();
+    const result = await provisionLane(base, lanePath());
+    assert.ok(result.ok);
+    const lane = result.lane;
+
+    // Work the lane did and never handed over.
+    writeFileSync(join(lane.path, 'a.txt'), 'work that must not be lost\n');
+
+    // Break the lane's repository the way a persistent git failure does — a missing
+    // binary, a corrupt repo — so every snapshot of it comes back null, at evaluation
+    // time and again inside integrateLane.
+    rmSync(join(lane.path, '.git'), { recursive: true, force: true });
+    const evaluatedTree = await snapshotWorkingTree(lane.path);
+    const evaluatedRevision = await headCommit(lane.path);
+    assert.equal(evaluatedTree, null, 'the candidate tree is unidentifiable');
+    assert.equal(evaluatedRevision, null);
+
+    const integrated = await integrateLane(lane, base, {
+      expectedTree: evaluatedTree,
+      expectedRevision: evaluatedRevision,
+    });
+
+    // Two nulls comparing equal is not evidence that the lane is unchanged.
+    assert.equal(integrated.ok, false, 'an unidentifiable lane is not a successful integration');
+    assert.match(integrated.ok ? '' : integrated.reason, /could not be determined/);
+    assert.doesNotMatch(integrated.ok ? '' : integrated.reason, /changed after evaluation/);
+    assert.equal(readFileSync(join(base, 'a.txt'), 'utf8'), 'one\n');
+  });
+
+  test('refuses a lane whose diff git could not produce rather than calling it empty', async () => {
+    const base = makeRepo();
+    const result = await provisionLane(base, lanePath());
+    assert.ok(result.ok);
+    const lane = result.lane;
+
+    writeFileSync(join(lane.path, 'a.txt'), 'work that must not be lost\n');
+    const evaluatedTree = await snapshotWorkingTree(lane.path);
+    assert.ok(evaluatedTree);
+
+    // The baseline is a tree git cannot read — the state a lane reaches when gc prunes
+    // the unreachable snapshot object it was seeded from. The lane itself still hashes,
+    // so the diff is what comes back null, and null there is not an empty lane.
+    lane.baseTree = '0'.repeat(40);
+    const integrated = await integrateLane(lane, base, { expectedTree: evaluatedTree });
+
+    assert.equal(integrated.ok, false, 'an undiffable lane is not a successful integration');
+    assert.match(integrated.ok ? '' : integrated.reason, /could not be determined/);
+    assert.equal(readFileSync(join(base, 'a.txt'), 'utf8'), 'one\n');
+  });
+
   test('refuses a lane whose revision changed even when its tree did not', async () => {
     const base = makeRepo();
     const result = await provisionLane(base, lanePath());
