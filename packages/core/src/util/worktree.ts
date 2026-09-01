@@ -46,6 +46,14 @@ export type IntegrateResult =
   | { ok: true; patch: string | null }
   | { ok: false; reason: string };
 
+/**
+ * Refusal for a lane whose contents git could not establish, worded apart from the lane
+ * that moved: one is an unknown, the other is a known mismatch, and the user's next move
+ * differs.
+ */
+const UNDETERMINED_LANE =
+  "the lane's state could not be determined; integration was refused";
+
 export interface IntegrateOptions {
   /**
    * The exact lane tree that was evaluated. `undefined` keeps the legacy unbound utility
@@ -127,16 +135,28 @@ export async function integrateLane(
     snapshotWorkingTree(lane.path),
     evaluatedRevision === undefined ? Promise.resolve(null) : headCommit(lane.path),
   ]);
+  // A null snapshot is not a state, it is the absence of one. Two unknowns compare equal,
+  // so the guard below would pass and the caller would read the result as "nothing to
+  // integrate" for a lane whose contents were never read.
+  if (now === null || evaluatedTree === null) {
+    return { ok: false, reason: UNDETERMINED_LANE };
+  }
   if (
     (evaluatedTree !== undefined && now !== evaluatedTree) ||
     (evaluatedRevision !== undefined && revision !== evaluatedRevision)
   ) {
     return { ok: false, reason: 'the lane changed after evaluation; integration was refused' };
   }
-  if (now === null) return { ok: true, patch: null };
 
   const patch = await diffTrees(lane.path, lane.baseTree, now);
-  if (patch === null) return { ok: true, patch: null };
+  if (patch === null) {
+    // `diffTrees` answers null for identical trees and for a git failure alike — an
+    // unreadable baseline object, a diff too large for the buffer. Both SHAs are known
+    // here, so the genuinely empty lane is decidable without asking git, and a null that
+    // is not that is a diff nobody has seen rather than a lane holding nothing.
+    if (now === lane.baseTree) return { ok: true, patch: null };
+    return { ok: false, reason: UNDETERMINED_LANE };
+  }
 
   // Recheck after constructing the patch and immediately before the first mutation. The
   // patch is only for the tree that was evaluated; a changed lane must never be applied.
@@ -144,6 +164,9 @@ export async function integrateLane(
     snapshotWorkingTree(lane.path),
     evaluatedRevision === undefined ? Promise.resolve(null) : headCommit(lane.path),
   ]);
+  if (beforeApply === null) {
+    return { ok: false, reason: UNDETERMINED_LANE };
+  }
   if (
     beforeApply !== now ||
     (evaluatedTree !== undefined && beforeApply !== evaluatedTree) ||
