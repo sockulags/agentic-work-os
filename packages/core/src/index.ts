@@ -153,6 +153,13 @@ export {
   NativeResumeNotFoundError,
   isNativeResumeNotFoundError,
 } from './adapters/agent.js';
-export type { AgentAdapter, WorkerAdapter, AgentCapabilities, AdapterContext, WorkerTurnOptions } from './adapters/agent.js';
+export type {
+  AgentAdapter,
+  WorkerAdapter,
+  AgentCapabilities,
+  AdapterContext,
+  ArmDeadline,
+  WorkerTurnOptions,
+} from './adapters/agent.js';
 export { LineDecoder, readJsonLines, encodeJsonLine } from './util/jsonl.js';
 export { workerEnvironment, spawnCli, type SpawnCliOptions, type StdioChild } from './util/spawn.js';

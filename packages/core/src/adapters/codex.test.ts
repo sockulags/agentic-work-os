@@ -231,15 +231,16 @@ async function until(label: string, check: () => boolean, timeoutMs = 10_000): P
 }
 
 /**
- * A turn nothing in the case bounds, because the server is expected to complete it.
+ * A wait nothing in the case itself bounds: the server ends the turn, or the adapter's own
+ * clock does.
  *
- * The timer is a failsafe on a wedged turn rather than something a case decides on: a
- * completion the server has already sent arrives in milliseconds. Without it a turn that
- * never ends would hang the run instead of failing it.
+ * The timer is a failsafe on a wedged turn rather than something a case decides on — what
+ * is waited for here arrives in milliseconds. Without it a turn that never ends would hang
+ * the run instead of failing it.
  */
-function completes(label: string, turn: Promise<void>): Promise<void> {
+function settles(label: string, work: Promise<void>): Promise<void> {
   return Promise.race([
-    turn,
+    work,
     new Promise<never>((_resolve, reject) => {
       setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), 10_000).unref();
     }),
@@ -473,7 +474,7 @@ process.stdin.on('end', () => process.exit(0));`,
       // its own completion — carrying the usage only it sends — and not turn 1's, which
       // lands in the middle of it. Nothing fires this turn's deadline, so a turn that
       // takes its time is still a turn that succeeds.
-      await completes('the next turn', adapter.sendTurn('and now a normal one'));
+      await settles('the next turn', adapter.sendTurn('and now a normal one'));
       assert.equal(of('usage').length, 1);
       assert.equal(of('usage')[0]?.inputTokens, 7);
       assert.equal(of('turn.completed').length, 2);
@@ -561,6 +562,39 @@ describe('CodexAdapter abandoned turns', () => {
     }
   });
 
+  test('gives up on its own clock when nothing hands it a deadline', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-codex-realclock-'));
+    const server = join(dir, 'server.mjs');
+    // Accepts the turn and says nothing more.
+    writeFileSync(server, codexTurnServer(''), 'utf8');
+
+    // The one case that lets the adapter arm its own `setTimeout`, so the default path
+    // every real caller takes is exercised end to end. Nothing else has to fit inside
+    // this window — there is no second turn — so a slow machine only makes the answer
+    // arrive later.
+    const adapter = new CodexAdapter({
+      threadId: 'thread-1',
+      cwd: dir,
+      config: codexTestConfig(dir, server, { codexTurnTimeoutMs: 50 }),
+      permissionMode: 'default',
+      permissionBridge: {} as AdapterContext['permissionBridge'],
+      resumeSessionId: null,
+      emit: () => {},
+      onSessionId: () => {},
+    });
+
+    try {
+      await settles(
+        'the turn to fail on its own deadline',
+        assert.rejects(adapter.sendTurn('hang forever'), /did not complete the turn within 50ms/),
+      );
+      assert.equal(adapter.busy, false);
+    } finally {
+      await adapter.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('keeps an abandoned turn out of the next turn', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'awos-codex-stragglers-'));
     const server = join(dir, 'server.mjs');
@@ -607,7 +641,7 @@ describe('CodexAdapter abandoned turns', () => {
       // Nothing fires the second turn's deadline: it ends on the server's own completion,
       // however long that round trip took. The abandoned turn is still outstanding when
       // that completion is read, in the same read as the acceptance that names this turn.
-      await completes('the next turn', adapter.sendTurn('and now a normal one'));
+      await settles('the next turn', adapter.sendTurn('and now a normal one'));
 
       // The abandoned turn's patch would have replaced the live one's wholesale: the diff
       // is a snapshot of the whole turn, not an addition to it.
