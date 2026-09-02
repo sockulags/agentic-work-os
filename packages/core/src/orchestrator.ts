@@ -868,6 +868,9 @@ class Thread {
     }
 
     const workspace = this.#workspace(summary.cwd);
+    // Only a directory with no declaration has an empty policy. A declaration that exists
+    // but does not resolve has one the harness could not read, which is refused below
+    // rather than reported as a project that asked for nothing.
     const integration =
       workspace.status === 'ok'
         ? workspace.workspace.integration
@@ -893,6 +896,12 @@ class Thread {
         workspaceSource = integrationFailureSource(summary.cwd, candidate);
         invalidSourceReason = 'The workspace integration source could not be pinned, so the transition was refused.';
       }
+    } else if (workspace.status === 'invalid') {
+      workspaceSource = integrationFailureSource(summary.cwd, candidate);
+      invalidSourceReason =
+        `The workspace declaration is invalid, so the integration gate it configures could not be read and the transition was refused. ${
+          workspace.problems[0]?.message ?? ''
+        }`.trim();
     } else {
       workspaceSource = integrationFailureSource(summary.cwd, candidate);
       invalidSourceReason = 'The workspace has no valid canonical integration source, so the transition was refused.';
