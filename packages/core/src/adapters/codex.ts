@@ -281,6 +281,13 @@ export class CodexAdapter implements WorkerAdapter {
       };
     });
 
+    // `settled` is only returned at the bottom of this method, and everything between
+    // here and there can fail the turn — a refused or unanswered `turn/start` most of all.
+    // A rejection nobody holds yet is an unhandled rejection, whose default action takes
+    // the daemon down along with every other thread on it. Held from here on; the caller
+    // still sees the failure, through the throw below or through the promise returned.
+    void settled.catch(() => {});
+
     try {
       await this.#request(
         CODEX_METHODS.turnStart,
@@ -310,8 +317,7 @@ export class CodexAdapter implements WorkerAdapter {
     }
 
     // Armed here rather than before the request: until the turn is accepted the wait is
-    // already bounded by the request's own timeout, and rejecting `settled` before it is
-    // returned below would be an unhandled rejection. A turn that finished inside that
+    // already bounded by the request's own timeout. A turn that finished inside that
     // window needs no watchdog — and must not have this turn's bookkeeping written over
     // whatever started after it, hence the check that we are still the turn in flight.
     if (this.#busy && this.#turnId === turnId) {
