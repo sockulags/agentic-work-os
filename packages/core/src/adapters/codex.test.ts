@@ -665,6 +665,118 @@ describe('CodexAdapter abandoned turns', () => {
   });
 });
 
+/** Handshake and thread, and whatever the case wants `turn/start` to answer — or not. */
+function codexRefusingServer(onTurnStart: string): string {
+  return String.raw`const emit = (value) => process.stdout.write(JSON.stringify(value) + '\n');
+let buffer = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  for (;;) {
+    const newline = buffer.indexOf('\n');
+    if (newline < 0) break;
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    const message = JSON.parse(line);
+    if (message.method === 'initialize') emit({ id: message.id, result: {} });
+    if (message.method === 'thread/start') {
+      emit({ id: message.id, result: { thread: { id: 'thread-1' } } });
+    }
+    if (message.method === 'turn/start') {
+` + onTurnStart + String.raw`
+    }
+  }
+});
+process.stdin.on('end', () => process.exit(0));`;
+}
+
+/**
+ * Runs `work` and reports the rejections nothing was holding while it ran.
+ *
+ * Asserted directly rather than inferred from the suite staying alive: a listener is what
+ * keeps the default action — exiting the process — from firing, so without one a loose
+ * rejection here would be charged to whichever case happened to be running at the exit.
+ */
+async function unheldRejections(work: () => Promise<void>): Promise<unknown[]> {
+  const loose: unknown[] = [];
+  const record = (reason: unknown): void => {
+    loose.push(reason);
+  };
+  process.on('unhandledRejection', record);
+  try {
+    await work();
+    // The event is raised once the microtask queue has drained, which is a turn of the
+    // event loop later than the await that returned above.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    process.off('unhandledRejection', record);
+  }
+  return loose;
+}
+
+describe('CodexAdapter refused turn start', () => {
+  test('reports a refused turn without losing the daemon', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-codex-refused-'));
+    const server = join(dir, 'server.mjs');
+    writeFileSync(
+      server,
+      codexRefusingServer(
+        String.raw`      emit({ id: message.id, error: { code: -32000, message: 'no capacity' } });`,
+      ),
+      'utf8',
+    );
+
+    const { adapter, of } = codexHarness(dir, server);
+
+    try {
+      const loose = await unheldRejections(async () => {
+        await assert.rejects(adapter.sendTurn('do the thing'), /turn\/start: no capacity/);
+      });
+      assert.deepEqual(loose, []);
+
+      // Settled once, and by the failure: the turn the caller was told about is the turn
+      // the transcript records. The adapter's whole report of this is that one event —
+      // the same message reaches the caller as the rejection, not as a second event.
+      assert.equal(of('turn.completed').length, 1);
+      assert.equal(of('turn.completed')[0]?.reason, 'error');
+      assert.match(of('turn.completed')[0]?.error ?? '', /no capacity/);
+      assert.equal(of('error').length, 0);
+      assert.equal(adapter.busy, false);
+    } finally {
+      await adapter.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('reports a turn start that is never answered without losing the daemon', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-codex-unanswered-'));
+    const server = join(dir, 'server.mjs');
+    // Reads the request and says nothing, so the request's own timeout is what ends it.
+    writeFileSync(server, codexRefusingServer('      // no answer, ever'), 'utf8');
+
+    const { adapter, of } = codexHarness(dir, server);
+
+    try {
+      const loose = await unheldRejections(async () => {
+        await assert.rejects(
+          adapter.sendTurn('do the thing'),
+          /did not answer turn\/start within the timeout/,
+        );
+      });
+      assert.deepEqual(loose, []);
+
+      assert.equal(of('turn.completed').length, 1);
+      assert.equal(of('turn.completed')[0]?.reason, 'error');
+      assert.equal(of('error').length, 0);
+      assert.equal(adapter.busy, false);
+    } finally {
+      await adapter.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('extractCodexPlan', () => {
   test('reads the plan key', () => {
     assert.deepEqual(
