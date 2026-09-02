@@ -1902,6 +1902,30 @@ describe('the integration gate', () => {
     assert.equal(evaluated?.kind === 'gate.evaluated' ? evaluated.requirements.length : -1, 0);
   });
 
+  test('a declaration that does not resolve refuses, saying so and why', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    mkdirSync(join(cwd, '.awos'), { recursive: true });
+    // A gate this project meant to require something, in a file this build cannot read.
+    writeFileSync(join(cwd, WORKSPACE_FILE), JSON.stringify({
+      version: 99,
+      name: 'under-test',
+      integration: { requires: ['test'], allowOverride: false },
+    }), 'utf8');
+    const { thread } = await laneWithWork(orch, cwd);
+
+    const result = await orch.integrateLane(thread.id, 'claude');
+
+    assert.equal(result.ok, false, result.detail);
+    assert.match(result.detail, /workspace declaration is invalid/);
+    assert.match(result.detail, /Schema version 99 is not supported/, 'the refusal carries a problem');
+    assert.equal(existsSync(join(cwd, 'from-the-lane.txt')), false, 'the thread directory is untouched');
+    const refused = orch.store
+      .events(thread.id)
+      .find((e) => e.kind === 'lane.updated' && e.status === 'refused');
+    assert.equal(refused?.kind === 'lane.updated' ? refused.detail : '', result.detail);
+  });
+
   describe('override', () => {
     test('is refused outright where the project has not permitted one', async () => {
       const { orch } = await boot(makeConfig());
