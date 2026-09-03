@@ -34,3 +34,40 @@ jobs:
 
       # Builds protocol and core on the way through, so no separate build step.
       - run: npm test
+
+  # The Rust shell used to be compiled for the first time by a release build, so a change
+  # to apps/desktop/src-tauri that did not build could reach main and only surface after
+  # the tag was already pushed. This job compiles it on the pull request instead. It runs
+  # on every push rather than behind a path filter: `verify` and this job share nothing,
+  # so they run in parallel, and a warm cache makes an unchanged workspace cheap.
+  #
+  # Windows on purpose. The shell only ships there, and the spawn configuration in
+  # main.rs sits behind `#[cfg(windows)]`, so a Linux check would compile straight past
+  # the code most likely to break.
+  desktop-shell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Same workspace key as release.yml, so both jobs read and write one cache entry.
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+
+      # `tauri-build` aborts when a path listed under `bundle.resources` is missing, and
+      # that one is produced by `npm run bundle:core` — a full core build plus a vendored
+      # Node download. Nothing inside it is read while compiling; copying its contents is
+      # the bundler's job, and the bundler stays in release.yml. An empty directory gets
+      # past the check and keeps this job independent of the Node build.
+      - name: Stand in for the bundled core resources
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force packages/core/dist-bundle
+
+      # `cargo check` rather than `tauri build`: the question is whether the shell
+      # compiles, and producing the NSIS installer remains a release concern. The debug
+      # profile also keeps the frontend out of it — `generate_context!` embeds
+      # apps/ui/dist only in a release build and uses `devUrl` otherwise — so nothing
+      # here waits on vite.
+      - run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
