@@ -1435,10 +1435,15 @@ class Thread {
   /**
    * What the gate would decide about an agent's lane right now.
    *
-   * Read-only, and the same code path the integration itself takes, so the panel cannot
-   * show one answer while the core acts on another.
+   * Read-only, and it reaches the verdict the integration itself would, so the panel
+   * cannot show one answer while the core acts on another. That includes the two cases
+   * where the policy cannot be read at all: an empty requirement list then means the
+   * harness never saw the gate, not that the project asked for nothing, and reporting it
+   * as satisfied would put a green light in front of a refusal.
    */
-  async gate(agent: AgentId): Promise<GateDecision & { candidate: WorkingState }> {
+  async gate(
+    agent: AgentId,
+  ): Promise<GateDecision & { candidate: WorkingState; refusalReason: string | null }> {
     const summary = this.#store.get(this.id);
     if (!summary) throw new Error(`Unknown thread ${this.id}`);
     const workspace = this.#workspace(summary.cwd);
@@ -1447,15 +1452,29 @@ class Thread {
         ? workspace.workspace.integration
         : { requires: [], allowOverride: false };
     const verify = workspace.status === 'ok' ? workspace.workspace.verify : [];
+    // The wording integrate() refuses with, so the preview and the refusal that follows it
+    // say the same thing. An unreadable declaration names its first problem; a missing one
+    // has no canonical source to pin.
+    const refusalReason =
+      workspace.status === 'invalid'
+        ? `The workspace declaration is invalid, so the integration gate it configures could not be read and the transition was refused. ${
+            workspace.problems[0]?.message ?? ''
+          }`.trim()
+        : workspace.status === 'none'
+          ? 'The workspace has no valid canonical integration source, so the transition was refused.'
+          : null;
 
     const candidate = await this.#workingState(agent);
+    const decision = evaluateGate({
+      integration,
+      verify,
+      evidence: this.evidence(),
+      candidateTree: candidate.tree,
+    });
     return {
-      ...evaluateGate({
-        integration,
-        verify,
-        evidence: this.evidence(),
-        candidateTree: candidate.tree,
-      }),
+      ...decision,
+      allowed: refusalReason === null && decision.allowed,
+      refusalReason,
       candidate,
     };
   }
@@ -2949,7 +2968,10 @@ export class Orchestrator extends EventEmitter {
   }
 
   /** What the gate would decide about an agent's lane right now. */
-  async gate(threadId: string, agent: AgentId): Promise<GateDecision & { candidate: WorkingState }> {
+  async gate(
+    threadId: string,
+    agent: AgentId,
+  ): Promise<GateDecision & { candidate: WorkingState; refusalReason: string | null }> {
     return this.#thread(threadId).gate(agent);
   }
 

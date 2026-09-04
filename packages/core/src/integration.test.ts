@@ -1926,6 +1926,51 @@ describe('the integration gate', () => {
     assert.equal(refused?.kind === 'lane.updated' ? refused.detail : '', result.detail);
   });
 
+  test('the preview refuses a declaration it cannot read, in the words the integration uses', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    mkdirSync(join(cwd, '.awos'), { recursive: true });
+    // The same unreadable file the refusal test above uses: a project that meant to
+    // require something, written in a schema this build does not know.
+    writeFileSync(join(cwd, WORKSPACE_FILE), JSON.stringify({
+      version: 99,
+      name: 'under-test',
+      integration: { requires: ['test'], allowOverride: false },
+    }), 'utf8');
+    const { thread } = await laneWithWork(orch, cwd);
+
+    const preview = await orch.gate(thread.id, 'claude');
+
+    assert.equal(preview.allowed, false, 'a gate the harness cannot read is not a satisfied gate');
+    assert.equal(preview.requirements.length, 0, 'there is no policy to list, which is the point');
+    assert.match(preview.refusalReason ?? '', /workspace declaration is invalid/);
+    assert.match(preview.refusalReason ?? '', /Schema version 99 is not supported/);
+
+    const result = await orch.integrateLane(thread.id, 'claude');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.detail, `integration is gated: ${preview.refusalReason}`, 'one answer, not two');
+    assert.equal(existsSync(join(cwd, 'from-the-lane.txt')), false, 'the thread directory is untouched');
+  });
+
+  test('the preview refuses a directory with no declaration, in the words the integration uses', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    const { thread } = await laneWithWork(orch, cwd);
+
+    const preview = await orch.gate(thread.id, 'claude');
+
+    assert.equal(preview.allowed, false, 'no canonical source is not an empty policy');
+    assert.equal(preview.requirements.length, 0);
+    assert.match(preview.refusalReason ?? '', /canonical integration source/);
+
+    const result = await orch.integrateLane(thread.id, 'claude');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.detail, `integration is gated: ${preview.refusalReason}`, 'one answer, not two');
+    assert.equal(existsSync(join(cwd, 'from-the-lane.txt')), false, 'the thread directory is untouched');
+  });
+
   describe('override', () => {
     test('is refused outright where the project has not permitted one', async () => {
       const { orch } = await boot(makeConfig());
@@ -1999,11 +2044,13 @@ describe('the integration gate', () => {
     const before = await orch.gate(thread.id, 'claude');
     assert.equal(before.allowed, false);
     assert.equal(before.requirements[0]?.state, 'missing');
+    assert.equal(before.refusalReason, null, 'a readable declaration is refused on its checks alone');
 
     await orch.runCheck(thread.id, 'claude', 'test');
     const after = await orch.gate(thread.id, 'claude');
 
     assert.equal(after.allowed, true);
+    assert.equal(after.refusalReason, null);
     assert.equal((await orch.integrateLane(thread.id, 'claude')).ok, true);
   });
 });
