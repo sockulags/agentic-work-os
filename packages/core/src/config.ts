@@ -4,6 +4,9 @@ import { join } from 'node:path';
 /** Fallback ceiling on a Codex turn when the config does not carry one. */
 export const CODEX_TURN_TIMEOUT_DEFAULT_MS = 600_000;
 
+/** Fallback ceiling on a Claude turn when the config does not carry one. */
+export const CLAUDE_TURN_TIMEOUT_DEFAULT_MS = 600_000;
+
 /** Process-only name for the credential that authorizes human-owned records. */
 export const HUMAN_AUTH_TOKEN_ENV = 'AWOS_HUMAN_AUTH_TOKEN';
 
@@ -72,6 +75,15 @@ export interface HarnessConfig {
    */
   codexTurnTimeoutMs?: number;
   /**
+   * Ceiling on one Claude turn, measured from the input write to the `result` event.
+   *
+   * `result` is the only thing the CLI sends that ends a turn. A CLI that stays alive but
+   * never sends one — it hangs, or a release renames the event — would otherwise leave the
+   * adapter busy with a turn nothing can finish, and every later turn rejected. Optional so
+   * injected legacy test configs still typecheck.
+   */
+  claudeTurnTimeoutMs?: number;
+  /**
    * The GitHub CLI, used to read work items as the user.
    *
    * A binary rather than an API token on purpose: `gh` is already authenticated, so the
@@ -132,6 +144,7 @@ export function loadConfig(): HarnessConfig {
     approvalTimeoutMs: envInt('AWOS_APPROVAL_TIMEOUT_MS', 10 * 60_000),
     codexInitTimeoutMs: envInt('AWOS_CODEX_INIT_TIMEOUT_MS', 30_000),
     codexTurnTimeoutMs: envInt('AWOS_CODEX_TURN_TIMEOUT_MS', CODEX_TURN_TIMEOUT_DEFAULT_MS),
+    claudeTurnTimeoutMs: envInt('AWOS_CLAUDE_TURN_TIMEOUT_MS', CLAUDE_TURN_TIMEOUT_DEFAULT_MS),
     ghBin: envStr('AWOS_GH_BIN', 'gh'),
     ghBinArgs: envArgs('AWOS_GH_BIN_ARGS'),
     ghTimeoutMs: envInt('AWOS_GH_TIMEOUT_MS', 20_000),

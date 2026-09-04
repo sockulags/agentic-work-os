@@ -104,6 +104,7 @@ Every setting is an environment variable, read at core startup.
 | `AWOS_CODEX_BIN_ARGS` | `[]` | Same, for Codex |
 | `AWOS_CLAUDE_MODEL` | *(CLI default)* | Passed as `--model` |
 | `AWOS_CODEX_MODEL` | *(CLI default)* | Passed to `thread/start` |
+| `AWOS_CLAUDE_TURN_TIMEOUT_MS` | `600000` | Hard timeout for one Claude turn; a `result` that never arrives fails the turn instead of wedging the thread |
 | `AWOS_CODEX_TURN_TIMEOUT_MS` | `600000` | Hard timeout for one Codex turn; a completion that never arrives fails the turn instead of wedging the thread |
 | `AWOS_QWEN_BASE_URL` | `http://127.0.0.1:1234/v1` | Existing OpenAI-compatible endpoint; never started or stopped by AWOS |
 | `AWOS_QWEN_MODEL` | `qwen3.8-27b-local` | Qwen model id |

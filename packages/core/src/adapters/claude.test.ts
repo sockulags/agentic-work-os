@@ -1,12 +1,290 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { AdapterEvent } from '@awos/protocol';
+import type { HarnessConfig } from '../config.js';
+import type { AdapterContext } from './agent.js';
 import {
+  ClaudeAdapter,
   classifyClaudeTool,
   summarizeClaudeTool,
   flattenToolResult,
   extractTodos,
   describePermission,
 } from './claude.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const FAKE_CLAUDE = join(here, '..', 'testing', 'fake-claude.js');
+
+function claudeTestConfig(
+  dir: string,
+  fakeArgs: string[],
+  overrides: Partial<HarnessConfig> = {},
+): HarnessConfig {
+  return {
+    dataDir: dir,
+    claudeBin: process.execPath,
+    codexBin: process.execPath,
+    claudeBinArgs: [FAKE_CLAUDE, ...fakeArgs],
+    codexBinArgs: [],
+    claudeModel: '',
+    codexModel: '',
+    host: '127.0.0.1',
+    port: 0,
+    replayMaxChars: 1_000,
+    replayMaxToolOutput: 1_000,
+    interruptGraceMs: 1_000,
+    approvalTimeoutMs: 1_000,
+    codexInitTimeoutMs: 2_000,
+    laneSetup: '',
+    laneSetupTimeoutMs: 60_000,
+    ghBin: process.execPath,
+    ghBinArgs: [],
+    ghTimeoutMs: 5_000,
+    ...overrides,
+  };
+}
+
+function claudeHarness(dir: string, fakeArgs: string[], overrides: Partial<HarnessConfig> = {}) {
+  const events: AdapterEvent[] = [];
+  const config = claudeTestConfig(dir, fakeArgs, overrides);
+  const adapter = new ClaudeAdapter({
+    threadId: 'thread-1',
+    cwd: dir,
+    config,
+    permissionMode: 'default',
+    permissionBridge: {
+      port: 0,
+      token: 'test-token',
+      registerThread: () => {},
+      unregisterThread: () => {},
+    } as unknown as AdapterContext['permissionBridge'],
+    resumeSessionId: null,
+    emit: (event) => events.push(event),
+    onSessionId: () => {},
+  });
+
+  const of = <K extends AdapterEvent['kind']>(
+    kind: K,
+  ): Array<Extract<AdapterEvent, { kind: K }>> =>
+    events.filter((event): event is Extract<AdapterEvent, { kind: K }> => event.kind === kind);
+
+  return { adapter, of, config, events };
+}
+
+describe('ClaudeAdapter turn deadline', () => {
+  test('abandons a turn that never gets a result and takes the next one', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-claude-deadline-'));
+    // The fake accepts the first turn, streams it, stays alive, and withholds its
+    // `result` until the next turn's input arrives. Nothing but a deadline can end it.
+    const { adapter, of, config } = claudeHarness(dir, ['--late-result'], {
+      claudeTurnTimeoutMs: 120,
+    });
+    let stopped = false;
+
+    try {
+      const startedAt = Date.now();
+      await assert.rejects(
+        adapter.sendTurn('hang forever'),
+        /did not complete the turn within 120ms/,
+      );
+      // The wait came from this deadline rather than the ten-minute default; spawning the
+      // fake CLI accounts for most of what is left of this window.
+      const elapsed = Date.now() - startedAt;
+      assert.ok(elapsed < 3_000, `the turn should fail on its own deadline, took ${elapsed}ms`);
+
+      // The operator sees the timeout as an event scoped to the turn, not only in a log.
+      assert.equal(of('error').length, 1);
+      assert.equal(of('error')[0]?.severity, 'turn');
+      assert.equal(of('error')[0]?.turnId, of('turn.started')[0]?.turnId);
+
+      // The turn is recorded as a failure, never as a completion.
+      assert.equal(of('turn.completed').length, 1);
+      assert.equal(of('turn.completed')[0]?.reason, 'error');
+      assert.match(of('turn.completed')[0]?.error ?? '', /did not complete the turn/);
+
+      // The process is still alive, so the worker is idle rather than exited.
+      assert.equal(of('agent.status').at(-1)?.status, 'idle');
+      assert.equal(adapter.busy, false);
+
+      // The wedge is gone: the next turn is accepted and runs to completion. The deadline
+      // is read when a turn arms it, so widening it here takes the watchdog meant for the
+      // hung turn off the healthy one — which under a loaded suite is otherwise a race
+      // between a real turn and a deliberately unreachable deadline.
+      config.claudeTurnTimeoutMs = 60_000;
+      await adapter.sendTurn('and now a normal one');
+
+      // The counts below only mean something once the whole stream has been read. This
+      // turn resolves on a `result`, and the point of the assertions is which one — so
+      // wait for the CLI to close rather than for the first result that settles the turn.
+      await adapter.stop();
+      stopped = true;
+
+      assert.equal(of('turn.completed').length, 2);
+      assert.equal(of('turn.completed')[1]?.reason, 'completed');
+      // One turn, one id: the events that open and close it agree on which turn it was.
+      assert.equal(of('turn.started')[1]?.turnId, of('turn.completed')[1]?.turnId);
+
+      // The abandoned turn's late result arrived mid-way through this one. Counting it
+      // would have banked another turn's tokens here and closed a turn twice.
+      assert.equal(of('usage').length, 1);
+      assert.equal(of('usage')[0]?.turnId, of('turn.started')[1]?.turnId);
+    } finally {
+      if (!stopped) await adapter.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('does not mute the next turn when the abandoned result never arrives', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-claude-mute-'));
+    // The result the first turn owes is never sent — a CLI whose result event was renamed
+    // or dropped. Nothing but the replayed input ever shows that the turn ended, so a
+    // watchdog that waits for the owed result would disown every turn after it forever.
+    const { adapter, of, config } = claudeHarness(dir, ['--drop-result'], {
+      claudeTurnTimeoutMs: 120,
+    });
+    let stopped = false;
+
+    try {
+      await assert.rejects(
+        adapter.sendTurn('hang forever'),
+        /did not complete the turn within 120ms/,
+      );
+
+      config.claudeTurnTimeoutMs = 60_000;
+      await adapter.sendTurn('and now a normal one');
+      await adapter.stop();
+      stopped = true;
+
+      // The second turn is not just accepted, it is visible: its reply reached the
+      // transcript rather than being taken for the abandoned turn's.
+      const second = of('turn.started')[1]?.turnId;
+      assert.equal(of('turn.completed')[1]?.reason, 'completed');
+      assert.equal(of('turn.completed')[1]?.turnId, second);
+      assert.ok(
+        of('message.completed').some(
+          (event) => event.turnId === second && event.text.includes('and now a normal one'),
+        ),
+        'the second turn produced no visible reply',
+      );
+      assert.equal(of('usage').length, 1);
+      assert.equal(of('usage')[0]?.turnId, second);
+    } finally {
+      if (!stopped) await adapter.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps two abandoned turns apart instead of discharging both at the first replay', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-claude-two-abandoned-'));
+    // The CLI stays blocked long enough for two submitted turns to outlive their
+    // deadline. It then replays the second input and runs that second — also abandoned —
+    // turn while a third is in flight, closing it with a `result` of its own. Reading
+    // that replay as "everything before it is over" would hand the second turn's stream,
+    // and its result, to the third.
+    const { adapter, of, config, events } = claudeHarness(dir, ['--stall-second'], {
+      claudeTurnTimeoutMs: 120,
+    });
+    let stopped = false;
+
+    try {
+      await assert.rejects(adapter.sendTurn('first turn'), /did not complete the turn/);
+      await assert.rejects(adapter.sendTurn('second turn'), /did not complete the turn/);
+
+      // The deadline is read when a turn arms it, so the third turn gets a reachable one.
+      config.claudeTurnTimeoutMs = 60_000;
+      await adapter.sendTurn('third turn');
+      await adapter.stop();
+      stopped = true;
+
+      const third = of('turn.started')[2]?.turnId;
+      assert.equal(of('turn.started').length, 3);
+      assert.deepEqual(
+        of('turn.completed').map((event) => event.reason),
+        ['error', 'error', 'completed'],
+      );
+      assert.equal(of('turn.completed')[2]?.turnId, third);
+
+      // The second turn was disowned when its deadline passed and stays disowned until
+      // its own input is behind us, so nothing it said reached the transcript at all.
+      assert.deepEqual(
+        of('message.completed').filter((event) => event.text.includes('second turn')),
+        [],
+      );
+      assert.ok(
+        of('message.completed').some(
+          (event) => event.turnId === third && event.text.includes('third turn'),
+        ),
+        'the third turn produced no visible reply',
+      );
+
+      // The third turn was closed by its own `result`, which arrives after its reply.
+      // The abandoned turn's result came first and would have closed it before that.
+      const reply = events.findIndex(
+        (event) => event.kind === 'message.completed' && event.text.includes('third turn'),
+      );
+      const completed = events.findIndex(
+        (event) => event.kind === 'turn.completed' && event.turnId === third,
+      );
+      assert.ok(reply >= 0 && completed > reply, 'the third turn was closed by another result');
+
+      // The second turn's result landed mid-way through the third; its tokens are not
+      // the third turn's to bank.
+      assert.equal(of('usage').length, 1);
+      assert.equal(of('usage')[0]?.turnId, third);
+    } finally {
+      if (!stopped) await adapter.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('takes the next turn after one that timed out having said nothing at all', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-claude-silent-'));
+    // The CLI takes the first turn up — it replays the input — and then hangs before
+    // producing a single word of it. A turn that says nothing is still a turn that ended,
+    // so the replay of the next input is the only mark that the CLI moved on, and reading
+    // it as anything less strands the healthy turn behind an abandoned one.
+    const { adapter, of, config } = claudeHarness(dir, ['--silent-first'], {
+      claudeTurnTimeoutMs: 120,
+    });
+    let stopped = false;
+
+    try {
+      await assert.rejects(adapter.sendTurn('silent turn'), /did not complete the turn/);
+      // Nothing of that turn reached the transcript, which is what makes it the case the
+      // boundary has to be moved on without: there was no output to move on from.
+      assert.equal(of('message.completed').length, 0);
+
+      // Reachable, but short enough that a turn stranded behind the abandoned one fails
+      // here rather than stalling the suite for a minute.
+      config.claudeTurnTimeoutMs = 10_000;
+      await adapter.sendTurn('healthy turn');
+      await adapter.stop();
+      stopped = true;
+
+      const second = of('turn.started')[1]?.turnId;
+      assert.deepEqual(
+        of('turn.completed').map((event) => event.reason),
+        ['error', 'completed'],
+      );
+      assert.equal(of('turn.completed')[1]?.turnId, second);
+      assert.ok(
+        of('message.completed').some(
+          (event) => event.turnId === second && event.text.includes('healthy turn'),
+        ),
+        'the healthy turn produced no visible reply',
+      );
+      assert.equal(of('usage').length, 1);
+      assert.equal(of('usage')[0]?.turnId, second);
+    } finally {
+      if (!stopped) await adapter.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('classifyClaudeTool', () => {
   test('maps built-ins to their kind', () => {
