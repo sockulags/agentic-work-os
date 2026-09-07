@@ -47,6 +47,26 @@ const armWithTimeout: ArmDeadline = (fire, ms) => {
   return () => clearTimeout(timer);
 };
 
+/**
+ * How long a failed start waits for SIGTERM to be honoured before it stops being polite.
+ *
+ * An app-server that is still healthy enough to have answered `initialize` exits within
+ * milliseconds of its stdin closing, so this is slack for a process caught mid-write, not
+ * a normal cost. It is deliberately far below `interruptGraceMs`: a failed start is on the
+ * orchestrator's retry path, where the whole teardown has to stay invisible.
+ */
+const ABANDON_TERM_GRACE_MS = 500;
+
+/**
+ * How long the same wait continues after SIGKILL before it gives up regardless.
+ *
+ * SIGKILL is not refusable, so this only covers the kernel reaping the process — and on
+ * Windows, where the signal reaches the shell wrapper rather than the server itself, it
+ * bounds a wait that could otherwise not end. A failed start must reject in bounded time
+ * even when the process it spawned cannot be shown to be gone.
+ */
+const ABANDON_KILL_GRACE_MS = 250;
+
 export class CodexAdapter implements WorkerAdapter {
   readonly id = 'codex-app-server' as const;
 
@@ -193,12 +213,21 @@ export class CodexAdapter implements WorkerAdapter {
      *
      * Everything here is scoped to *this* child: a start that failed and a start that
      * replaced it are two different processes, and only the failed one may be torn down.
+     *
+     * This resolves only once that process is actually gone, or the wait for it has run
+     * out. Returning any earlier would let the caller's retry spawn a second app-server
+     * while the first is still running, which is the overlap the teardown exists to
+     * prevent.
      */
-    const abandon = (cause: Error): void => {
+    const abandon = async (cause: Error): Promise<void> => {
       detachStdout();
       child.stderr.off('data', onStderr);
       child.off('error', onSpawnError);
       child.off('close', onClose);
+      // Nobody reads either pipe now, and an unread pipe never reaches EOF — so its
+      // stream never closes, and neither does the child. Drain both into nothing.
+      child.stdout.resume();
+      child.stderr.resume();
       // Ending and killing can still raise on a process on its way out, and an unheard
       // 'error' on a child would take the harness down rather than this attempt.
       child.on('error', (err) => log.debug('abandoned child error', { message: err.message }));
@@ -211,20 +240,49 @@ export class CodexAdapter implements WorkerAdapter {
         this.#threadId = null;
       }
 
+      // Nothing is left to answer them: the reader that would have carried a response is
+      // detached, and the close that would have rejected them is no longer heard. Done
+      // before the wait below, which has no answer for them either.
+      this.#rejectAllPending(cause);
+
       // Closing stdin is what a healthy app-server exits on; the signal is for one that
       // does not.
       child.stdin.end();
       child.kill('SIGTERM');
 
-      // Nothing is left to answer them: the reader that would have carried a response is
-      // detached, and the close that would have rejected them is no longer heard.
-      this.#rejectAllPending(cause);
+      // `end()` and `kill()` only ask. What the caller is owed is the process being gone,
+      // so wait for its exit — escalating once, and giving up either way on a short clock.
+      await new Promise<void>((resolve) => {
+        // Already reaped, in which case 'close' has fired or never will.
+        if (child.exitCode !== null || child.signalCode !== null) {
+          resolve();
+          return;
+        }
+
+        let settled = false;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(termTimer);
+          clearTimeout(killTimer);
+          child.off('close', onExit);
+          resolve();
+        };
+        const onExit = (): void => finish();
+        child.on('close', onExit);
+
+        const termTimer = setTimeout(() => child.kill('SIGKILL'), ABANDON_TERM_GRACE_MS);
+        const killTimer = setTimeout(() => {
+          log.warn('abandoned child outlived its teardown', { pid: child.pid ?? null });
+          finish();
+        }, ABANDON_TERM_GRACE_MS + ABANDON_KILL_GRACE_MS);
+      });
     };
 
     try {
       await this.#handshake();
     } catch (err) {
-      abandon(err as Error);
+      await abandon(err as Error);
       throw err;
     }
   }

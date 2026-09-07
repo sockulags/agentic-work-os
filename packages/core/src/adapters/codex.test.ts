@@ -798,9 +798,12 @@ function processAlive(pid: number): boolean {
  *
  * Every process it starts records its pid, so one that outlived its handshake is visible
  * from the test. A process being shut down names a thread on its way out — a message from
- * a server nobody is talking to any more, which the adapter must not act on. A first
- * process still running a quarter second after its handshake failed says the same thing
- * on a timer, which is what a leaked one does.
+ * a server nobody is talking to any more, which the adapter must not act on. One never
+ * asked to shut down says the same thing on a timer a quarter second in, which is what a
+ * leaked one does.
+ *
+ * The first process also takes its time leaving, so that a teardown which only sends the
+ * signal and returns is caught: at the moment such a teardown finishes, this is alive.
  */
 const HANDSHAKE_SERVER = String.raw`import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 
@@ -818,8 +821,12 @@ let leaving = false;
 const leave = () => {
   if (leaving) return;
   leaving = true;
-  process.stdout.write(JSON.stringify(ghost) + '\n', () => process.exit(0));
-  setTimeout(() => process.exit(0), 500);
+  // The first process does not stop the instant it is asked. That delay is the whole
+  // case: a teardown that only sends the signal is finished long before this exits.
+  setTimeout(() => {
+    process.stdout.write(JSON.stringify(ghost) + '\n', () => process.exit(0));
+    setTimeout(() => process.exit(0), 500);
+  }, attempt === 1 ? 150 : 0);
 };
 // Closed stdin is how this ends on Windows, where the signal reaches the shell wrapper
 // rather than this process.
@@ -886,10 +893,18 @@ describe('CodexAdapter failed handshake', () => {
     try {
       await assert.rejects(adapter.start(), (err: unknown) => isNativeResumeNotFoundError(err));
 
-      await until('the first app-server to record itself', () => pids().length === 1);
-      const abandoned = pids()[0]!;
-      // The attempt that failed owns the process it spawned, all the way to its exit.
-      await until('the abandoned app-server to exit', () => !processAlive(abandoned));
+      // Asserted with no waiting of any kind in between, because "gone eventually" is
+      // what a teardown that merely signals also achieves. The error is only allowed out
+      // once the process is already gone: a caller that retries the moment it sees the
+      // rejection must not find the failed app-server still running.
+      const recorded = pids();
+      assert.equal(recorded.length, 1);
+      const abandoned = recorded[0]!;
+      assert.equal(
+        processAlive(abandoned),
+        false,
+        'the failed start should have outlived its own process',
+      );
 
       await adapter.start();
 
@@ -919,7 +934,13 @@ describe('CodexAdapter failed handshake', () => {
       );
     } finally {
       await adapter.stop();
-      rmSync(dir, { recursive: true, force: true });
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // A process that outlived this case holds the directory open as its cwd on
+        // Windows. That is the failure the assertions above already name, and letting the
+        // EBUSY out of a `finally` would replace it with a cleanup error instead.
+      }
     }
   });
 });
