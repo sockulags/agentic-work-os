@@ -1003,3 +1003,157 @@ describe('describeCodexApproval', () => {
     assert.equal(title, 'Needs network access');
   });
 });
+
+/**
+ * A broken stdout pipe, which is not the process exiting.
+ *
+ * `ChildProcess`'s `error` event and the `error` event of its `stdout` stream are two
+ * different events, and only the first one was ever listened for. The second was therefore
+ * thrown by Node as an uncaught exception, so one worker's broken pipe ended the daemon —
+ * every thread, every other worker, and the socket the UI is attached to.
+ *
+ * Everything a stdout failure has to settle is waiting on that stream: a request waits for
+ * its response line and a turn waits for `turn/completed`, and neither can arrive again.
+ * What is left is a server that can no longer be heard from and may still be running, which
+ * must neither outlive the adapter's interest in it nor reach across into its replacement.
+ */
+describe('CodexAdapter stdout failure', () => {
+  /**
+   * Accepts the turn and then says nothing, so the turn is genuinely in flight when the
+   * pipe breaks. It records its pid at both ends of its life and takes its time going: the
+   * window between the failure and its own exit is where a still-wired `close` would reach
+   * across into whatever replaced it.
+   */
+  const SILENT_SERVER = String.raw`import { appendFileSync } from 'node:fs';
+
+const marker = new URL('marker.txt', import.meta.url);
+appendFileSync(marker, 'start ' + process.pid + '\n');
+process.on('exit', () => appendFileSync(marker, 'exit ' + process.pid + '\n'));
+
+const emit = (value) => process.stdout.write(JSON.stringify(value) + '\n');
+let buffer = '';
+let turns = 0;
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  for (;;) {
+    const newline = buffer.indexOf('\n');
+    if (newline < 0) break;
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    const message = JSON.parse(line);
+    if (message.method === 'initialize') emit({ id: message.id, result: {} });
+    if (message.method === 'thread/start') {
+      emit({ id: message.id, result: { thread: { id: 'thread-1' } } });
+    }
+    if (message.method === 'turn/start') {
+      turns += 1;
+      emit({ id: message.id, result: { turn: { id: 'turn-' + turns } } });
+      // And nothing after it: no turn/completed ever closes this turn.
+    }
+  }
+});
+process.stdin.on('end', () => setTimeout(() => process.exit(0), 300));`;
+
+  test('fails the turn once, ends the worker, and leaves its replacement alone', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-codex-stdout-'));
+    const server = join(dir, 'server.mjs');
+    writeFileSync(server, SILENT_SERVER, 'utf8');
+    const marker = (): string[] => {
+      const file = join(dir, 'marker.txt');
+      return existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean) : [];
+    };
+
+    const { adapter, of, waitFor } = codexHarness(dir, server);
+    let second: 'pending' | 'settled' = 'pending';
+
+    try {
+      const first = settles('the turn to be failed by the pipe', adapter.sendTurn('do the work'));
+      await waitFor('turn.started');
+      const failedPid = marker()[0]?.split(' ')[1];
+
+      // Without a listener on the stream this call throws, and in the daemon it would have
+      // been an uncaught exception instead.
+      assert.doesNotThrow(() => adapter.failStdoutForTests(new Error('EIO: read failed')));
+      await assert.rejects(first, /stdout failed/);
+
+      // The replacement, started while the failed process is still winding down — which is
+      // exactly when a `close` still wired to the adapter would fail the wrong turn.
+      const next = adapter.sendTurn('try again');
+      const settle = (): void => {
+        second = 'settled';
+      };
+      next.then(settle, settle);
+
+      await until('the failed worker to exit', () => marker().includes(`exit ${failedPid}`));
+      // Its exit is on the parent's doorstep by now; give it every chance to be heard.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      assert.equal(second, 'pending', "the failed worker settled its replacement's turn");
+      const completed = of('turn.completed');
+      assert.deepEqual(
+        completed.map((event) => event.reason),
+        ['error'],
+      );
+      assert.match(String(completed[0]?.error), /EIO: read failed/);
+
+      const statuses = of('agent.status').map((event) => event.status);
+      assert.equal(statuses.filter((status) => status === 'failed').length, 1);
+      // The exit of a worker the adapter already gave up on is not the adapter's to report.
+      assert.deepEqual(
+        statuses.filter((status) => status === 'exited'),
+        [],
+      );
+      assert.ok(
+        of('error').some(
+          (event) => event.severity === 'fatal' && /EIO: read failed/.test(event.message),
+        ),
+        'the thread was never told its worker had failed',
+      );
+
+      // Two workers in one directory is the invariant the shared-directory mode exists to
+      // hold, so the failed one has to be gone rather than merely disowned.
+      const lines = marker();
+      assert.equal(lines.filter((line) => line.startsWith('start ')).length, 2);
+      assert.ok(lines.includes(`exit ${failedPid}`), 'the failed worker was left running');
+    } finally {
+      await adapter.stop();
+      // A worker this case failed to end would hold the directory open, and a verdict
+      // replaced by EBUSY says nothing about the assertions above it.
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* reported by the assertions, not by the cleanup */
+      }
+    }
+  });
+
+  test('rejects a request still waiting for its response line', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-codex-stdout-pending-'));
+    const server = join(dir, 'server.mjs');
+    // Reads its stdin and answers nothing, so `initialize` is still pending when the pipe
+    // breaks. Left to the init timeout this would take seconds; the point is that the
+    // failure settles it rather than the clock.
+    writeFileSync(
+      server,
+      String.raw`process.stdin.resume();
+process.stdin.on('end', () => process.exit(0));`,
+      'utf8',
+    );
+
+    const { adapter, of, waitFor } = codexHarness(dir, server);
+
+    try {
+      const started = settles('start to be failed by the pipe', adapter.start());
+      await waitFor('agent.status');
+
+      assert.doesNotThrow(() => adapter.failStdoutForTests(new Error('EPIPE')));
+      await assert.rejects(started, /stdout failed/);
+
+      assert.deepEqual(of('turn.completed'), []);
+    } finally {
+      await adapter.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
