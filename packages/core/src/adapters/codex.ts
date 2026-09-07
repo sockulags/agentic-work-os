@@ -47,6 +47,26 @@ const armWithTimeout: ArmDeadline = (fire, ms) => {
   return () => clearTimeout(timer);
 };
 
+/**
+ * How long a failed start waits for SIGTERM to be honoured before it stops being polite.
+ *
+ * An app-server that is still healthy enough to have answered `initialize` exits within
+ * milliseconds of its stdin closing, so this is slack for a process caught mid-write, not
+ * a normal cost. It is deliberately far below `interruptGraceMs`: a failed start is on the
+ * orchestrator's retry path, where the whole teardown has to stay invisible.
+ */
+const ABANDON_TERM_GRACE_MS = 500;
+
+/**
+ * How long the same wait continues after SIGKILL before it gives up regardless.
+ *
+ * SIGKILL is not refusable, so this only covers the kernel reaping the process — and on
+ * Windows, where the signal reaches the shell wrapper rather than the server itself, it
+ * bounds a wait that could otherwise not end. A failed start must reject in bounded time
+ * even when the process it spawned cannot be shown to be gone.
+ */
+const ABANDON_KILL_GRACE_MS = 250;
+
 export class CodexAdapter implements WorkerAdapter {
   readonly id = 'codex-app-server' as const;
 
@@ -133,7 +153,7 @@ export class CodexAdapter implements WorkerAdapter {
   }
 
   async #doStart(): Promise<void> {
-    const { config, cwd, resumeSessionId } = this.#ctx;
+    const { config, cwd } = this.#ctx;
 
     log.info('spawning', { cwd });
     this.#emitStatus('spawning', null);
@@ -141,18 +161,19 @@ export class CodexAdapter implements WorkerAdapter {
     const child = spawnCli(config.codexBin, [...config.codexBinArgs, 'app-server'], { cwd });
     this.#child = child;
 
-    readJsonLines<CodexWire.JsonRpcMessage>(child.stdout, {
+    const detachStdout = readJsonLines<CodexWire.JsonRpcMessage>(child.stdout, {
       onMessage: (msg) => this.#onMessage(msg),
       onUnparseable: (line) => log.debug('non-json stdout', { line: line.slice(0, 200) }),
     });
 
     child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (chunk: string) => {
+    const onStderr = (chunk: string): void => {
       const text = chunk.trim();
       if (text) log.warn('stderr', { text: text.slice(0, 500) });
-    });
+    };
+    child.stderr.on('data', onStderr);
 
-    child.on('error', (err) => {
+    const onSpawnError = (err: Error): void => {
       log.error('spawn failed', { message: err.message });
       this.#emitStatus('failed', err.message);
       this.#ctx.emit({
@@ -164,9 +185,10 @@ export class CodexAdapter implements WorkerAdapter {
       });
       this.#rejectAllPending(err);
       this.#failTurn(err);
-    });
+    };
+    child.on('error', onSpawnError);
 
-    child.on('close', (code) => {
+    const onClose = (code: number | null): void => {
       log.info('exited', { code });
       this.#child = null;
       this.#threadId = null;
@@ -177,9 +199,104 @@ export class CodexAdapter implements WorkerAdapter {
       const err = new Error(`Codex app-server exited (code ${code ?? 'null'})`);
       this.#rejectAllPending(err);
       this.#failTurn(err);
-    });
+    };
+    child.on('close', onClose);
 
-    // Handshake. The server rejects everything until initialize/initialized complete.
+    /**
+     * Give up on this attempt's process, completely.
+     *
+     * A handshake step can fail at any point after the spawn — `thread/resume` does it
+     * deliberately, on every stale session id — and the process is already running by
+     * then. Left alone it would keep running with this adapter's reader still attached,
+     * so a server nobody is talking to could still name a thread, and its eventual exit
+     * could still fail a turn belonging to the process that replaced it.
+     *
+     * Everything here is scoped to *this* child: a start that failed and a start that
+     * replaced it are two different processes, and only the failed one may be torn down.
+     *
+     * This resolves only once that process is actually gone, or the wait for it has run
+     * out. Returning any earlier would let the caller's retry spawn a second app-server
+     * while the first is still running, which is the overlap the teardown exists to
+     * prevent.
+     */
+    const abandon = async (cause: Error): Promise<void> => {
+      detachStdout();
+      child.stderr.off('data', onStderr);
+      child.off('error', onSpawnError);
+      child.off('close', onClose);
+      // Nobody reads either pipe now, and an unread pipe never reaches EOF — so its
+      // stream never closes, and neither does the child. Drain both into nothing.
+      child.stdout.resume();
+      child.stderr.resume();
+      // Ending and killing can still raise on a process on its way out, and an unheard
+      // 'error' on a child would take the harness down rather than this attempt.
+      child.on('error', (err) => log.debug('abandoned child error', { message: err.message }));
+      child.stdin.on('error', (err) => log.debug('abandoned stdin error', { message: err.message }));
+
+      // Only if it is still ours. A concurrent start owns the reference by then, and
+      // clearing it would strand a healthy process exactly as this attempt stranded one.
+      if (this.#child === child) {
+        this.#child = null;
+        this.#threadId = null;
+      }
+
+      // Nothing is left to answer them: the reader that would have carried a response is
+      // detached, and the close that would have rejected them is no longer heard. Done
+      // before the wait below, which has no answer for them either.
+      this.#rejectAllPending(cause);
+
+      // Closing stdin is what a healthy app-server exits on; the signal is for one that
+      // does not.
+      child.stdin.end();
+      child.kill('SIGTERM');
+
+      // `end()` and `kill()` only ask. What the caller is owed is the process being gone,
+      // so wait for its exit — escalating once, and giving up either way on a short clock.
+      await new Promise<void>((resolve) => {
+        // Already reaped, in which case 'close' has fired or never will.
+        if (child.exitCode !== null || child.signalCode !== null) {
+          resolve();
+          return;
+        }
+
+        let settled = false;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(termTimer);
+          clearTimeout(killTimer);
+          child.off('close', onExit);
+          resolve();
+        };
+        const onExit = (): void => finish();
+        child.on('close', onExit);
+
+        const termTimer = setTimeout(() => child.kill('SIGKILL'), ABANDON_TERM_GRACE_MS);
+        const killTimer = setTimeout(() => {
+          log.warn('abandoned child outlived its teardown', { pid: child.pid ?? null });
+          finish();
+        }, ABANDON_TERM_GRACE_MS + ABANDON_KILL_GRACE_MS);
+      });
+    };
+
+    try {
+      await this.#handshake();
+    } catch (err) {
+      await abandon(err as Error);
+      throw err;
+    }
+  }
+
+  /**
+   * Turn a spawned process into a thread we can send turns to.
+   *
+   * Kept apart from the spawn because this is the part that fails: every throw below
+   * lands in the caller's abandon path, which owns undoing the spawn.
+   */
+  async #handshake(): Promise<void> {
+    const { config, cwd, resumeSessionId } = this.#ctx;
+
+    // The server rejects everything until initialize/initialized complete.
     await this.#request(CODEX_METHODS.initialize, {
       clientInfo: { name: 'agentic-work-os', title: 'Agentic Work OS', version: '0.1.0' },
     } satisfies CodexWire.CodexInitializeParams);

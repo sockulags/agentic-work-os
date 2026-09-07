@@ -13,6 +13,7 @@ import {
   extractCodexPlan,
   describeCodexApproval,
 } from './codex.js';
+import { isNativeResumeNotFoundError } from './agent.js';
 import type { AdapterContext, ArmDeadline } from './agent.js';
 import type { HarnessConfig } from '../config.js';
 
@@ -773,6 +774,173 @@ describe('CodexAdapter refused turn start', () => {
     } finally {
       await adapter.stop();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * Does a process still exist?
+ *
+ * Signal 0 delivers nothing and only asks the question, which is the one way to tell a
+ * leaked app-server from a terminated one without trusting the adapter's own bookkeeping.
+ */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A server that refuses the first process's resume and accepts the second's.
+ *
+ * Every process it starts records its pid, so one that outlived its handshake is visible
+ * from the test. A process being shut down names a thread on its way out — a message from
+ * a server nobody is talking to any more, which the adapter must not act on. One never
+ * asked to shut down says the same thing on a timer a quarter second in, which is what a
+ * leaked one does.
+ *
+ * The first process also takes its time leaving, so that a teardown which only sends the
+ * signal and returns is caught: at the moment such a teardown finishes, this is alive.
+ */
+const HANDSHAKE_SERVER = String.raw`import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+
+const pidFile = new URL('pids.txt', import.meta.url);
+const before = existsSync(pidFile)
+  ? readFileSync(pidFile, 'utf8').split('\n').filter(Boolean)
+  : [];
+const attempt = before.length + 1;
+appendFileSync(pidFile, process.pid + '\n');
+
+const emit = (value) => process.stdout.write(JSON.stringify(value) + '\n');
+const ghost = { method: 'thread/started', params: { thread: { id: 'ghost-thread' } } };
+
+let leaving = false;
+const leave = () => {
+  if (leaving) return;
+  leaving = true;
+  // The first process does not stop the instant it is asked. That delay is the whole
+  // case: a teardown that only sends the signal is finished long before this exits.
+  setTimeout(() => {
+    process.stdout.write(JSON.stringify(ghost) + '\n', () => process.exit(0));
+    setTimeout(() => process.exit(0), 500);
+  }, attempt === 1 ? 150 : 0);
+};
+// Closed stdin is how this ends on Windows, where the signal reaches the shell wrapper
+// rather than this process.
+process.on('SIGTERM', leave);
+process.stdin.on('end', leave);
+if (attempt === 1) {
+  setTimeout(() => {
+    if (!leaving) emit(ghost);
+  }, 250).unref();
+}
+
+let buffer = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  for (;;) {
+    const newline = buffer.indexOf('\n');
+    if (newline < 0) break;
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    const message = JSON.parse(line);
+    if (message.method === 'initialize') emit({ id: message.id, result: {} });
+    if (message.method === 'thread/resume') {
+      if (attempt === 1) {
+        emit({ id: message.id, error: { code: -32000, message: 'thread not found' } });
+      } else {
+        emit({ id: message.id, result: { thread: { id: 'thread-live' } } });
+      }
+    }
+    if (message.method === 'thread/start') {
+      emit({ id: message.id, result: { thread: { id: 'thread-live' } } });
+    }
+  }
+});`;
+
+describe('CodexAdapter failed handshake', () => {
+  test('takes its own process with it, and the retry neither inherits nor hears it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-codex-handshake-'));
+    const server = join(dir, 'server.mjs');
+    writeFileSync(server, HANDSHAKE_SERVER, 'utf8');
+
+    const events: AdapterEvent[] = [];
+    const named: Array<string | null> = [];
+    const adapter = new CodexAdapter({
+      threadId: 'thread-1',
+      cwd: dir,
+      config: codexTestConfig(dir, server),
+      permissionMode: 'default',
+      permissionBridge: {} as AdapterContext['permissionBridge'],
+      // The id the server refuses, which is how the deliberate throw is reached: this is
+      // the ordinary stale-session retry, not an exotic failure.
+      resumeSessionId: 'stale-thread',
+      emit: (event) => events.push(event),
+      onSessionId: (id) => named.push(id),
+      onSessionLost: () => {},
+    });
+
+    const pids = (): number[] => {
+      const file = join(dir, 'pids.txt');
+      if (!existsSync(file)) return [];
+      return readFileSync(file, 'utf8').split('\n').filter(Boolean).map(Number);
+    };
+
+    try {
+      await assert.rejects(adapter.start(), (err: unknown) => isNativeResumeNotFoundError(err));
+
+      // Asserted with no waiting of any kind in between, because "gone eventually" is
+      // what a teardown that merely signals also achieves. The error is only allowed out
+      // once the process is already gone: a caller that retries the moment it sees the
+      // rejection must not find the failed app-server still running.
+      const recorded = pids();
+      assert.equal(recorded.length, 1);
+      const abandoned = recorded[0]!;
+      assert.equal(
+        processAlive(abandoned),
+        false,
+        'the failed start should have outlived its own process',
+      );
+
+      await adapter.start();
+
+      const started = pids();
+      assert.equal(started.length, 2);
+      assert.equal(processAlive(started[0]!), false);
+      assert.equal(processAlive(started[1]!), true);
+      assert.equal(adapter.nativeSessionId, 'thread-live');
+
+      // Whatever the abandoned process said on its way out has had every chance to be
+      // read by now, and none of it is the adapter's to act on: the thread it names is
+      // not the thread the live process is running.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(named.includes('ghost-thread'), false);
+      assert.equal(adapter.nativeSessionId, 'thread-live');
+
+      // Nor was its exit reported as the daemon's: that status belongs to the process the
+      // adapter is actually running.
+      const statuses = events.filter(
+        (event): event is Extract<AdapterEvent, { kind: 'agent.status' }> =>
+          event.kind === 'agent.status',
+      );
+      assert.deepEqual(
+        statuses.map((event) => event.status).filter((status) => status === 'exited'),
+        [],
+      );
+    } finally {
+      await adapter.stop();
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // A process that outlived this case holds the directory open as its cwd on
+        // Windows. That is the failure the assertions above already name, and letting the
+        // EBUSY out of a `finally` would replace it with a cleanup error instead.
+      }
     }
   });
 });
