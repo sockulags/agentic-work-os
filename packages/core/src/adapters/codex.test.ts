@@ -1128,6 +1128,89 @@ process.stdin.on('end', () => setTimeout(() => process.exit(0), 300));`;
     }
   });
 
+  /**
+   * Blocks the turn on an approval and then says nothing more, so the server is still
+   * waiting for a decision line when the pipe breaks.
+   */
+  const APPROVAL_SERVER = String.raw`const out = [];
+const emit = (value) => out.push(JSON.stringify(value));
+const flush = () => {
+  if (out.length === 0) return;
+  process.stdout.write(out.join('\n') + '\n');
+  out.length = 0;
+};
+let buffer = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  for (;;) {
+    const newline = buffer.indexOf('\n');
+    if (newline < 0) break;
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    const message = JSON.parse(line);
+    if (message.method === 'initialize') emit({ id: message.id, result: {} });
+    if (message.method === 'thread/start') {
+      emit({ id: message.id, result: { thread: { id: 'thread-1' } } });
+    }
+    if (message.method === 'turn/start') {
+      emit({ id: message.id, result: { turn: { id: 'turn-1' } } });
+      emit({ method: 'turn/started', params: { turn: { id: 'turn-1' } } });
+      emit({
+        id: 9001,
+        method: 'item/permissions/requestApproval',
+        params: { itemId: 'item-1', type: 'exec', command: ['echo', 'hi'] },
+      });
+    }
+  }
+  flush();
+});
+process.stdin.on('end', () => process.exit(0));`;
+
+  test('releases an approval the failed worker can no longer be told about', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'awos-codex-stdout-approval-'));
+    const server = join(dir, 'server.mjs');
+    writeFileSync(server, APPROVAL_SERVER, 'utf8');
+
+    // Only the pipe failure may settle this approval. Left at the suite's short default,
+    // the approval's own timer could deny it first and the case would pass without ever
+    // reaching the path it is about.
+    const { adapter, of, waitFor } = codexHarness(dir, server, { approvalTimeoutMs: 60_000 });
+
+    try {
+      const turn = settles('the turn to be failed by the pipe', adapter.sendTurn('run it'));
+      await waitFor('approval.requested');
+
+      // Releasing an approval means writing the decision to the child, and by this point
+      // the adapter has already let go of that child — so the write throws, inside the
+      // stream's own error listener. Swallowed, it leaves a released approval behind;
+      // escaping, it is the uncaught exception this whole path exists to prevent.
+      assert.doesNotThrow(() => adapter.failStdoutForTests(new Error('EIO: read failed')));
+      await assert.rejects(turn, /stdout failed/);
+
+      const resolved = of('approval.resolved');
+      assert.equal(resolved.length, 1, 'the pending approval was never released');
+      assert.equal(resolved[0]?.behavior, 'deny');
+      assert.equal(resolved[0]?.auto, true);
+
+      // The turn the approval belonged to is failed rather than left in flight, which is
+      // only reached if settling the approval got out of the way first.
+      assert.equal(of('turn.completed').length, 1);
+      assert.equal(of('turn.completed')[0]?.reason, 'error');
+      assert.equal(adapter.busy, false);
+    } finally {
+      await adapter.stop();
+      // The worker this case gave up on is still winding down and still holds the
+      // directory open on Windows. A verdict replaced by EBUSY would say nothing about
+      // the assertions above it.
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* reported by the assertions, not by the cleanup */
+      }
+    }
+  });
+
   test('rejects a request still waiting for its response line', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'awos-codex-stdout-pending-'));
     const server = join(dir, 'server.mjs');
