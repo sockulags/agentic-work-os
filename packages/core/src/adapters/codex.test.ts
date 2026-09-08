@@ -1053,7 +1053,29 @@ process.stdin.on('data', (chunk) => {
     }
   }
 });
-process.stdin.on('end', () => setTimeout(() => process.exit(0), 300));`;
+
+/*
+ * Two ways out of this process, one exit line.
+ *
+ * The adapter ends a failed server by closing its stdin and signalling it, and which of
+ * those actually lands depends on the platform. On Windows the signal hits the shell that
+ * spawnCli goes through, so this process outlives it and leaves on the stdin EOF; on Linux
+ * the signal arrives here directly. Node's default action for SIGTERM terminates without
+ * running 'exit' handlers, so with no listener for it the exit line above is never written
+ * on Linux and a test waiting for that line waits forever. Handling the signal makes the
+ * exit observable whichever way the adapter ends this server: do not delete this as noise.
+ *
+ * Both routes keep the same delay. The window between the stdout failure and this
+ * process's own exit is the point of the fake, and it has to stay open on both platforms.
+ */
+let leaving = false;
+const leave = () => {
+  if (leaving) return;
+  leaving = true;
+  setTimeout(() => process.exit(0), 300);
+};
+process.stdin.on('end', leave);
+process.on('SIGTERM', leave);`;
 
   test('fails the turn once, ends the worker, and leaves its replacement alone', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'awos-codex-stdout-'));
