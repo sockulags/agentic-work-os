@@ -32,7 +32,13 @@ export type BridgeHandler = (req: BridgeRequest) => Promise<BridgeDecision>;
 
 interface HelloFrame {
   type: 'hello';
-  token: string;
+  /**
+   * Left unnarrowed by the frame guard on purpose. The guard can only say a field is
+   * present and well typed; whether a token is the right one is the comparison's job,
+   * and that comparison has to treat a missing or non-string token exactly the way it
+   * treats a wrong one.
+   */
+  token: unknown;
   threadId: string;
 }
 
@@ -45,6 +51,45 @@ interface RequestFrame {
 }
 
 type InboundFrame = HelloFrame | RequestFrame;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Narrow a parsed line to a frame whose fields are safe to read.
+ *
+ * Everything arriving here is unauthenticated input from a loopback socket, so casting
+ * it to `InboundFrame` would be a compile-time assertion over bytes the peer chose.
+ * Anything that does not match a known frame shape becomes `null`, which is what keeps a
+ * malformed line from throwing out of the socket's `data` listener and killing the daemon.
+ */
+function asInboundFrame(value: unknown): InboundFrame | null {
+  if (!isPlainObject(value)) return null;
+
+  if (value['type'] === 'hello') {
+    if (typeof value['threadId'] !== 'string') return null;
+    return { type: 'hello', token: value['token'], threadId: value['threadId'] };
+  }
+
+  if (value['type'] === 'request') {
+    if (typeof value['requestId'] !== 'string') return null;
+    if (typeof value['toolName'] !== 'string') return null;
+    const input = value['input'];
+    if (input !== undefined && !isPlainObject(input)) return null;
+    const toolUseId = value['toolUseId'];
+    if (toolUseId !== undefined && toolUseId !== null && typeof toolUseId !== 'string') return null;
+    return {
+      type: 'request',
+      requestId: value['requestId'],
+      toolName: value['toolName'],
+      input,
+      toolUseId,
+    };
+  }
+
+  return null;
+}
 
 export class PermissionBridge {
   readonly token: string;
@@ -123,18 +168,27 @@ export class PermissionBridge {
 
     socket.on('data', (chunk: string) => {
       for (const line of decoder.push(chunk)) {
-        let frame: InboundFrame;
+        let parsed: unknown;
         try {
-          frame = JSON.parse(line) as InboundFrame;
+          parsed = JSON.parse(line);
         } catch {
           fail('unparseable frame');
           return;
         }
 
+        const frame = asInboundFrame(parsed);
+        if (frame === null) return fail('malformed frame');
+
         if (!authenticated) {
           if (frame.type !== 'hello') return fail('first frame was not hello');
-          // Length check first so the comparison below can't throw on a short token.
-          if (frame.token.length !== this.token.length || frame.token !== this.token) {
+          // Type first, then length, then contents: a missing or non-string token is a
+          // bad token rather than a crash, and a wrong-length token is rejected without
+          // comparing characters.
+          if (
+            typeof frame.token !== 'string' ||
+            frame.token.length !== this.token.length ||
+            frame.token !== this.token
+          ) {
             return fail('bad token');
           }
           authenticated = true;
