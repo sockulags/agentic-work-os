@@ -1,6 +1,7 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { connect, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -241,3 +242,202 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3_000): Promise<voi
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+/**
+ * Frame validation on the bridge's unauthenticated edge.
+ *
+ * These drive a raw socket rather than the MCP server, because the MCP server only ever
+ * sends well-formed frames. Any local process can open this port and write whatever it
+ * likes, and until a frame is validated the harness has no business reading fields off
+ * it. A throw out of the socket's `data` listener is uncaught in the daemon, so here it
+ * escapes into the test runner and fails the test outright — which is the assertion that
+ * the daemon survives each input below.
+ */
+
+interface RawExchange {
+  /** JSON frames the bridge wrote back, in order. */
+  frames: Array<Record<string, unknown>>;
+  /** True when the bridge hung up, false when it was still holding the socket open. */
+  closed: boolean;
+}
+
+/** Write raw lines to the bridge and collect whatever comes back. */
+function speak(port: number, lines: string[], expectFrames = 0): Promise<RawExchange> {
+  return new Promise<RawExchange>((resolve) => {
+    const frames: Array<Record<string, unknown>> = [];
+    const decoder = new LineDecoder();
+    let settled = false;
+
+    const socket: Socket = connect(port, '127.0.0.1', () => {
+      for (const line of lines) socket.write(`${line}\n`);
+    });
+    socket.setEncoding('utf8');
+
+    const finish = (closed: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve({ frames, closed });
+    };
+
+    // Long enough for a local round trip, short enough to keep the suite quick. Only the
+    // cases where the bridge deliberately keeps the socket open wait this out.
+    const timer = setTimeout(() => finish(false), 300);
+
+    socket.on('data', (chunk: string) => {
+      for (const line of decoder.push(chunk)) {
+        frames.push(JSON.parse(line) as Record<string, unknown>);
+      }
+      if (expectFrames > 0 && frames.length >= expectFrames) finish(false);
+    });
+    socket.on('error', () => {});
+    socket.on('close', () => finish(true));
+  });
+}
+
+/** Inputs that must be rejected before any field of the frame is read. */
+const MALFORMED: Array<{ name: string; line: (token: string) => string }> = [
+  { name: 'a bare null', line: () => 'null' },
+  { name: 'a bare number', line: () => '42' },
+  { name: 'a bare string', line: () => '"hello"' },
+  { name: 'an array', line: () => '[]' },
+  { name: 'an object with no type', line: () => '{"threadId":"x"}' },
+  { name: 'a non-string type', line: () => '{"type":7}' },
+  { name: 'an unknown type', line: () => '{"type":"goodbye"}' },
+  { name: 'a hello with no token', line: () => '{"type":"hello","threadId":"x"}' },
+  { name: 'a hello with a null token', line: () => '{"type":"hello","token":null,"threadId":"x"}' },
+  {
+    name: 'a hello with a non-string token',
+    line: () => '{"type":"hello","token":123,"threadId":"x"}',
+  },
+  { name: 'a hello with no threadId', line: (token) => JSON.stringify({ type: 'hello', token }) },
+  {
+    name: 'a hello with a non-string threadId',
+    line: (token) => JSON.stringify({ type: 'hello', token, threadId: 7 }),
+  },
+];
+
+describe('permission bridge frame validation', () => {
+  for (const input of MALFORMED) {
+    test(`${input.name} is rejected without crashing the daemon`, async () => {
+      const exchange = await speak(bridge.port, [input.line(bridge.token)]);
+
+      assert.deepEqual(exchange.frames, [], 'a rejected peer must learn nothing');
+      assert.equal(exchange.closed, true, 'the bridge must hang up on a rejected peer');
+
+      // Surviving the input is the point: the bridge still serves a legitimate client.
+      const good = await speak(
+        bridge.port,
+        [JSON.stringify({ type: 'hello', token: bridge.token, threadId: randomUUID() })],
+        1,
+      );
+      assert.equal(good.frames[0]?.['type'], 'ready');
+    });
+  }
+
+  test('a wrong token is indistinguishable from a malformed frame', async () => {
+    const badToken = await speak(bridge.port, [
+      JSON.stringify({ type: 'hello', token: 'x'.repeat(64), threadId: 'x' }),
+    ]);
+    const noToken = await speak(bridge.port, ['{"type":"hello","threadId":"x"}']);
+
+    // Same silence, same hang-up. A prober must not be able to tell which check failed.
+    assert.deepEqual(badToken, noToken);
+    assert.deepEqual(badToken.frames, []);
+    assert.equal(badToken.closed, true);
+  });
+
+  test('a request missing requestId is rejected rather than dispatched', async () => {
+    const threadId = randomUUID();
+    let dispatched = 0;
+    bridge.registerThread(threadId, async () => {
+      dispatched += 1;
+      return { behavior: 'allow' };
+    });
+
+    const exchange = await speak(bridge.port, [
+      JSON.stringify({ type: 'hello', token: bridge.token, threadId }),
+      JSON.stringify({ type: 'request', toolName: 'Bash', input: { command: 'ls' } }),
+    ]);
+
+    assert.equal(dispatched, 0);
+    assert.deepEqual(
+      exchange.frames.map((frame) => frame['type']),
+      ['ready'],
+    );
+    assert.equal(exchange.closed, true);
+  });
+
+  test('a request missing toolName is rejected rather than dispatched', async () => {
+    const threadId = randomUUID();
+    let dispatched = 0;
+    bridge.registerThread(threadId, async () => {
+      dispatched += 1;
+      return { behavior: 'allow' };
+    });
+
+    const exchange = await speak(bridge.port, [
+      JSON.stringify({ type: 'hello', token: bridge.token, threadId }),
+      JSON.stringify({ type: 'request', requestId: 'r1', input: { command: 'ls' } }),
+    ]);
+
+    assert.equal(dispatched, 0);
+    assert.deepEqual(
+      exchange.frames.map((frame) => frame['type']),
+      ['ready'],
+    );
+    assert.equal(exchange.closed, true);
+  });
+
+  test('a request whose input is not an object is rejected rather than dispatched', async () => {
+    const threadId = randomUUID();
+    let dispatched = 0;
+    bridge.registerThread(threadId, async () => {
+      dispatched += 1;
+      return { behavior: 'allow' };
+    });
+
+    const exchange = await speak(bridge.port, [
+      JSON.stringify({ type: 'hello', token: bridge.token, threadId }),
+      JSON.stringify({ type: 'request', requestId: 'r1', toolName: 'Bash', input: 'ls' }),
+    ]);
+
+    assert.equal(dispatched, 0);
+    assert.equal(exchange.closed, true);
+  });
+
+  test('an unparseable line is still rejected without crashing', async () => {
+    const exchange = await speak(bridge.port, ['{not json']);
+
+    assert.deepEqual(exchange.frames, []);
+    assert.equal(exchange.closed, true);
+  });
+
+  test('a well-formed hello and request still work', async () => {
+    const threadId = randomUUID();
+    bridge.registerThread(threadId, async () => ({ behavior: 'allow' }));
+
+    const exchange = await speak(
+      bridge.port,
+      [
+        JSON.stringify({ type: 'hello', token: bridge.token, threadId }),
+        JSON.stringify({
+          type: 'request',
+          requestId: 'r1',
+          toolName: 'Bash',
+          input: { command: 'ls' },
+          toolUseId: null,
+        }),
+      ],
+      2,
+    );
+
+    assert.deepEqual(
+      exchange.frames.map((frame) => frame['type']),
+      ['ready', 'response'],
+    );
+    assert.equal(exchange.frames[1]?.['requestId'], 'r1');
+    assert.equal(exchange.frames[1]?.['behavior'], 'allow');
+  });
+});
