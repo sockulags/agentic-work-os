@@ -33,6 +33,16 @@ export interface JsonLineHandlers<T> {
   onMessage: (msg: T) => void;
   /** Called for lines that aren't valid JSON — CLIs sometimes interleave plain text. */
   onUnparseable?: (line: string, error: Error) => void;
+  /**
+   * Called when the stream itself fails, rather than a line on it.
+   *
+   * A bad line is a parsing problem the reader recovers from; a bad stream is the end of
+   * the conversation, and only the caller knows what it was holding open on the other
+   * side of it. Optional so a caller with nothing to settle stays as it is — but the
+   * listener is registered either way, because an `error` event with no listener at all
+   * is thrown as an uncaught exception and would take the whole daemon down.
+   */
+  onError?: (error: Error) => void;
 }
 
 /**
@@ -60,17 +70,53 @@ export function readJsonLines<T>(
     for (const line of decoder.push(chunk)) handleLine(line);
   };
 
-  const onEnd = (): void => {
+  /**
+   * Whether this reader has already reached its end, however it got there.
+   *
+   * A stream can end after it errored, error twice, or be detached from after either, and
+   * the caller is told exactly once regardless: a second telling would settle a turn or a
+   * request that the first one already settled.
+   */
+  let finished = false;
+
+  const stopFraming = (): void => {
+    stream.off('data', onData);
+    stream.off('end', onEnd);
+  };
+
+  function onEnd(): void {
+    stopFraming();
+    if (finished) return;
+    finished = true;
     const rest = decoder.flush();
     if (rest !== null) handleLine(rest);
-  };
+  }
+
+  function onError(err: Error): void {
+    // Framing stops, but the `error` listener deliberately stays on: a stream that failed
+    // once can fail again, and the second unheard event is the same uncaught exception as
+    // the first would have been. Only `detach` takes it off, and that is the caller saying
+    // it has taken the stream over.
+    stopFraming();
+    if (finished) return;
+    finished = true;
+    // Buffered content is discarded, not flushed. What the decoder holds is by definition
+    // a line whose newline never arrived, and on a broken stream it never will: parsing a
+    // truncated line either fails as noise or, worse, succeeds on a prefix that happens to
+    // be valid JSON and delivers half a message as a whole one. A clean `end` flushes
+    // because the writer finished; an error says nothing of the sort.
+    decoder.flush();
+    handlers.onError?.(err);
+  }
 
   stream.on('data', onData);
   stream.on('end', onEnd);
+  stream.on('error', onError);
 
   return () => {
-    stream.off('data', onData);
-    stream.off('end', onEnd);
+    finished = true;
+    stopFraming();
+    stream.off('error', onError);
   };
 }
 

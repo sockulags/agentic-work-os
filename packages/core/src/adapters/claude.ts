@@ -180,18 +180,13 @@ export class ClaudeAdapter implements WorkerAdapter {
     const child = spawnCli(config.claudeBin, args, { cwd });
     this.#child = child;
 
-    readJsonLines<ClaudeWire.ClaudeOutputEvent>(child.stdout, {
-      onMessage: (msg) => this.#onEvent(msg),
-      onUnparseable: (line) => log.debug('non-json stdout', { line: line.slice(0, 200) }),
-    });
-
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => {
       const text = chunk.trim();
       if (text) log.warn('stderr', { text: text.slice(0, 500) });
     });
 
-    child.on('error', (err) => {
+    const onSpawnError = (err: Error): void => {
       log.error('spawn failed', { message: err.message });
       this.#emitStatus('failed', err.message);
       this.#ctx.emit({
@@ -202,13 +197,73 @@ export class ClaudeAdapter implements WorkerAdapter {
           'Check that it is installed and on PATH, or set AWOS_CLAUDE_BIN.',
       });
       this.#failTurn(err);
-    });
+    };
+    child.on('error', onSpawnError);
 
-    child.on('close', (code) => {
+    const onClose = (code: number | null): void => {
       log.info('exited', { code });
       this.#child = null;
       this.#emitStatus('exited', code === null ? null : `exit code ${code}`);
       this.#failTurn(new Error(`Claude Code exited (code ${code ?? 'null'})`));
+    };
+    child.on('close', onClose);
+
+    /**
+     * The stdout pipe failed, which is not the same thing as the process failing.
+     *
+     * A `ChildProcess` `error` and its stdout's `error` are different events, and only the
+     * first one was ever heard — the second was thrown by Node as an uncaught exception and
+     * took the daemon with it. What is left after it is a process that may well still be
+     * running and can no longer be heard from, so this gives up on that child entirely, the
+     * way the failed-start teardown does: everything is scoped to *this* child, because a
+     * start that replaces it must not have its reference cleared or its turn failed by an
+     * exit belonging to the process it replaced.
+     */
+    const onStdoutError = (err: Error): void => {
+      log.error('stdout failed', { message: err.message });
+
+      child.off('error', onSpawnError);
+      child.off('close', onClose);
+      // Nobody reads either pipe now, and an unread pipe never reaches EOF — so its stream
+      // never closes, and neither does the child. Drain both into nothing, and hear what a
+      // process on its way out can still raise: an unheard 'error' is the same uncaught
+      // exception this path exists to stop.
+      child.stdout.resume();
+      child.stderr.resume();
+      child.on('error', (e) => log.debug('failed child error', { message: e.message }));
+      child.stdin.on('error', (e) => log.debug('failed child stdin error', { message: e.message }));
+
+      // Only what is still ours, for the same reason the listeners came off: the turn, the
+      // approvals and the status all belong to whichever process the adapter holds now.
+      if (this.#child === child) {
+        this.#child = null;
+        this.#emitStatus('failed', err.message);
+        this.#ctx.emit({
+          kind: 'error',
+          severity: 'fatal',
+          message: `Lost the connection to Claude Code: ${err.message}. The next turn starts a new process.`,
+        });
+        // Nothing is left to carry a decision back to the tool that is blocking on one.
+        for (const [approvalId] of this.#approvals) {
+          this.#settleApproval(approvalId, {
+            behavior: 'deny',
+            message: 'Lost the connection to Claude Code.',
+          });
+        }
+        this.#failTurn(new Error(`Claude Code stdout failed: ${err.message}`));
+      }
+
+      // Closing stdin is the clean exit path for `claude -p`; the signal is for a process
+      // that no longer takes it. Leaving it running would put a second worker in the
+      // thread's directory the moment the next turn spawns one.
+      child.stdin.end();
+      child.kill('SIGTERM');
+    };
+
+    readJsonLines<ClaudeWire.ClaudeOutputEvent>(child.stdout, {
+      onMessage: (msg) => this.#onEvent(msg),
+      onUnparseable: (line) => log.debug('non-json stdout', { line: line.slice(0, 200) }),
+      onError: onStdoutError,
     });
 
     this.#emitStatus('ready', null);
@@ -328,6 +383,18 @@ export class ClaudeAdapter implements WorkerAdapter {
     // turn respawns and resumes the same session id.
     log.warn('interrupt not acknowledged, terminating process');
     child.kill('SIGTERM');
+  }
+
+  /**
+   * Raise a pipe failure on the worker's stdout, the way the OS would.
+   *
+   * Tests only. A broken pipe cannot be provoked portably from a healthy child, and what
+   * needs covering is the listener wiring on the real stream of a really spawned process —
+   * which is also why this emits the event rather than calling the handler: without the
+   * listener, `emit('error')` is exactly the uncaught exception being guarded against.
+   */
+  failStdoutForTests(err: Error): void {
+    this.#child?.stdout.emit('error', err);
   }
 
   // -------------------------------------------------------------------------
