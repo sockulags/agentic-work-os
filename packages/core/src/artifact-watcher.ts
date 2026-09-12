@@ -42,6 +42,16 @@ const DEBOUNCE_MS = 120;
  */
 const ATTACH_RETRY_MS = 2_000;
 
+/**
+ * How long to wait before offering a failed artifact again.
+ *
+ * The emit is the only call that leaves this module, and what it reaches — the thread's
+ * store — refuses for conditions that outlast a debounce: a held lock, a thread that is
+ * not open. Retrying at the debounce interval would spin against every one of them, so a
+ * sweep that could not publish backs off exactly as a failed attach does.
+ */
+const EMIT_RETRY_MS = 2_000;
+
 export interface ArtifactWatcherOptions {
   /** The thread's working directory; the artifacts directory hangs off it. */
   cwd: string;
@@ -120,6 +130,9 @@ export class ArtifactWatcher {
     // append a deletion for every artifact at once, and the log cannot take that back.
     if (names === null) return;
 
+    // A publish that threw is a publish still owed. The sweep finishes the directory
+    // either way and comes back for what it could not deliver.
+    let failed = false;
     const present = new Set<string>();
     for (const name of names) {
       // Presence is decided by the listing, not by the read: a file we cannot read is
@@ -136,20 +149,46 @@ export class ArtifactWatcher {
         // published as itself: consumers would fold it as deleted, and because the fold
         // retires tombstoned ids, every restart would emit the event again. Emptying an
         // artifact we did publish is a real retirement, and that one is worth an event.
-        if (this.#known.delete(name)) this.#emit(deletedArtifact(this.#dir, name));
+        if (!this.#known.has(name)) continue;
+        if (this.#publish(name, deletedArtifact(this.#dir, name))) this.#known.delete(name);
+        else failed = true;
         continue;
       }
 
       const hash = contentHash(body.content);
       if (this.#known.get(name) === hash) continue;
-      this.#known.set(name, hash);
-      this.#emit(body);
+      // Recorded only once the event is out. Marking it known first would let a refused
+      // append pass for a publication, and the guard above would then hide the artifact
+      // until somebody happened to change it again.
+      if (this.#publish(name, body)) this.#known.set(name, hash);
+      else failed = true;
     }
 
     for (const name of [...this.#known.keys()]) {
       if (present.has(name)) continue;
-      this.#known.delete(name);
-      this.#emit(deletedArtifact(this.#dir, name));
+      if (this.#publish(name, deletedArtifact(this.#dir, name))) this.#known.delete(name);
+      else failed = true;
+    }
+
+    if (failed) this.#schedule(EMIT_RETRY_MS);
+  }
+
+  /**
+   * Hand one body to the emitter, and answer whether it was published.
+   *
+   * This is the module's boundary with everything outside it. The sweep runs from a
+   * debounce timer, so a throw from here has no frame above it to land in: it reaches
+   * `uncaughtException` and ends the daemon. The store on the other side refuses appends
+   * for conditions that pass — a lock held elsewhere, a thread not yet open — so a
+   * refusal is logged and retried rather than allowed to decide the process lifetime.
+   */
+  #publish(name: string, body: ArtifactUpdatedBody): boolean {
+    try {
+      this.#emit(body);
+      return true;
+    } catch (err) {
+      log.warn('artifact publish failed', { name, message: (err as Error).message });
+      return false;
     }
   }
 

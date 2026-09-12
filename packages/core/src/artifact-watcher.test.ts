@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { HarnessEvent } from '@awos/protocol';
+import { ArtifactWatcher } from './artifact-watcher.js';
 import { Orchestrator } from './orchestrator.js';
 import { MAX_ARTIFACT_BYTES } from './store/artifact-store.js';
 import type { HarnessConfig } from './config.js';
@@ -312,5 +313,104 @@ describe('artifact pipeline', () => {
     open(revived, thread.id);
     await quiet();
     assert.equal(artifacts(thread.id).length, 2, 'a tombstone retires the id for good');
+  });
+});
+
+/**
+ * The watcher's boundary with everything outside it.
+ *
+ * These drive the watcher directly rather than through the orchestrator, because the
+ * failure under test belongs to the store on the far side of `emit` — a lock held by
+ * another writer, a thread that is not open — and the point is what the watcher does when
+ * that call refuses. The sweep runs from a timer, so a refusal it lets through has no
+ * frame above it and ends the daemon instead of the artifact.
+ */
+describe('artifact sweep error boundary', () => {
+  test('a refused publish takes neither the sweep nor the process with it', async () => {
+    publish('a.md', '# A\n');
+    publish('b.md', '# B\n');
+
+    const seen: string[] = [];
+    const watcher = new ArtifactWatcher({
+      cwd,
+      debounceMs: 10,
+      emit: (body) => {
+        seen.push(body.artifactId);
+        if (body.artifactId === 'a.md') throw new Error('append refused: thread is locked');
+      },
+    });
+
+    watcher.start();
+    try {
+      // An uncaught throw here would be reported against this test rather than reaching
+      // the second file at all, which is exactly the failure being ruled out.
+      await until('the artifact behind the failing one', () => seen.includes('b.md'));
+      assert.deepEqual(seen, ['a.md', 'b.md'], 'the sweep finishes the directory');
+    } finally {
+      watcher.stop();
+    }
+  });
+
+  test('a refused publish does not cancel the deletion pass', async () => {
+    publish('a.md', '# A\n');
+
+    const seen: Array<[string, string]> = [];
+    const watcher = new ArtifactWatcher({
+      cwd,
+      debounceMs: 10,
+      // Published before this process started and gone from disk since: the sweep owes a
+      // tombstone for it, and the file that refuses is read first.
+      known: new Map([['gone.md', 'a hash from the transcript']]),
+      emit: (body) => {
+        seen.push([body.artifactId, body.content]);
+        if (body.artifactId === 'a.md') throw new Error('append refused: thread is locked');
+      },
+    });
+
+    watcher.start();
+    try {
+      await until('the tombstone', () => seen.some(([id]) => id === 'gone.md'));
+      assert.deepEqual(seen, [
+        ['a.md', '# A\n'],
+        ['gone.md', ''],
+      ]);
+    } finally {
+      watcher.stop();
+    }
+  });
+
+  test('a refused artifact is offered again, not remembered as published', async () => {
+    publish('plan.md', '# Plan\n');
+
+    let refuse = true;
+    const attempts: string[] = [];
+    const watcher = new ArtifactWatcher({
+      cwd,
+      debounceMs: 10,
+      emit: (body) => {
+        attempts.push(body.artifactId);
+        if (refuse) throw new Error('append refused: thread is locked');
+      },
+    });
+
+    watcher.start();
+    try {
+      await until('the first attempt', () => attempts.length >= 1);
+
+      // Nothing on disk changes, so the retry is the sweep's own doing — and it backs off
+      // rather than coming round at the debounce interval, which would spin here for as
+      // long as the store stays shut.
+      await quiet();
+      assert.equal(attempts.length, 1, 'a refusal must not turn into a retry loop');
+
+      refuse = false;
+      await until('the retry', () => attempts.length >= 2);
+      assert.deepEqual(attempts, ['plan.md', 'plan.md'], 'the unchanged file is re-offered');
+
+      await quiet();
+      assert.equal(attempts.length, 2, 'and it is known once the append lands');
+    } finally {
+      watcher.stop();
+    }
   });
 });
