@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, test } from 'node:test';
@@ -163,5 +163,36 @@ describe('WorkItemStore', () => {
 
     assert.equal(store.get(item.id), undefined);
     assert.deepEqual(readdirSync(join(dir, 'work-items')), []);
+  });
+
+  test('a removed item stays removed even when a backup outlived its write', () => {
+    const dir = tempDir();
+    const store = new WorkItemStore(dir);
+    const item = store.record({ workspaceRoot: '/repo', ref, snapshot: snapshot() });
+    const primary = join(dir, 'work-items', `${item.id}.json`);
+    // What a cleanup blocked by antivirus leaves behind: a committed write whose backup
+    // is still on disk beside the primary.
+    copyFileSync(primary, `${primary}.bak`);
+
+    store.remove(item.id);
+    const revived = new WorkItemStore(dir);
+
+    assert.equal(revived.get(item.id), undefined, 'detaching is not undone by a restart');
+    assert.deepEqual(revived.list('/repo'), []);
+    assert.deepEqual(readdirSync(join(dir, 'work-items')), [], 'and nothing is left to restore');
+  });
+
+  test('a backup with no primary is still restored on load', () => {
+    const dir = tempDir();
+    const item = new WorkItemStore(dir).record({ workspaceRoot: '/repo', ref, snapshot: snapshot() });
+    const primary = join(dir, 'work-items', `${item.id}.json`);
+    // A crash between moving the primary aside and installing the new file.
+    copyFileSync(primary, `${primary}.bak`);
+    rmSync(primary, { force: true });
+
+    const revived = new WorkItemStore(dir);
+
+    assert.deepEqual(revived.get(item.id), item);
+    assert.deepEqual(readdirSync(join(dir, 'work-items')), [`${item.id}.json`]);
   });
 });
