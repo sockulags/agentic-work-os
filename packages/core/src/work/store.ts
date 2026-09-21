@@ -100,10 +100,19 @@ export class WorkItemStore {
    * Only the cached record goes: the runs that used it are events in a thread's log, which
    * is append-only and stays readable — a run that happened is not undone by detaching the
    * issue it answered.
+   *
+   * The recovery files go with it. `#persist` tolerates a blocked cleanup, so a `.bak` can
+   * outlive the write that made it, and `#loadAll` restores a backup whose primary is
+   * missing — which is right after a crash and wrong after a deliberate delete. Deleting
+   * every file for the id is what tells the two apart, and it is done before the in-memory
+   * entry so a blocked delete leaves the store and the directory saying the same thing.
    */
   remove(id: string): void {
+    const primary = this.#path(id);
+    rmSync(`${primary}.bak`, { force: true });
+    rmSync(`${primary}.tmp`, { force: true });
+    rmSync(primary, { force: true });
     this.#items.delete(id);
-    rmSync(this.#path(id), { force: true });
   }
 
   #find(workspaceRoot: string, ref: IssueRef): WorkItem | undefined {
