@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import type {
   IssueCatalogSnapshot,
@@ -14,6 +22,9 @@ import {
 } from './github.js';
 
 const log = createLogger('issue-catalog');
+
+/** Matches exactly the `<key>.json.<pid>.<timestamp>.tmp` names `#write` stages through. */
+const TEMPORARY_NAME = /\.json\.\d+\.\d+\.tmp$/;
 
 interface CatalogScope {
   workspaceRoot: string;
@@ -47,6 +58,7 @@ export class CatalogStore {
     this.#root = join(dataDir, 'issue-catalog');
     this.#writeFile = options.writeFile ?? ((path, content) => writeFileSync(path, content, 'utf8'));
     mkdirSync(this.#root, { recursive: true });
+    this.#sweepTemporaries();
   }
 
   read(scope: CatalogScope): IssueCatalogSource {
@@ -117,6 +129,34 @@ export class CatalogStore {
 
   #path(scope: CatalogScope): string {
     return join(this.#root, `${this.#key(scope)}.json`);
+  }
+
+  /**
+   * A process killed between the staged write and the rename leaves a temp file that
+   * nothing will ever read, and its pid/timestamp name makes every orphan unique, so
+   * they accumulate in the daemon's own data directory. Sweep them once at construction,
+   * the same bargain `WorkItemStore` makes, and never at the cost of loading.
+   */
+  #sweepTemporaries(): void {
+    let entries: string[];
+    try {
+      entries = readdirSync(this.#root);
+    } catch (err) {
+      log.error('could not scan the issue catalog directory', { message: (err as Error).message });
+      return;
+    }
+
+    for (const name of entries.filter((candidate) => TEMPORARY_NAME.test(candidate))) {
+      try {
+        rmSync(join(this.#root, name), { force: true });
+      } catch (err) {
+        // One orphan a virus scanner still holds open must not cost the user the catalog.
+        log.error('could not remove an orphaned issue catalog temporary file', {
+          name,
+          message: (err as Error).message,
+        });
+      }
+    }
   }
 
   #load(scope: CatalogScope): IssueCatalogSnapshot | null {

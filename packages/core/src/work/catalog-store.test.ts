@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { after, afterEach, describe, test } from 'node:test';
 import { CatalogStore } from './catalog-store.js';
 import { OPEN_ISSUE_LIMIT, type GitHubOptions } from './github.js';
@@ -229,6 +229,40 @@ describe('CatalogStore', () => {
 
     assert.equal(recovered.freshness, 'cached');
     assert.equal(recovered.issues[0]?.number, 14);
+    assert.equal(existsSync(path), true, 'the backup was restored to its primary path');
+  });
+
+  test('construction sweeps orphaned temporary files and spares everything else', async () => {
+    const dir = tempDir();
+    await new CatalogStore(dir).refresh(scope, options);
+    const path = catalogPath(dir, scope);
+    const catalogDir = join(dir, 'issue-catalog');
+    writeFileSync(`${path}.4242.1756000000000.tmp`, 'orphan', 'utf8');
+    writeFileSync(`${path}.bak`, 'backup', 'utf8');
+    writeFileSync(join(catalogDir, 'notes.txt'), 'unrelated', 'utf8');
+    writeFileSync(join(catalogDir, 'unrelated.tmp'), 'not ours', 'utf8');
+
+    const revived = new CatalogStore(dir).read(scope);
+
+    assert.deepEqual(
+      readdirSync(catalogDir).sort(),
+      [`${basename(path)}.bak`, basename(path), 'notes.txt', 'unrelated.tmp'].sort(),
+    );
+    assert.equal(revived.freshness, 'cached');
+  });
+
+  test('a snapshot still loads from its backup after a sweep', async () => {
+    const dir = tempDir();
+    await new CatalogStore(dir).refresh(scope, options);
+    const path = catalogPath(dir, scope);
+    renameSync(path, `${path}.bak`);
+    writeFileSync(`${path}.7.8.tmp`, 'orphan', 'utf8');
+
+    const recovered = new CatalogStore(dir).read(scope);
+
+    assert.equal(recovered.freshness, 'cached');
+    assert.equal(recovered.issues[0]?.number, 14);
+    assert.equal(existsSync(`${path}.7.8.tmp`), false, 'the orphan was swept');
     assert.equal(existsSync(path), true, 'the backup was restored to its primary path');
   });
 
