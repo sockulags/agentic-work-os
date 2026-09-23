@@ -8,7 +8,7 @@
  * mock. Behaviour is scripted through argv so one binary covers several scenarios.
  *
  * Usage: fake-claude.js [--tool] [--tools] [--permission] [--slow] [--markdown] [--think]
- *   [--think-omit-final]
+ *   [--think-omit-final] [--late-result] [--drop-result] [--stall-second] [--silent-first]
  */
 
 import { LineDecoder } from '../util/jsonl.js';
@@ -34,6 +34,31 @@ const ECHO_CHARS = 600;
 const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 
 let turn = 0;
+
+/**
+ * Three ways a turn can be accepted, stream, and then never end in time. The CLI stays
+ * alive in all of them; what differs is when — or whether — the closing `result` shows up.
+ *
+ * `--late-result` holds the first turn's result until the next turn's input arrives — a
+ * CLI that was merely slow, so the straggler lands mid-way through a turn it does not
+ * belong to.
+ * `--drop-result` never sends the first turn's result at all — a CLI whose result event
+ * was renamed or dropped, where nothing but the replayed input ever shows the turn ended.
+ * `--stall-second` drops the first turn's result and then sits on the second input until
+ * a third arrives, so two turns in a row outlive their deadline. The second one only then
+ * runs, replaying its input and closing with its own result while a third turn is in
+ * flight — the straggler that must not be taken for that third turn's.
+ * `--silent-first` replays the first input and then says nothing whatsoever about it — no
+ * init, no text, no result. A CLI that took the turn up and hung before producing a word,
+ * which is the shape a hang most often has. The second turn runs normally, and the only
+ * thing marking the boundary between them is its replayed input.
+ */
+const lateResult = args.has('--late-result');
+const dropResult = args.has('--drop-result');
+const stallSecond = args.has('--stall-second');
+const silentFirst = args.has('--silent-first');
+let sentInit = false;
+let withheldResult: unknown = null;
 
 /**
  * A realistic burst of parallel tool calls for `--tools`.
@@ -132,11 +157,30 @@ async function runTurn(text: string): Promise<void> {
   turn += 1;
   const messageId = `msg_${turn}`;
 
+  // The stalled turn reports in at last, ahead of the turn that is about to run.
+  if (withheldResult !== null) {
+    emit(withheldResult);
+    withheldResult = null;
+  }
+
+  // `--replay-user-messages` is always on, so the CLI echoes every line it takes off
+  // stdin. It is the only mark on this stream that says which input is being worked on.
+  emit({
+    type: 'user',
+    message: { role: 'user', content: text },
+    parent_tool_use_id: null,
+    session_id: SESSION_ID,
+  });
+
+  // Taken up and then silent: the replay above is the only thing this turn ever says.
+  if (silentFirst && turn === 1) return;
+
   if (args.has('--recovery-edit')) {
     writeFileSync(`.awos-recovery-edit-${turn}.txt`, `correction ${turn}\n`, 'utf8');
   }
 
-  if (turn === 1) {
+  if (!sentInit) {
+    sentInit = true;
     emit({
       type: 'system',
       subtype: 'init',
@@ -287,7 +331,7 @@ async function runTurn(text: string): Promise<void> {
 
   if (args.has('--tools')) await runToolBurst(messageId);
 
-  emit({
+  const result = {
     type: 'result',
     subtype: 'success',
     is_error: false,
@@ -297,7 +341,17 @@ async function runTurn(text: string): Promise<void> {
     total_cost_usd: 0.001,
     usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 5 },
     session_id: SESSION_ID,
-  });
+  };
+
+  if (turn === 1) {
+    if (dropResult || stallSecond) return;
+    if (lateResult) {
+      withheldResult = result;
+      return;
+    }
+  }
+
+  emit(result);
 }
 
 /** Several calls in one turn, then a closing sentence they were supposed to inform. */
@@ -353,13 +407,23 @@ function main(): void {
   const decoder = new LineDecoder();
   const queue: string[] = [];
   let running = false;
+  let arrived: (() => void) | null = null;
+
+  /** Resolves once another input is queued behind the one being held. */
+  const nextInput = (): Promise<void> =>
+    queue.length > 0 ? Promise.resolve() : new Promise<void>((resolve) => (arrived = resolve));
 
   const drain = async (): Promise<void> => {
     if (running) return;
     running = true;
     while (queue.length > 0) {
       const next = queue.shift();
-      if (next !== undefined) await runTurn(next);
+      if (next === undefined) continue;
+      // The second input is read but not acted on, so nothing at all is said about it
+      // until a third turn is in flight. The adapter's only clue that it ever ran is the
+      // replay it emits at that point, long after its own deadline passed.
+      if (stallSecond && turn === 1) await nextInput();
+      await runTurn(next);
     }
     running = false;
   };
@@ -376,6 +440,9 @@ function main(): void {
       if (msg.type !== 'user') continue;
       const text = msg.message?.content?.[0]?.text ?? '';
       queue.push(text);
+      const waiter = arrived;
+      arrived = null;
+      waiter?.();
       void drain();
     }
   });

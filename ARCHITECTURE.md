@@ -77,7 +77,7 @@ type HarnessEvent = {
 | `kind` | Emitted when | Claude source | Codex source |
 | --- | --- | --- | --- |
 | `turn.started` | user input accepted | first `system/init` or replayed user msg | `turn/started` |
-| `turn.completed` | worker finished | `result` | `turn/completed`; Qwen result or timeout |
+| `turn.completed` | worker finished | `result`, or the turn deadline | `turn/completed`; Qwen result or timeout |
 | `message.delta` | assistant text streaming | `stream_event` → `text_delta` | `item/agentMessage/delta` |
 | `message.completed` | assistant text final | `assistant` msg text block | `item/completed` (agentMessage) |
 | `reasoning.delta` | thinking tokens | `stream_event` → `thinking_delta` | `item/reasoning/delta` |
