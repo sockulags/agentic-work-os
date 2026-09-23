@@ -824,7 +824,11 @@ class Thread {
     } else {
       // Leaving lanes behind would throw away work the user never saw. Refuse instead.
       for (const [agent, lane] of this.#lanes) {
-        if ((await laneDiff(lane)) !== null) {
+        const diff = await laneDiff(lane);
+        if (!diff.ok) {
+          throw new Error(`${agent}'s lane could not be inspected; leaving parallel mode was refused.`);
+        }
+        if (diff.patch !== null) {
           throw new Error(
             `${agent}'s lane has changes that are not in your working directory yet. Integrate or discard them first.`,
           );
@@ -2609,7 +2613,26 @@ class Thread {
   async #dropLanes(): Promise<void> {
     const summary = this.#store.get(this.id);
     for (const [agent, lane] of [...this.#lanes]) {
-      if (summary && (await laneDiff(lane)) !== null) {
+      if (!summary) {
+        this.#lanes.delete(agent);
+        continue;
+      }
+
+      const diff = await laneDiff(lane);
+      if (!diff.ok) {
+        // Deleting this would destroy the only copy of work whose state was never
+        // established. Leave it on disk and name the uncertainty in the log.
+        log.warn('keeping an unreadable lane', { agent, path: lane.path });
+        this.#record(agent, {
+          kind: 'lane.updated',
+          status: 'removed',
+          path: lane.path,
+          detail: `kept on disk: ${diff.reason}`,
+        });
+        this.#lanes.delete(agent);
+        continue;
+      }
+      if (diff.patch !== null) {
         // Deleting this would destroy the only copy of that work. Leave it on disk and
         // name it, so the path is in the log rather than only in the user's memory.
         log.warn('keeping a lane with unintegrated work', { agent, path: lane.path });

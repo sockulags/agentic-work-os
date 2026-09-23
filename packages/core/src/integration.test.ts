@@ -548,6 +548,65 @@ describe('cross-agent handoff', () => {
     assert.equal(existsSync(join(lane, 'unsaved.txt')), true, 'the work is still there');
   });
 
+  test('keeps an unreadable lane when dropping lanes', async () => {
+    const { orch } = await boot(makeConfig());
+    const thread = orch.createThread({ cwd: makeRepo() });
+    await orch.setParallel(thread.id, true);
+    await orch.send(thread.id, 'claude', 'provision the lane');
+
+    const lane = orch.state(thread.id).lanes.claude;
+    assert.ok(lane);
+    writeFileSync(join(lane, 'unsaved.txt'), 'would be lost\n');
+    rmSync(join(lane, '.git'), { recursive: true, force: true });
+
+    await orch.stop();
+    orchestrator = null;
+
+    assert.equal(existsSync(lane), true, 'an unreadable lane remains on disk');
+    const kept = orch.store.events(thread.id).find(
+      (event) => event.kind === 'lane.updated' && event.status === 'removed',
+    );
+    assert.match(kept?.kind === 'lane.updated' ? (kept.detail ?? '') : '', /could not be determined/);
+  });
+
+  test('refuses to leave parallel mode when a lane cannot be inspected', async () => {
+    const { orch } = await boot(makeConfig());
+    const thread = orch.createThread({ cwd: makeRepo() });
+    await orch.setParallel(thread.id, true);
+    await orch.send(thread.id, 'claude', 'provision the lane');
+
+    const lane = orch.state(thread.id).lanes.claude;
+    assert.ok(lane);
+    rmSync(join(lane, '.git'), { recursive: true, force: true });
+
+    await assert.rejects(
+      () => orch.setParallel(thread.id, false),
+      (error: unknown) => {
+        assert.match(String(error), /could not be inspected/);
+        assert.doesNotMatch(String(error), /changes/);
+        return true;
+      },
+    );
+    assert.equal(orch.store.get(thread.id)?.parallel, true, 'parallel mode remains enabled');
+    assert.equal(existsSync(lane), true, 'the unreadable lane remains on disk');
+  });
+
+  test('removes an unchanged lane when leaving parallel mode', async () => {
+    const { orch } = await boot(makeConfig());
+    const thread = orch.createThread({ cwd: makeRepo() });
+    await orch.setParallel(thread.id, true);
+    await orch.send(thread.id, 'claude', 'provision the lane');
+
+    const lane = orch.state(thread.id).lanes.claude;
+    assert.ok(lane);
+
+    await orch.setParallel(thread.id, false);
+
+    assert.equal(orch.store.get(thread.id)?.parallel, false, 'parallel mode is disabled');
+    assert.equal(existsSync(lane), false, 'an unchanged lane is removed');
+    assert.equal(orch.state(thread.id).lanes.claude, undefined, 'the lane is dropped');
+  });
+
   test('a thread survives a restart with its transcript and sessions intact', async () => {
     const config = makeConfig();
     const { orch } = await boot(config);
