@@ -70,7 +70,7 @@ describe('lanes', () => {
     assert.equal(readFileSync(join(lane.path, 'a.txt'), 'utf8'), 'edited but not committed\n');
     assert.equal(readFileSync(join(lane.path, 'new.txt'), 'utf8'), 'untracked\n');
     // Seeding is not a change the lane made.
-    assert.equal(await laneDiff(lane), null);
+    assert.deepEqual(await laneDiff(lane), { ok: true, patch: null });
   });
 
   test('integration applies the lane work to the base tree and leaves the lane alone', async () => {
@@ -82,8 +82,9 @@ describe('lanes', () => {
     writeFileSync(join(lane.path, 'a.txt'), 'changed in the lane\n');
     writeFileSync(join(lane.path, 'added.txt'), 'new from the lane\n');
 
-    const patch = await laneDiff(lane);
-    assert.ok(patch, 'the lane reports what it changed');
+    const diff = await laneDiff(lane);
+    assert.ok(diff.ok, diff.ok ? '' : diff.reason);
+    assert.ok(diff.patch, 'the lane reports what it changed');
 
     const integrated = await integrateLane(lane, base);
     assert.equal(integrated.ok, true);

@@ -46,6 +46,10 @@ export type IntegrateResult =
   | { ok: true; patch: string | null }
   | { ok: false; reason: string };
 
+export type LaneDiffResult =
+  | { ok: true; patch: string | null }
+  | { ok: false; reason: string };
+
 /**
  * Refusal for a lane whose contents git could not establish, worded apart from the lane
  * that moved: one is an unknown, the other is a known mismatch, and the user's next move
@@ -105,16 +109,17 @@ export async function provisionLane(baseCwd: string, path: string): Promise<Lane
   return { ok: true, lane: { path, baseTree: snapshot } };
 }
 
-/**
- * Everything the lane changed since it was seeded, as a unified diff.
- *
- * Null means the agent changed nothing, which is a normal outcome for a turn that only
- * read or only answered a question.
- */
-export async function laneDiff(lane: Lane): Promise<string | null> {
+/** Everything the lane changed since it was seeded, as a unified diff. */
+export async function laneDiff(lane: Lane): Promise<LaneDiffResult> {
   const now = await snapshotWorkingTree(lane.path);
-  if (now === null) return null;
-  return diffTrees(lane.path, lane.baseTree, now);
+  if (now === null) return { ok: false, reason: "the lane's state could not be determined" };
+
+  const patch = await diffTrees(lane.path, lane.baseTree, now);
+  if (patch !== null) return { ok: true, patch };
+  // A matching tree proves that the lane is unchanged. A different tree with no diff is
+  // a git failure, not an empty lane, because diffTrees uses null for both outcomes.
+  if (now === lane.baseTree) return { ok: true, patch: null };
+  return { ok: false, reason: "the lane's state could not be determined" };
 }
 
 /**
