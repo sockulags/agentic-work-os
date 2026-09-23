@@ -2589,11 +2589,11 @@ class Thread {
    * path would then remove the directory that sibling is working in.
    */
   async #lane(agent: AgentId, baseCwd: string): Promise<string> {
-    const existing = this.#lanes.get(agent);
-    if (existing) return existing.path;
-
     const inFlight = this.#laneProvisioning.get(agent);
     if (inFlight) return inFlight;
+
+    const existing = this.#lanes.get(agent);
+    if (existing) return existing.path;
 
     const provisioning = (async (): Promise<string> => {
       const path = join(this.#config.dataDir, 'threads', this.id, 'lanes', agent);

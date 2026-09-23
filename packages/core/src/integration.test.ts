@@ -540,16 +540,26 @@ describe('cross-agent handoff', () => {
     await assert.rejects(() => orch.send(thread.id, 'claude', 'second'), /still working/);
     await first;
 
+    const lane = orch.state(thread.id).lanes.claude;
+    assert.ok(lane, 'the lane is available after setup completes');
+    await orch.send(thread.id, 'claude', 'after setup');
+    assert.equal(orch.state(thread.id).lanes.claude, lane, 'the completed lane is reused');
+
     const events = orch.store.events(thread.id);
     assert.equal(
       events.filter((e) => e.kind === 'user.message').length,
-      1,
-      'only the admitted turn reached the transcript',
+      2,
+      'the setup-window call did not reach the transcript, but the later call did',
     );
     assert.equal(
       events.filter((e) => e.kind === 'turn.started' && e.agent === 'claude').length,
+      2,
+      'only completed turns reached the adapter',
+    );
+    assert.equal(
+      events.filter((e) => e.kind === 'lane.updated' && e.status === 'provisioned').length,
       1,
-      'exactly one turn reached the adapter',
+      'the lane was provisioned once',
     );
   });
 
