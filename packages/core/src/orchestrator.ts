@@ -461,6 +461,10 @@ class Thread {
   #diff: string | null = null;
   #parallel = false;
   readonly #lanes = new Map<AgentId, Lane>();
+  /** One provisioning per agent: concurrent first turns wait on it rather than repeat it. */
+  readonly #laneProvisioning = new Map<AgentId, Promise<string>>();
+  /** True from the first line of `setParallel` until the mode change has finished. */
+  #switchingLanes = false;
   readonly #pendingApprovals = new Map<string, ApprovalRequestedBody>();
   readonly #agentStatus = new Map<AgentId, { status: string; model: string | null }>();
   /** One per watched working copy: the thread directory, plus a lane each in parallel mode. */
@@ -611,6 +615,11 @@ class Thread {
     if (this.#turns.has(agent)) {
       throw new Error(`${agent} is still working. Interrupt it before sending again.`);
     }
+    // A turn admitted mid-transition would be dispatched into a mode that is being torn
+    // down: its adapter stopped under it, its watermarks reset, its directory swapped.
+    if (this.#switchingLanes) {
+      throw new Error('Lane mode is changing. Send again once it has finished.');
+    }
     // Without lanes the two agents share one directory, so the old rule stands: one turn
     // at a time, because the alternative is two processes editing the same files.
     if (!this.#parallel && this.#busy.length > 0) {
@@ -633,102 +642,112 @@ class Thread {
       );
     }
 
-    // Provisioning is lazy for the same reason adapters are: a thread that only ever
-    // talks to Claude should not pay for a Codex checkout.
-    const cwd = this.#parallel ? await this.#lane(agent, summary.cwd) : summary.cwd;
-
-    // Build the replay *before* recording the new message. The user message counts as a
-    // foreign event (its agent is null), so recording first would fold the prompt into
-    // its own preamble and the agent would receive it twice.
-    const watermark = summary.watermarks[agent] ?? 0;
-    const unseen = this.#store.eventsSince(this.id, watermark);
-    const replay = buildReplay(unseen, agent, {
-      maxChars: this.#config.replayMaxChars,
-      maxToolOutput: this.#config.replayMaxToolOutput,
-    });
-
-    // Record what the user actually typed, not the wire payload. The transcript should
-    // reflect the conversation; the replay block is transport, not content.
-    this.#record(null, {
-      kind: 'user.message',
-      text,
-      hadReplay: replay.preamble !== null,
-    });
-    const userMessageSeq = this.#store.head(this.id);
-
-    if (replay.preamble) {
-      log.info('replaying context', {
-        threadId: this.id,
-        agent,
-        turns: replay.turnCount,
-        brief: replay.digestTurns,
-        elided: replay.elidedTurns,
-        chars: replay.preamble.length,
-      });
-    }
-
-    // Read at send time, not cached on the thread: the notes are a file the user — or an
-    // editor outside this app — can change between turns, and the next turn should carry
-    // what is on disk now.
-    const pinned = buildPinnedContext(this.#context.get(this.id), {
-      maxChars: PINNED_CONTEXT_MAX_CHARS,
-    });
-    if (pinned) {
-      log.info('pinning context', { threadId: this.id, agent, chars: pinned.length });
-    }
-
-    const item = this.workItem();
-    const retained = item === null ? [] : this.retained(item.id);
-    const buildPayload = (currentReplay: typeof replay): string => applyWorkspace(
-      buildWorkspaceBlock(workspace),
-      applyWorkItem(
-        buildWorkItemBlock(item),
-        applyRetained(
-          buildRetainedBlock(selectedForContext(retained)),
-          applyPinnedContext(pinned, applyReplay(currentReplay.preamble, text)),
-        ),
-      ),
-    );
-    let payload = buildPayload(replay);
-    let adapter = this.#adapter(agent, cwd);
-
-    // Recorded before dispatch, and before the run can fail, so a run that dies on the
-    // first token still leaves behind what it was asked to do and what it was given.
-    const runId = asRun && item ? options.runId ?? randomUUID() : null;
-    if (options.runId !== undefined && runId === null) {
-      throw new Error('A recovery correction run needs a linked work item.');
-    }
-    const runFrom = this.#store.head(this.id);
-    if (runId && item) {
-      this.#record(agent, {
-        kind: 'run.started',
-        runId,
-        workItemId: item.id,
-        source: `${item.source.repo}#${item.source.number}`,
-        revision: item.snapshot.revision,
-        context: capContext(payload),
-        instruction: text,
-        ...(options.recoveryContext === undefined
-          ? {}
-          : {
-              transitionId: options.recoveryContext.transitionId,
-              recoveryContext: options.recoveryContext,
-            }),
-      });
-    }
-
-    // Claim the turn synchronously, before any await, so a second send to the same agent
-    // sees it busy and is rejected rather than racing in.
+    // Claim the turn before the first await below, not after the preparation it guards.
+    // In lane mode that preparation checks out a worktree and runs the project's setup
+    // command, and a second send arriving in that window has to find the agent busy.
     this.#turns.set(agent, null);
-    if (runId) this.#activeRuns.set(agent, runId);
     this.#onState();
 
+    // Everything the dispatch needs is prepared under the claim, so a preparation that
+    // throws releases the turn in the same `finally` a dispatch failure does.
+    let cwd = summary.cwd;
+    let item: WorkItem | null = null;
+    let runId: string | null = null;
+    let runFrom = this.#store.head(this.id);
+    let recorded = false;
     // Agents that don't report their own turn diff (Claude) get one synthesized from a
     // git snapshot taken around the turn. Ground truth from the working tree, never a
     // guess parsed from tool output. Codex reports its own, so we don't shadow it.
     let diffBaseline: Awaited<ReturnType<typeof snapshotWorkingTree>> = null;
     let failure: string | null = null;
     try {
+      // Provisioning is lazy for the same reason adapters are: a thread that only ever
+      // talks to Claude should not pay for a Codex checkout.
+      cwd = this.#parallel ? await this.#lane(agent, summary.cwd) : summary.cwd;
+
+      // Build the replay *before* recording the new message. The user message counts as a
+      // foreign event (its agent is null), so recording first would fold the prompt into
+      // its own preamble and the agent would receive it twice.
+      const watermark = summary.watermarks[agent] ?? 0;
+      const unseen = this.#store.eventsSince(this.id, watermark);
+      const replay = buildReplay(unseen, agent, {
+        maxChars: this.#config.replayMaxChars,
+        maxToolOutput: this.#config.replayMaxToolOutput,
+      });
+
+      // Record what the user actually typed, not the wire payload. The transcript should
+      // reflect the conversation; the replay block is transport, not content.
+      this.#record(null, {
+        kind: 'user.message',
+        text,
+        hadReplay: replay.preamble !== null,
+      });
+      const userMessageSeq = this.#store.head(this.id);
+      recorded = true;
+
+      if (replay.preamble) {
+        log.info('replaying context', {
+          threadId: this.id,
+          agent,
+          turns: replay.turnCount,
+          brief: replay.digestTurns,
+          elided: replay.elidedTurns,
+          chars: replay.preamble.length,
+        });
+      }
+
+      // Read at send time, not cached on the thread: the notes are a file the user — or an
+      // editor outside this app — can change between turns, and the next turn should carry
+      // what is on disk now.
+      const pinned = buildPinnedContext(this.#context.get(this.id), {
+        maxChars: PINNED_CONTEXT_MAX_CHARS,
+      });
+      if (pinned) {
+        log.info('pinning context', { threadId: this.id, agent, chars: pinned.length });
+      }
+
+      item = this.workItem();
+      const retained = item === null ? [] : this.retained(item.id);
+      const buildPayload = (currentReplay: typeof replay): string => applyWorkspace(
+        buildWorkspaceBlock(workspace),
+        applyWorkItem(
+          buildWorkItemBlock(item),
+          applyRetained(
+            buildRetainedBlock(selectedForContext(retained)),
+            applyPinnedContext(pinned, applyReplay(currentReplay.preamble, text)),
+          ),
+        ),
+      );
+      let payload = buildPayload(replay);
+      let adapter = this.#adapter(agent, cwd);
+
+      // Recorded before dispatch, and before the run can fail, so a run that dies on the
+      // first token still leaves behind what it was asked to do and what it was given.
+      runId = asRun && item ? options.runId ?? randomUUID() : null;
+      if (options.runId !== undefined && runId === null) {
+        throw new Error('A recovery correction run needs a linked work item.');
+      }
+      runFrom = this.#store.head(this.id);
+      if (runId && item) {
+        this.#record(agent, {
+          kind: 'run.started',
+          runId,
+          workItemId: item.id,
+          source: `${item.source.repo}#${item.source.number}`,
+          revision: item.snapshot.revision,
+          context: capContext(payload),
+          instruction: text,
+          ...(options.recoveryContext === undefined
+            ? {}
+            : {
+                transitionId: options.recoveryContext.transitionId,
+                recoveryContext: options.recoveryContext,
+              }),
+        });
+      }
+      if (runId) this.#activeRuns.set(agent, runId);
+      this.#onState();
+
       diffBaseline = adapter.capabilities.turnDiff ? null : await snapshotWorkingTree(cwd);
       let retriedStaleResume = false;
       for (;;) {
@@ -783,8 +802,10 @@ class Thread {
       if (item) this.#ingestRetained(agent, cwd, item.id, runId);
       if (runId) this.#closeRun(agent, runId, runFrom, failure);
       // Advance the watermark whether or not the turn succeeded: the agent received the
-      // context either way, and re-sending it would duplicate history in its session.
-      this.#store.setWatermark(this.id, agent, this.#store.head(this.id));
+      // context either way, and re-sending it would duplicate history in its session. A
+      // turn that failed before its message was recorded received nothing, so it leaves
+      // the mark where it was rather than skipping history nobody replayed.
+      if (recorded) this.#store.setWatermark(this.id, agent, this.#store.head(this.id));
       this.#onState();
     }
   }
@@ -812,38 +833,49 @@ class Thread {
     if (this.#busy.length > 0) {
       throw new Error(`${this.busyWith} is working. Interrupt it before changing lanes.`);
     }
-
-    if (on) {
-      // Fail here rather than at the first turn: a repo-less directory cannot have lanes,
-      // and the user should learn that from the switch they just flipped.
-      if ((await headTree(summary.cwd)) === null) {
-        throw new Error(
-          'Parallel mode needs the thread directory to be a git repository with at least one commit.',
-        );
-      }
-    } else {
-      // Leaving lanes behind would throw away work the user never saw. Refuse instead.
-      for (const [agent, lane] of this.#lanes) {
-        const diff = await laneDiff(lane);
-        if (!diff.ok) {
-          throw new Error(`${agent}'s lane could not be inspected; leaving parallel mode was refused.`);
-        }
-        if (diff.patch !== null) {
-          throw new Error(
-            `${agent}'s lane has changes that are not in your working directory yet. Integrate or discard them first.`,
-          );
-        }
-      }
+    if (this.#switchingLanes) {
+      throw new Error('Lane mode is already changing.');
     }
 
-    await Promise.all([...this.#adapters.values()].map((adapter) => adapter.stop()));
-    this.#adapters.clear();
-    this.#store.update(this.id, { parallel: on, nativeSessions: {}, watermarks: emptyAgentRecord(() => 0) });
-    this.#parallel = on;
+    // Claimed before the first await below, for the reason a turn is: every check above
+    // this line is about a thread nobody else is changing, and the inspection that
+    // follows suspends long enough for a turn to arrive and invalidate all of them.
+    this.#switchingLanes = true;
+    try {
+      if (on) {
+        // Fail here rather than at the first turn: a repo-less directory cannot have
+        // lanes, and the user should learn that from the switch they just flipped.
+        if ((await headTree(summary.cwd)) === null) {
+          throw new Error(
+            'Parallel mode needs the thread directory to be a git repository with at least one commit.',
+          );
+        }
+      } else {
+        // Leaving lanes behind would throw away work the user never saw. Refuse instead.
+        for (const [agent, lane] of this.#lanes) {
+          const diff = await laneDiff(lane);
+          if (!diff.ok) {
+            throw new Error(`${agent}'s lane could not be inspected; leaving parallel mode was refused.`);
+          }
+          if (diff.patch !== null) {
+            throw new Error(
+              `${agent}'s lane has changes that are not in your working directory yet. Integrate or discard them first.`,
+            );
+          }
+        }
+      }
 
-    if (!on) await this.#dropLanes();
-    log.info('parallel mode set', { threadId: this.id, parallel: on });
-    this.#onState();
+      await Promise.all([...this.#adapters.values()].map((adapter) => adapter.stop()));
+      this.#adapters.clear();
+      this.#store.update(this.id, { parallel: on, nativeSessions: {}, watermarks: emptyAgentRecord(() => 0) });
+      this.#parallel = on;
+
+      if (!on) await this.#dropLanes();
+      log.info('parallel mode set', { threadId: this.id, parallel: on });
+      this.#onState();
+    } finally {
+      this.#switchingLanes = false;
+    }
   }
 
   /**
@@ -2549,27 +2581,44 @@ class Thread {
     }
   }
 
-  /** The agent's lane, provisioned on first use. Its path, ready to be a working directory. */
+  /**
+   * The agent's lane, provisioned on first use. Its path, ready to be a working directory.
+   *
+   * The in-flight promise is what makes a second caller wait rather than provision again:
+   * `git worktree add` on a path a sibling call is already seeding fails, and its failure
+   * path would then remove the directory that sibling is working in.
+   */
   async #lane(agent: AgentId, baseCwd: string): Promise<string> {
     const existing = this.#lanes.get(agent);
     if (existing) return existing.path;
 
-    const path = join(this.#config.dataDir, 'threads', this.id, 'lanes', agent);
-    const result = await provisionLane(baseCwd, path);
-    if (!result.ok) throw new Error(`Could not give ${agent} a lane: ${result.reason}`);
+    const inFlight = this.#laneProvisioning.get(agent);
+    if (inFlight) return inFlight;
 
-    this.#lanes.set(agent, result.lane);
-    this.#watch(path, agent);
+    const provisioning = (async (): Promise<string> => {
+      const path = join(this.#config.dataDir, 'threads', this.id, 'lanes', agent);
+      const result = await provisionLane(baseCwd, path);
+      if (!result.ok) throw new Error(`Could not give ${agent} a lane: ${result.reason}`);
 
-    const setup = await this.#runLaneSetup(path, baseCwd);
-    this.#record(agent, {
-      kind: 'lane.updated',
-      status: 'provisioned',
-      path,
-      detail: setup,
-    });
-    this.#onState();
-    return path;
+      this.#lanes.set(agent, result.lane);
+      this.#watch(path, agent);
+
+      const setup = await this.#runLaneSetup(path, baseCwd);
+      this.#record(agent, {
+        kind: 'lane.updated',
+        status: 'provisioned',
+        path,
+        detail: setup,
+      });
+      this.#onState();
+      return path;
+    })();
+
+    // Cleared on settle so a lane that failed to provision can be tried again on the next
+    // turn. The tracked promise is the one handed out, so every waiter sees that result.
+    const tracked = provisioning.finally(() => { this.#laneProvisioning.delete(agent); });
+    this.#laneProvisioning.set(agent, tracked);
+    return tracked;
   }
 
   /**
