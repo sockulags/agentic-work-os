@@ -1,9 +1,31 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { validateWorkingDirectory } from './server.js';
+import { WebSocket, type RawData } from 'ws';
+import type { HarnessConfig } from './config.js';
+import { Orchestrator } from './orchestrator.js';
+import { HarnessServer, validateWorkingDirectory } from './server.js';
+
+const dataDirs: string[] = [];
+const sockets: WebSocket[] = [];
+const servers: HarnessServer[] = [];
+const orchestrators: Orchestrator[] = [];
+
+/**
+ * Teardown outside the test body, because the body is what a crash takes with it.
+ *
+ * An unguarded frame throws out of the socket listener, which abandons the running test
+ * mid-await: a `finally` there would never run, and the still-listening server would hold
+ * the runner open long past the reported failure.
+ */
+after(async () => {
+  for (const socket of sockets) socket.terminate();
+  for (const server of servers) await server.close();
+  for (const orchestrator of orchestrators) await orchestrator.stop();
+  for (const dir of dataDirs) rmSync(dir, { recursive: true, force: true });
+});
 
 test('validates that a working directory exists and is a directory', async () => {
   const root = mkdtempSync(join(tmpdir(), 'awos-cwd-'));
@@ -25,4 +47,118 @@ test('validates that a working directory exists and is a directory', async () =>
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+function config(dataDir: string): HarnessConfig {
+  return {
+    dataDir,
+    claudeBin: 'unused',
+    codexBin: 'unused',
+    claudeBinArgs: [],
+    codexBinArgs: [],
+    claudeModel: '',
+    codexModel: '',
+    host: '127.0.0.1',
+    port: 0,
+    replayMaxChars: 24_000,
+    replayMaxToolOutput: 800,
+    laneSetup: '',
+    laneSetupTimeoutMs: 10_000,
+    interruptGraceMs: 100,
+    approvalTimeoutMs: 100,
+    codexInitTimeoutMs: 100,
+    ghBin: 'unused',
+    ghBinArgs: [],
+    ghTimeoutMs: 100,
+  };
+}
+
+function opened(socket: WebSocket): Promise<void> {
+  return new Promise((resolve, reject) => {
+    socket.once('open', () => resolve());
+    socket.once('error', reject);
+  });
+}
+
+/** Deadlined, so a daemon that died instead of answering fails the test rather than hanging it. */
+function closed(socket: WebSocket): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timed out waiting for the socket to close')), 5_000);
+    socket.once('close', (code: number) => {
+      clearTimeout(timer);
+      resolve(code);
+    });
+  });
+}
+
+function response(
+  socket: WebSocket,
+  type: string,
+  payload: Record<string, unknown> = {},
+): Promise<Record<string, unknown>> {
+  const requestId = `${type}-${Math.random()}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      socket.off('message', onMessage);
+      reject(new Error(`timed out waiting for ${type}`));
+    }, 5_000);
+    const onMessage = (raw: RawData): void => {
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if (message['requestId'] !== requestId) return;
+      clearTimeout(timer);
+      socket.off('message', onMessage);
+      resolve(message);
+    };
+    socket.on('message', onMessage);
+    socket.send(JSON.stringify({ type, requestId, ...payload }));
+  });
+}
+
+/**
+ * A frame nobody validated must cost its own socket and nothing else.
+ *
+ * `null` is the case worth naming: it is valid JSON, so the parse succeeds, and reading
+ * a field off it throws synchronously inside the `'message'` listener, where there is no
+ * catch left. Unguarded, that ends the process — so the two working clients are the real
+ * assertions: one held open across the refusals, one connecting after them, and neither
+ * is possible if the daemon is gone.
+ */
+test('an unvalidated frame closes only its own socket and leaves the daemon serving', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'awos-ws-frame-'));
+  dataDirs.push(dataDir);
+  const cfg = config(dataDir);
+  const orchestrator = new Orchestrator(cfg);
+  orchestrators.push(orchestrator);
+  const server = new HarnessServer(cfg, orchestrator);
+  servers.push(server);
+  const port = await server.listen();
+
+  // An authenticated client held open across every bad frame: the criterion is that a
+  // refused frame costs its own socket, not that the daemon merely survives it.
+  const bystander = new WebSocket(`ws://127.0.0.1:${port}`);
+  sockets.push(bystander);
+  bystander.on('error', () => {});
+  await opened(bystander);
+  assert.equal((await response(bystander, 'hello', { token: server.token }))['type'], 'ok');
+
+  const frames = ['null', '[]', '1', '"x"', '{"requestId":"r1"}', '{"type":"hello"}'];
+  for (const frame of frames) {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+    sockets.push(socket);
+    socket.on('error', () => {});
+    await opened(socket);
+    const code = closed(socket);
+    socket.send(frame);
+    assert.equal(await code, 1003, `frame ${frame} should be refused as malformed`);
+  }
+
+  assert.equal(bystander.readyState, WebSocket.OPEN, 'a refused frame closed another client');
+  assert.equal((await response(bystander, 'thread.list'))['type'], 'thread.list');
+
+  const survivor = new WebSocket(`ws://127.0.0.1:${port}`);
+  sockets.push(survivor);
+  survivor.on('error', () => {});
+  await opened(survivor);
+  const reply = await response(survivor, 'hello', { token: server.token });
+  assert.equal(reply['type'], 'ok');
 });
