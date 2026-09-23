@@ -30,6 +30,33 @@ export async function validateWorkingDirectory(cwd: string): Promise<void> {
   throw new Error(`Working directory does not exist or is not a directory: ${cwd}`);
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Narrow a parsed frame to a message whose envelope is safe to read.
+ *
+ * `JSON.parse` returns whatever the peer sent, and this socket reads `type` and
+ * `requestId` off that result before anyone has authenticated. Asserting the shape with
+ * a cast there is a compile-time claim about bytes the peer chose: a frame carrying the
+ * literal `null` parses without throwing, and reading a field off it throws out of the
+ * `'message'` listener, where nothing is left to catch it — one frame would take down
+ * the daemon and every thread it hosts. Same guard shape as the permission bridge's
+ * `asInboundFrame`, for the same reason.
+ *
+ * Only the envelope is checked here. `token` is left unnarrowed so a missing one is
+ * rejected as a bad token rather than as a bad frame, the way the bridge does it, and
+ * per-case payload fields stay `#handle`'s business: its promise chain already answers a
+ * bad one with an error response rather than a crash.
+ */
+function asClientMessage(value: unknown): ClientMessage | null {
+  if (!isPlainObject(value)) return null;
+  if (typeof value['type'] !== 'string') return null;
+  if (typeof value['requestId'] !== 'string') return null;
+  return value as ClientMessage;
+}
+
 /**
  * The UI's only entry point into the core.
  *
@@ -99,11 +126,18 @@ export class HarnessServer {
     };
 
     socket.on('message', (raw) => {
-      let msg: ClientMessage;
+      let parsed: unknown;
       try {
-        msg = JSON.parse(raw.toString()) as ClientMessage;
+        parsed = JSON.parse(raw.toString());
       } catch {
         socket.close(1003, 'invalid json');
+        return;
+      }
+
+      const msg = asClientMessage(parsed);
+      if (msg === null) {
+        log.warn('rejecting malformed frame');
+        socket.close(1003, 'malformed frame');
         return;
       }
 
