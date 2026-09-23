@@ -509,6 +509,96 @@ describe('cross-agent handoff', () => {
     assert.notEqual(state.lanes.claude, state.lanes.codex, 'the lanes are separate directories');
   });
 
+  /**
+   * A lane whose setup command takes a moment, so the provisioning window a second send
+   * could slip into is wide enough to aim at rather than something the test has to catch.
+   */
+  function declareSlowSetup(root: string): void {
+    mkdirSync(join(root, '.awos'), { recursive: true });
+    writeFileSync(
+      join(root, WORKSPACE_FILE),
+      JSON.stringify({
+        version: WORKSPACE_SCHEMA_VERSION,
+        name: 'under-test',
+        setup: { command: 'node -e "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,300)"' },
+      }),
+      'utf8',
+    );
+  }
+
+  test('refuses a second turn that arrives while the first is provisioning a lane', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declareSlowSetup(cwd);
+    const thread = orch.createThread({ cwd });
+    await orch.setParallel(thread.id, true);
+
+    // Both sends are issued in the same tick, so the second arrives while the first is
+    // still inside lane provisioning. The lock has to hold across that await, not only
+    // across the dispatch that follows it.
+    const first = orch.send(thread.id, 'claude', 'first');
+    await assert.rejects(() => orch.send(thread.id, 'claude', 'second'), /still working/);
+    await first;
+
+    const lane = orch.state(thread.id).lanes.claude;
+    assert.ok(lane, 'the lane is available after setup completes');
+    await orch.send(thread.id, 'claude', 'after setup');
+    assert.equal(orch.state(thread.id).lanes.claude, lane, 'the completed lane is reused');
+
+    const events = orch.store.events(thread.id);
+    assert.equal(
+      events.filter((e) => e.kind === 'user.message').length,
+      2,
+      'the setup-window call did not reach the transcript, but the later call did',
+    );
+    assert.equal(
+      events.filter((e) => e.kind === 'turn.started' && e.agent === 'claude').length,
+      2,
+      'only completed turns reached the adapter',
+    );
+    assert.equal(
+      events.filter((e) => e.kind === 'lane.updated' && e.status === 'provisioned').length,
+      1,
+      'the lane was provisioned once',
+    );
+  });
+
+  test('reads as busy while the lane is still being provisioned', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declareSlowSetup(cwd);
+    const thread = orch.createThread({ cwd });
+    await orch.setParallel(thread.id, true);
+
+    const inFlight = orch.send(thread.id, 'claude', 'provision the lane');
+    // Read before awaiting anything: the turn has to be visible from the moment send
+    // commits to it, or the UI leaves the composer open over the whole install.
+    const during = orch.state(thread.id);
+    assert.deepEqual(during.busy, ['claude'], 'the agent is busy during provisioning');
+    assert.equal(during.lanes.claude, undefined, 'and the lane is not provisioned yet');
+
+    await inFlight;
+    assert.deepEqual(orch.state(thread.id).busy, [], 'the turn released the lock');
+  });
+
+  test('refuses a turn that arrives while lane mode is still changing', async () => {
+    const { orch } = await boot(makeConfig());
+    const thread = orch.createThread({ cwd: makeRepo() });
+
+    const switching = orch.setParallel(thread.id, true);
+    await assert.rejects(
+      () => orch.send(thread.id, 'claude', 'mid-transition'),
+      /lane mode is changing/i,
+    );
+    await switching;
+
+    assert.equal(
+      orch.store.events(thread.id).filter((e) => e.kind === 'user.message').length,
+      0,
+      'the refused turn recorded nothing',
+    );
+  });
+
   test('refuses to integrate a lane without a canonical workspace source', async () => {
     const { orch } = await boot(makeConfig());
     const cwd = makeRepo();
