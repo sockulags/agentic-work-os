@@ -1,4 +1,4 @@
-import type { AgentAvailability, AgentCapabilities, AgentId, WorkerDiagnosticReasonCode } from '@awos/protocol';
+import type { AgentAvailability, AgentCapabilities, WorkerDiagnosticReasonCode, WorkerProfileId } from '@awos/protocol';
 
 /**
  * Capabilities of the agent that owns a turn, which is not always the agent selected for
@@ -6,7 +6,7 @@ import type { AgentAvailability, AgentCapabilities, AgentId, WorkerDiagnosticRea
  */
 export function capabilitiesForTurn(
   availability: AgentAvailability[],
-  turnAgent: AgentId | null,
+  turnAgent: WorkerProfileId | null,
 ): AgentCapabilities | undefined {
   if (turnAgent === null) return undefined;
   return availability.find((entry) => entry.profileId === turnAgent)?.capabilities;

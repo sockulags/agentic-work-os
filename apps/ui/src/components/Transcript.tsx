@@ -31,7 +31,10 @@ export function Transcript({
     const labels = new Map<string, string>();
     for (const profile of profiles) {
       labels.set(profile.profileId, profile.label);
-      labels.set(profile.agent, profile.label);
+      // Provider-only legacy events resolve to the persisted provider id. Only the
+      // provider's canonical profile may supply that fallback label; custom profiles
+      // sharing the provider must remain addressable by profileId.
+      if (profile.profileId === profile.agent) labels.set(profile.agent, profile.label);
     }
     return labels;
   }, [profiles]);
@@ -73,10 +76,10 @@ export function Transcript({
       <div className="mx-auto flex min-w-0 w-full max-w-3xl flex-col gap-[var(--density-shell-gap)]">
         {rows.map((row, index) =>
           row.type === 'tool-group' ? (
-            <ToolGroup key={row.key} items={row.items} profileLabel={profileLabels.get(row.items[0]?.agent ?? '')} />
+            <ToolGroup key={`${row.key}:${row.items[0]?.agent ?? ''}`} items={row.items} profileLabel={profileLabels.get(row.items[0]?.agent ?? '')} />
           ) : (
             <TranscriptRow
-              key={row.key}
+              key={`${row.key}:${row.item.kind !== 'user' && 'agent' in row.item ? row.item.agent : ''}`}
               item={row.item}
               isLast={index === rows.length - 1}
               profileLabel={row.item.kind !== 'user' && 'agent' in row.item ? profileLabels.get(row.item.agent) : undefined}

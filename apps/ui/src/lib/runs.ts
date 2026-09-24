@@ -1,5 +1,4 @@
 import type {
-  AgentId,
   ClaimSource,
   CatalogRunEvidence,
   EvidenceItem,
@@ -7,7 +6,9 @@ import type {
   HarnessEvent,
   RunOutcome,
   RunState,
+  WorkerProfileId,
 } from '@awos/protocol';
+import { eventWorkerProfileId } from '@awos/protocol';
 
 /**
  * Folds the log into the runs a thread has made, with what each one claimed, what
@@ -35,7 +36,7 @@ export interface EvidenceCandidate {
 export interface RunView {
   runId: string;
   /** The agent that took it, from the event envelope. */
-  agent: AgentId | null;
+  agent: WorkerProfileId | null;
   instruction: string;
   /** The payload as sent, which is the whole point of recording a run. */
   context: string;
@@ -91,7 +92,7 @@ export function foldRuns(
           }
           runs.set(event.runId, {
             runId: event.runId,
-            agent: event.agent,
+            agent: eventWorkerProfileId(event),
             instruction: event.instruction,
             context: event.context,
             revision: event.revision,

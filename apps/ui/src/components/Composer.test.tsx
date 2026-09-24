@@ -72,10 +72,10 @@ describe('Composer — who can be sent to', () => {
   });
 
   test('uses the server label and a safe fallback for an unknown profile style', () => {
-    const profile = {
+    const profile: AgentAvailability = {
       agent: 'claude', profileId: 'future-profile', label: 'Future Worker', adapterId: 'future', model: 'future',
       available: true, detail: 'ok', checkedAt: 1_700_000_000_000, capabilities: { streamingToolOutput: false, streamingText: true, reasoning: false, plans: false, turnDiff: false, approvals: false, resumableSessions: false },
-    } as unknown as AgentAvailability;
+    };
     renderWithHarness(<Composer />, { activeThread: thread(), availability: [profile] });
     expect(screen.getByRole('button', { name: 'Future Worker' })).toBeTruthy();
     expect(input().placeholder).toContain('Future Worker');

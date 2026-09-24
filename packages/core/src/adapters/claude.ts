@@ -122,7 +122,11 @@ export class ClaudeAdapter implements WorkerAdapter {
     const { config, cwd, threadId, permissionMode, resumeSessionId } = this.#ctx;
 
     // Register before spawning: Claude can request permission on its very first tool.
-    this.#ctx.permissionBridge.registerThread(threadId, (req) => this.#onPermission(req));
+    this.#ctx.permissionBridge.registerThread(
+      threadId,
+      this.#ctx.workerProfileId,
+      (req) => this.#onPermission(req),
+    );
 
     const sessionId = resumeSessionId ?? randomUUID();
     this.#sessionId = sessionId;
@@ -136,6 +140,7 @@ export class ClaudeAdapter implements WorkerAdapter {
             AWOS_BRIDGE_PORT: String(this.#ctx.permissionBridge.port),
             AWOS_BRIDGE_TOKEN: this.#ctx.permissionBridge.token,
             AWOS_THREAD_ID: threadId,
+            AWOS_WORKER_PROFILE_ID: this.#ctx.workerProfileId,
             AWOS_LOG_LEVEL: process.env['AWOS_LOG_LEVEL'] ?? 'info',
           },
         },
@@ -215,7 +220,7 @@ export class ClaudeAdapter implements WorkerAdapter {
   }
 
   async stop(): Promise<void> {
-    this.#ctx.permissionBridge.unregisterThread(this.#ctx.threadId);
+    this.#ctx.permissionBridge.unregisterThread(this.#ctx.threadId, this.#ctx.workerProfileId);
 
     // Anything still waiting on a human gets denied — we're going away.
     for (const [approvalId] of this.#approvals) {

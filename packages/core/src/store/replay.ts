@@ -1,4 +1,4 @@
-import type { AgentId, HarnessEvent } from '@awos/protocol';
+import { eventWorkerProfileId, type AgentId, type HarnessEvent, type WorkerProfileId } from '@awos/protocol';
 
 /**
  * Cross-agent handoff by full replay.
@@ -62,13 +62,13 @@ const DIGEST_OK_TOOLS = 3;
  */
 export function buildReplay(
   events: HarnessEvent[],
-  forAgent: AgentId,
+  forAgent: WorkerProfileId,
   options: ReplayOptions,
 ): ReplayResult {
   const empty: ReplayResult = { preamble: null, turnCount: 0, digestTurns: 0, elidedTurns: 0 };
 
   const replayable = events.filter(
-    (event) => options.includeSameAgentHistory === true || event.agent !== forAgent,
+    (event) => options.includeSameAgentHistory === true || eventWorkerProfileId(event) !== forAgent,
   );
   if (replayable.length === 0) return empty;
 
@@ -120,7 +120,7 @@ export function buildReplay(
     }
   }
 
-  const agents = [...new Set(turns.map((turn) => turn.agent).filter(Boolean))];
+  const agents = [...new Set(turns.map((turn) => turn.workerProfileId ?? turn.agent).filter(Boolean))];
   const header =
     `While you were away, the user worked with ` +
     `${agents.map((a) => `**${a}**`).join(' and ')} ` +
@@ -169,6 +169,7 @@ export function hasReplay(text: string): boolean {
 interface TurnGroup {
   turnId: string;
   agent: AgentId | null;
+  workerProfileId: WorkerProfileId | null;
   events: HarnessEvent[];
 }
 
@@ -182,7 +183,12 @@ export function groupIntoTurns(events: HarnessEvent[]): TurnGroup[] {
     if (key === null) continue;
 
     if (!current || current.turnId !== key) {
-      current = { turnId: key, agent: event.agent, events: [] };
+      current = {
+        turnId: key,
+        agent: event.agent,
+        workerProfileId: eventWorkerProfileId(event),
+        events: [],
+      };
       groups.push(current);
     }
     current.events.push(event);
@@ -201,7 +207,7 @@ function renderTurn(turn: TurnGroup, options: ReplayOptions): string | null {
         break;
 
       case 'message.completed':
-        lines.push(`**${turn.agent ?? 'agent'}:** ${event.text}`);
+        lines.push(`**${turn.workerProfileId ?? turn.agent ?? 'agent'}:** ${event.text}`);
         break;
 
       case 'tool.started':
@@ -234,7 +240,7 @@ function renderTurn(turn: TurnGroup, options: ReplayOptions): string | null {
 
   if (lines.length === 0) return null;
 
-  const label = turn.agent === null ? 'user' : turn.agent;
+  const label = turn.workerProfileId ?? turn.agent ?? 'user';
   return [`### ${label}`, ...lines].join('\n');
 }
 
@@ -261,7 +267,7 @@ function renderDigest(turn: TurnGroup): string | null {
         break;
 
       case 'message.completed':
-        lines.push(`**${turn.agent ?? 'agent'}:** ${shorten(event.text, DIGEST_TEXT_CHARS)}`);
+        lines.push(`**${turn.workerProfileId ?? turn.agent ?? 'agent'}:** ${shorten(event.text, DIGEST_TEXT_CHARS)}`);
         break;
 
       case 'tool.started':
@@ -296,7 +302,7 @@ function renderDigest(turn: TurnGroup): string | null {
   }
   if (lines.length === 0) return null;
 
-  const label = turn.agent === null ? 'user' : turn.agent;
+  const label = turn.workerProfileId ?? turn.agent ?? 'user';
   return [`### ${label} · brief`, ...lines].join('\n');
 }
 

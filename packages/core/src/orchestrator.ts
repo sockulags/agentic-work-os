@@ -6,6 +6,7 @@ import { join, resolve as resolvePath } from 'node:path';
 import { promisify } from 'node:util';
 import type {
   AdapterEvent,
+  AgentAvailability,
   AnswerRecordedBody,
   AgentId,
   ApprovalRequestedBody,
@@ -59,6 +60,7 @@ import type {
 } from '@awos/protocol';
 import {
   AGENT_IDS,
+  eventWorkerProfileId,
   createRequiredTransitionOverride,
   createTransitionEvaluation,
   isTrustedVisualEventKind,
@@ -71,10 +73,14 @@ import {
 import type { HarnessConfig } from './config.js';
 import { isNativeResumeNotFoundError, type WorkerAdapter, type AdapterContext, type WorkerTurnOptions } from './adapters/agent.js';
 import {
+  DEFAULT_WORKER_REGISTRIES,
   createWorkerAdapter,
   probeWorkerHealth,
+  probeWorkerProfiles,
   registeredWorkerProfiles,
   resolveWorkerCapabilityFacts,
+  workerProfile,
+  type WorkerRegistries,
 } from './adapters/registry.js';
 import { isQwenResumeNotFoundError } from './adapters/qwen-code.js';
 import { PermissionBridge } from './permission-bridge.js';
@@ -165,8 +171,11 @@ export class TransitionEvaluationConflictError extends Error {
   }
 }
 
-function emptyAgentRecord<T>(factory: () => T): Record<AgentId, T> {
-  return Object.fromEntries(AGENT_IDS.map((agent) => [agent, factory()])) as Record<AgentId, T>;
+function emptyWorkerProfileRecord<T>(
+  factory: () => T,
+  profileIds: readonly WorkerProfileId[] = AGENT_IDS,
+): Record<WorkerProfileId, T> {
+  return Object.fromEntries(profileIds.map((profileId) => [profileId, factory()])) as Record<WorkerProfileId, T>;
 }
 
 /** Pin every declaration that contributed to the effective integration/verify contract. */
@@ -355,6 +364,7 @@ function previewEvent(
     seq: canonical.revision + index + 1,
     threadId: canonical.threadId,
     agent: entry.agent,
+    profileId: entry.workerProfileId ?? entry.agent,
     turnId: turnId ?? null,
     ts: ts ?? Date.now(),
   } as HarnessEvent;
@@ -453,8 +463,9 @@ class Thread {
   readonly #emit: (event: HarnessEvent) => void;
   readonly #onState: () => void;
   readonly #checkWorkers: (profileIds: readonly WorkerProfileId[]) => Promise<WorkerDiagnostic[]>;
+  readonly #registries: WorkerRegistries;
 
-  readonly #adapters = new Map<AgentId, WorkerAdapter>();
+  readonly #adapters = new Map<WorkerProfileId, WorkerAdapter>();
   #permissionMode: PermissionMode = 'default';
   /**
    * Agents with a turn in flight, each mapped to the turn it is running.
@@ -462,20 +473,20 @@ class Thread {
    * A map rather than a single field because parallel mode lifts the one-turn rule: with
    * a lane each, two agents cannot race on the filesystem, so the lock is per agent.
    */
-  readonly #turns = new Map<AgentId, string | null>();
+  readonly #turns = new Map<WorkerProfileId, string | null>();
   /** Run identity for each in-flight turn that was explicitly started as work. */
-  readonly #activeRuns = new Map<AgentId, string>();
-  #lastTurnAgent: AgentId | null = null;
+  readonly #activeRuns = new Map<WorkerProfileId, string>();
+  #lastTurnAgent: WorkerProfileId | null = null;
   #plan: PlanItem[] = [];
   #diff: string | null = null;
   #parallel = false;
-  readonly #lanes = new Map<AgentId, Lane>();
+  readonly #lanes = new Map<WorkerProfileId, Lane>();
   /** One provisioning per agent: concurrent first turns wait on it rather than repeat it. */
-  readonly #laneProvisioning = new Map<AgentId, Promise<string>>();
+  readonly #laneProvisioning = new Map<WorkerProfileId, Promise<string>>();
   /** True from the first line of `setParallel` until the mode change has finished. */
   #switchingLanes = false;
-  readonly #pendingApprovals = new Map<string, ApprovalRequestedBody>();
-  readonly #agentStatus = new Map<AgentId, { status: string; model: string | null }>();
+  readonly #pendingApprovals = new Map<string, HarnessEvent & ApprovalRequestedBody>();
+  readonly #agentStatus = new Map<WorkerProfileId, { status: string; model: string | null }>();
   /** One per watched working copy: the thread directory, plus a lane each in parallel mode. */
   readonly #watchers = new Map<string, ArtifactWatcher>();
 
@@ -491,6 +502,7 @@ class Thread {
       onState: () => void;
       /** Targeted capability/health check against the orchestrator's own health record. */
       checkWorkers: (profileIds: readonly WorkerProfileId[]) => Promise<WorkerDiagnostic[]>;
+      registries?: WorkerRegistries;
     },
   ) {
     this.id = id;
@@ -502,6 +514,7 @@ class Thread {
     this.#emit = deps.emit;
     this.#onState = deps.onState;
     this.#checkWorkers = deps.checkWorkers;
+    this.#registries = deps.registries ?? DEFAULT_WORKER_REGISTRIES;
 
     // Rebuild derived state from history so a reopened thread shows its checklist and
     // the diff from the last turn that produced one.
@@ -509,7 +522,7 @@ class Thread {
     for (const event of this.#store.events(id)) {
       if (event.kind === 'plan.updated') this.#plan = event.items;
       else if (event.kind === 'turn.started') {
-        this.#lastTurnAgent = event.agent;
+        this.#lastTurnAgent = eventWorkerProfileId(event);
         this.#diff = null;
       }
       else if (event.kind === 'diff.updated') this.#diff = event.patch;
@@ -533,7 +546,7 @@ class Thread {
    * may hold a file called `plan.md` — without that, whichever wrote last would silently
    * replace the other in the dock.
    */
-  #watch(cwd: string, agent: AgentId | null, known?: Map<string, string>): void {
+  #watch(cwd: string, agent: WorkerProfileId | null, known?: Map<string, string>): void {
     if (this.#watchers.has(cwd)) return;
     const watcher = new ArtifactWatcher({
       cwd,
@@ -553,12 +566,12 @@ class Thread {
     watcher.start();
   }
 
-  get busyWith(): AgentId | null {
+  get busyWith(): WorkerProfileId | null {
     return this.#busy[0] ?? null;
   }
 
   /** The agents with a turn in flight, for callers that need only that much of the state. */
-  get busyAgents(): AgentId[] {
+  get busyAgents(): WorkerProfileId[] {
     return this.#busy;
   }
 
@@ -566,7 +579,7 @@ class Thread {
     return [...this.#activeRuns.values()].includes(runId);
   }
 
-  get #busy(): AgentId[] {
+  get #busy(): WorkerProfileId[] {
     return [...this.#turns.keys()];
   }
 
@@ -584,12 +597,14 @@ class Thread {
   }
 
   state(): ThreadRuntimeState {
-    const agents = emptyAgentRecord(() => ({ status: 'idle', model: null as string | null }));
-    for (const agent of AGENT_IDS) {
-      const status = this.#agentStatus.get(agent);
-      if (status) agents[agent] = status;
+    const agents = emptyWorkerProfileRecord(
+      () => ({ status: 'idle', model: null as string | null }),
+      this.#registries.profiles.map((profile) => profile.id),
+    );
+    for (const [profileId, status] of this.#agentStatus) {
+      agents[profileId] = status;
     }
-    const lanes: Partial<Record<AgentId, string>> = {};
+    const lanes: Partial<Record<WorkerProfileId, string>> = {};
     for (const [agent, lane] of this.#lanes) lanes[agent] = lane.path;
 
     return {
@@ -620,7 +635,7 @@ class Thread {
    * truth about the thread — but they are conversation, not a run.
    */
   async send(
-    agent: AgentId,
+    agent: WorkerProfileId,
     text: string,
     asRun = false,
     options: { runId?: string; recoveryContext?: RecoveryWorkerContext; keepRunActive?: boolean } = {},
@@ -828,7 +843,7 @@ class Thread {
   }
 
   /** Interrupt one agent, or everything that is running when none is named. */
-  async interrupt(agent?: AgentId): Promise<void> {
+  async interrupt(agent?: WorkerProfileId): Promise<void> {
     const targets = agent ? [agent] : this.#busy;
     await Promise.all(targets.map((id) => this.#adapters.get(id)?.interrupt()));
   }
@@ -884,7 +899,14 @@ class Thread {
 
       await Promise.all([...this.#adapters.values()].map((adapter) => adapter.stop()));
       this.#adapters.clear();
-      this.#store.update(this.id, { parallel: on, nativeSessions: {}, watermarks: emptyAgentRecord(() => 0) });
+      this.#store.update(this.id, {
+        parallel: on,
+        nativeSessions: {},
+        watermarks: emptyWorkerProfileRecord(
+          () => 0,
+          this.#registries.profiles.map((profile) => profile.id),
+        ),
+      });
       this.#parallel = on;
 
       if (!on) await this.#dropLanes();
@@ -904,7 +926,7 @@ class Thread {
    * happen is a fact about the thread.
    */
   async integrate(
-    agent: AgentId,
+    agent: WorkerProfileId,
     override: GateOverride | null = null,
   ): Promise<{ ok: boolean; detail: string }> {
     const summary = this.#store.get(this.id);
@@ -1069,7 +1091,8 @@ class Thread {
           }
         }
         entries.push({
-          agent,
+          agent: workerProfile(agent, this.#config, this.#registries).agent,
+          workerProfileId: agent,
           body: {
             kind: 'gate.evaluated',
             gate: 'lane.integration',
@@ -1146,10 +1169,9 @@ class Thread {
   resolveApproval(approvalId: string, optionId: string): void {
     const pending = this.#pendingApprovals.get(approvalId);
     if (!pending) throw new Error(`No pending approval ${approvalId}`);
-    // Only the agent that raised it can answer it, so ask both — the other is a no-op.
-    for (const adapter of this.#adapters.values()) {
-      adapter.resolveApproval(approvalId, optionId);
-    }
+    const profileId = eventWorkerProfileId(pending);
+    if (profileId === null) throw new Error(`Approval ${approvalId} has no worker profile owner.`);
+    this.#adapters.get(profileId)?.resolveApproval(approvalId, optionId);
   }
 
   async stop(): Promise<void> {
@@ -1177,6 +1199,7 @@ class Thread {
       laneSetup: this.#config.laneSetup,
       expectationItemIds: CORE_EXPECTATION_ITEM_IDS,
       evaluatorProfileIds: CORE_EVALUATOR_PROFILE_IDS,
+      workerProfileIds: this.#registries.profiles.map((profile) => profile.id),
     });
   }
 
@@ -1202,7 +1225,7 @@ class Thread {
    * the agent's scratch, and deleting other people's files to track our own bookkeeping is
    * how you lose someone's notes.
    */
-  #ingestRetained(agent: AgentId, cwd: string, workItemId: string, runId: string | null): void {
+  #ingestRetained(agent: WorkerProfileId, cwd: string, workItemId: string, runId: string | null): void {
     const path = join(cwd, RETAINED_FILE);
     if (!existsSync(path)) return;
 
@@ -1257,7 +1280,7 @@ class Thread {
    * is; a claim about the thread directory would be a claim about files the agent never
    * touched.
    */
-  async #workingState(agent: AgentId | null): Promise<WorkingState> {
+  async #workingState(agent: WorkerProfileId | null): Promise<WorkingState> {
     const summary = this.#store.get(this.id);
     const lane = agent === null ? undefined : this.#lanes.get(agent);
     const cwd = lane?.path ?? summary?.cwd;
@@ -1300,7 +1323,7 @@ class Thread {
       evidenceKind: input.kind,
       ref: input.ref,
       summary: input.summary,
-      state: await this.#workingState(started.agent),
+      state: await this.#workingState(started.profileId),
       check: null,
       ...(input.expectationSetId === undefined ? {} : { expectationSetId: input.expectationSetId }),
       ...(input.expectationItemId === undefined ? {} : { expectationItemId: input.expectationItemId }),
@@ -1418,7 +1441,7 @@ class Thread {
    * A failure is recorded, not thrown. "The tests failed" is the answer to the question,
    * and losing it would leave the gate unable to say why it is refusing.
    */
-  async runCheck(name: string, agent: AgentId): Promise<{ passed: boolean; detail: string }> {
+  async runCheck(name: string, agent: WorkerProfileId): Promise<{ passed: boolean; detail: string }> {
     const summary = this.#store.get(this.id);
     if (!summary) throw new Error(`Unknown thread ${this.id}`);
 
@@ -1495,7 +1518,7 @@ class Thread {
    * as satisfied would put a green light in front of a refusal.
    */
   async gate(
-    agent: AgentId,
+    agent: WorkerProfileId,
   ): Promise<GateDecision & { candidate: WorkingState; refusalReason: string | null }> {
     const summary = this.#store.get(this.id);
     if (!summary) throw new Error(`Unknown thread ${this.id}`);
@@ -1734,7 +1757,7 @@ class Thread {
     transitionId: string;
     expectedAttempt: number;
     expectedHead?: number;
-    agent: AgentId;
+    agent: WorkerProfileId;
     cycleId?: string;
   }): Promise<RecoveryCycle | null> {
     if (input.transitionId.trim() === '' || !Number.isInteger(input.expectedAttempt) || input.expectedAttempt < 1) {
@@ -2390,7 +2413,7 @@ class Thread {
   #correctionWorkerAvailability(
     workspace: WorkspaceResolution,
     evaluation: TransitionEvaluation,
-    agent: AgentId,
+    agent: WorkerProfileId,
   ): Promise<{ detail: string } | null> {
     if (workspace.status !== 'ok') {
       return Promise.resolve({ detail: 'The workspace is unavailable; no correction worker may be selected.' });
@@ -2417,7 +2440,7 @@ class Thread {
     evaluation: TransitionEvaluation,
     reason: 'human-action' | 'worker-unavailable' | 'transient-evaluator',
     detail: string,
-    workerProfileId?: AgentId,
+    workerProfileId?: WorkerProfileId,
   ): void {
     if (
       cycle.waiting?.reason === reason &&
@@ -2466,10 +2489,10 @@ class Thread {
   }
 
   /** The most recent run started by an agent in this thread, if any. */
-  #latestRun(agent: AgentId): { runId: string; workItemId: string } | null {
+  #latestRun(agent: WorkerProfileId): { runId: string; workItemId: string } | null {
     let latest: { runId: string; workItemId: string } | null = null;
     for (const event of this.#store.events(this.id)) {
-      if (event.kind === 'run.started' && event.agent === agent) {
+      if (event.kind === 'run.started' && eventWorkerProfileId(event) === agent) {
         latest = { runId: event.runId, workItemId: event.workItemId };
       }
     }
@@ -2529,10 +2552,10 @@ class Thread {
     return this.#runStarted(runId) !== null;
   }
 
-  #runStarted(runId: string): { workItemId: string; agent: AgentId | null } | null {
+  #runStarted(runId: string): { workItemId: string; profileId: WorkerProfileId | null } | null {
     for (const event of this.#store.events(this.id)) {
       if (event.kind === 'run.started' && event.runId === runId) {
-        return { workItemId: event.workItemId, agent: event.agent };
+        return { workItemId: event.workItemId, profileId: eventWorkerProfileId(event) };
       }
     }
     return null;
@@ -2551,7 +2574,7 @@ class Thread {
    * already recorded there by whichever path finished the turn, and a second copy kept
    * alongside would be one more thing that can disagree with the transcript.
    */
-  #closeRun(agent: AgentId, runId: string, fromSeq: number, failure: string | null): void {
+  #closeRun(agent: WorkerProfileId, runId: string, fromSeq: number, failure: string | null): void {
     if (failure !== null) {
       this.#record(agent, { kind: 'run.completed', runId, state: 'error', detail: failure });
       return;
@@ -2559,7 +2582,7 @@ class Thread {
 
     const completion = this.#store
       .eventsSince(this.id, fromSeq)
-      .filter((event) => event.kind === 'turn.completed' && event.agent === agent)
+      .filter((event) => event.kind === 'turn.completed' && eventWorkerProfileId(event) === agent)
       .pop();
 
     if (completion?.kind !== 'turn.completed') {
@@ -2606,7 +2629,7 @@ class Thread {
    * `git worktree add` on a path a sibling call is already seeding fails, and its failure
    * path would then remove the directory that sibling is working in.
    */
-  async #lane(agent: AgentId, baseCwd: string): Promise<string> {
+  async #lane(agent: WorkerProfileId, baseCwd: string): Promise<string> {
     const inFlight = this.#laneProvisioning.get(agent);
     if (inFlight) return inFlight;
 
@@ -2717,7 +2740,7 @@ class Thread {
     }
   }
 
-  #adapter(agent: AgentId, cwd: string): WorkerAdapter {
+  #adapter(agent: WorkerProfileId, cwd: string): WorkerAdapter {
     const existing = this.#adapters.get(agent);
     if (existing) return existing;
 
@@ -2726,6 +2749,9 @@ class Thread {
 
     const ctx: AdapterContext = {
       threadId: this.id,
+      workerProfileId: agent,
+      workerProfileIds: this.#registries.profiles.map((profile) => profile.id),
+      agentId: workerProfile(agent, this.#config, this.#registries).agent,
       cwd,
       config: this.#config,
       permissionMode: this.#permissionMode,
@@ -2736,19 +2762,19 @@ class Thread {
       onSessionLost: () => this.#store.clearNativeSession(this.id, agent),
     };
 
-    const adapter = createWorkerAdapter(agent, ctx);
+    const adapter = createWorkerAdapter(agent, ctx, this.#registries);
     this.#adapters.set(agent, adapter);
     return adapter;
   }
 
-  async #resetStaleNativeSession(agent: AgentId): Promise<void> {
+  async #resetStaleNativeSession(agent: WorkerProfileId): Promise<void> {
     await this.#adapters.get(agent)?.stop();
     this.#adapters.delete(agent);
     this.#store.clearNativeSession(this.id, agent);
   }
 
   /** Persist, update derived state, broadcast. The single write path for events. */
-  #record(agent: AgentId | null, body: AdapterEvent): HarnessEvent {
+  #record(agent: WorkerProfileId | null, body: AdapterEvent): HarnessEvent {
     if (agent !== null && (body.kind === 'answer.recorded' || body.kind === 'attestation.recorded' || body.kind === 'human.attestation.recorded')) {
       throw new Error('Human answer and attestation records require the core human-authority boundary.');
     }
@@ -2758,13 +2784,15 @@ class Thread {
     )) {
       throw new Error('Visual evidence can only be recorded by a trusted core adapter.');
     }
-    const event = this.#store.append(this.id, agent, body);
+    const provider = agent === null ? null : workerProfile(agent, this.#config, this.#registries).agent;
+    const event = this.#store.append(this.id, provider, body, agent);
 
     switch (event.kind) {
       case 'turn.started':
         // Bind the turn to the agent running it, so two lanes in flight keep their own.
-        if (event.agent) this.#turns.set(event.agent, event.turnId);
-        this.#lastTurnAgent = event.agent;
+        const profileId = eventWorkerProfileId(event);
+        if (profileId) this.#turns.set(profileId, event.turnId);
+        this.#lastTurnAgent = profileId;
         // The diff is scoped to a turn. Carrying it over would show the previous
         // agent's changes as if the current one had made them.
         this.#diff = null;
@@ -2807,11 +2835,19 @@ class Thread {
   /** Publish a recovery reservation only when the expected append-only head is current. */
   #compareRecord(
     expectedHead: number,
-    agent: AgentId | null,
+    agent: WorkerProfileId | null,
     body: AdapterEvent,
     expectedAttempt?: ExpectedTransitionAttempt,
   ): HarnessEvent | null {
-    const event = this.#store.compareAndAppend(this.id, expectedHead, agent, body, expectedAttempt);
+    const provider = agent === null ? null : workerProfile(agent, this.#config, this.#registries).agent;
+    const event = this.#store.compareAndAppend(
+      this.id,
+      expectedHead,
+      provider,
+      body,
+      expectedAttempt,
+      agent,
+    );
     if (event === null) return null;
     this.#emit(event);
     this.#onState();
@@ -2882,6 +2918,7 @@ export class Orchestrator extends EventEmitter {
   readonly catalog: CatalogStore;
   readonly roleSelections: WorkspaceRoleSelectionStore;
   readonly #config: HarnessConfig;
+  readonly #registries: WorkerRegistries;
   readonly #bridge = new PermissionBridge();
   readonly #threads = new Map<string, Thread>();
   readonly #issueLocks = new Map<string, Promise<void>>();
@@ -2894,9 +2931,10 @@ export class Orchestrator extends EventEmitter {
    */
   readonly #workerHealth = new Map<WorkerProfileId, WorkerProbeObservation>();
 
-  constructor(config: HarnessConfig) {
+  constructor(config: HarnessConfig, registries: WorkerRegistries = DEFAULT_WORKER_REGISTRIES) {
     super();
     this.#config = config;
+    this.#registries = registries;
     this.store = new ThreadStore(config.dataDir);
     this.context = new ContextStore(config.dataDir);
     this.work = new WorkItemStore(config.dataDir);
@@ -2914,7 +2952,7 @@ export class Orchestrator extends EventEmitter {
     await this.#bridge.close();
   }
 
-  createThread(options: { cwd: string; title?: string; agent?: AgentId; workItemId?: string | null }): ThreadSummary {
+  createThread(options: { cwd: string; title?: string; agent?: WorkerProfileId; workItemId?: string | null }): ThreadSummary {
     const summary = this.store.create(options);
     this.emit('thread', summary);
     return summary;
@@ -3029,13 +3067,22 @@ export class Orchestrator extends EventEmitter {
     profileIds?: readonly WorkerProfileId[];
     probe?: boolean;
   } = {}): Promise<WorkerDiagnostic[]> {
-    const profileIds = options.profileIds ?? registeredWorkerProfiles(this.#config).map((profile) => profile.id);
+    const profileIds = options.profileIds ?? registeredWorkerProfiles(this.#config, this.#registries).map((profile) => profile.id);
     if (options.probe === true) await this.#recordWorkerProbe(profileIds);
     return this.#projectWorkerDiagnostics(profileIds);
   }
 
+  /** Probe the selectable profiles from this orchestrator's configured registry. */
+  async probeAgents(): Promise<AgentAvailability[]> {
+    return probeWorkerProfiles(
+      this.#config,
+      this.#registries.profiles.map((profile) => profile.id),
+      this.#registries,
+    );
+  }
+
   async #recordWorkerProbe(profileIds: readonly WorkerProfileId[]): Promise<void> {
-    for (const observation of await probeWorkerHealth(this.#config, profileIds)) {
+    for (const observation of await probeWorkerHealth(this.#config, profileIds, this.#registries)) {
       this.#workerHealth.set(observation.profileId, observation);
     }
   }
@@ -3043,7 +3090,7 @@ export class Orchestrator extends EventEmitter {
   #projectWorkerDiagnostics(profileIds: readonly WorkerProfileId[]): WorkerDiagnostic[] {
     const requested = [...new Set(profileIds)];
     return projectWorkerDiagnostics({
-      capabilities: requested.map((profileId) => resolveWorkerCapabilityFacts(profileId, this.#config)),
+      capabilities: requested.map((profileId) => resolveWorkerCapabilityFacts(profileId, this.#config, this.#registries)),
       observations: requested.flatMap((profileId) => {
         const observation = this.#workerHealth.get(profileId);
         return observation === undefined ? [] : [observation];
@@ -3074,7 +3121,7 @@ export class Orchestrator extends EventEmitter {
     return { diagnostics: this.#projectWorkerDiagnostics(profileIds), error };
   }
 
-  async send(threadId: string, agent: AgentId, text: string, asRun = false): Promise<void> {
+  async send(threadId: string, agent: WorkerProfileId, text: string, asRun = false): Promise<void> {
     const summary = this.store.get(threadId);
     if (!summary) throw new Error(`Unknown thread ${threadId}`);
 
@@ -3094,7 +3141,7 @@ export class Orchestrator extends EventEmitter {
     if (after) this.emit('thread', after);
   }
 
-  async interrupt(threadId: string, agent?: AgentId): Promise<void> {
+  async interrupt(threadId: string, agent?: WorkerProfileId): Promise<void> {
     await this.#thread(threadId).interrupt(agent);
   }
 
@@ -3106,7 +3153,7 @@ export class Orchestrator extends EventEmitter {
 
   async integrateLane(
     threadId: string,
-    agent: AgentId,
+    agent: WorkerProfileId,
     override: GateOverride | null = null,
   ): Promise<{ ok: boolean; detail: string }> {
     return this.#thread(threadId).integrate(agent, override);
@@ -3115,7 +3162,7 @@ export class Orchestrator extends EventEmitter {
   /** Run a named verification check where the agent's work is. */
   async runCheck(
     threadId: string,
-    agent: AgentId,
+    agent: WorkerProfileId,
     name: string,
   ): Promise<{ passed: boolean; detail: string }> {
     return this.#thread(threadId).runCheck(name, agent);
@@ -3124,7 +3171,7 @@ export class Orchestrator extends EventEmitter {
   /** What the gate would decide about an agent's lane right now. */
   async gate(
     threadId: string,
-    agent: AgentId,
+    agent: WorkerProfileId,
   ): Promise<GateDecision & { candidate: WorkingState; refusalReason: string | null }> {
     return this.#thread(threadId).gate(agent);
   }
@@ -3150,6 +3197,7 @@ export class Orchestrator extends EventEmitter {
       laneSetup: this.#config.laneSetup,
       expectationItemIds: CORE_EXPECTATION_ITEM_IDS,
       evaluatorProfileIds: CORE_EVALUATOR_PROFILE_IDS,
+      workerProfileIds: this.#registries.profiles.map((profile) => profile.id),
     });
   }
 
@@ -3553,7 +3601,7 @@ export class Orchestrator extends EventEmitter {
   /** Start an explicitly selected worker correction; the worker profile is never substituted. */
   async startRecovery(
     threadId: string,
-    input: { transitionId: string; expectedAttempt: number; expectedHead?: number; agent: AgentId; cycleId?: string },
+    input: { transitionId: string; expectedAttempt: number; expectedHead?: number; agent: WorkerProfileId; cycleId?: string },
   ): Promise<RecoveryCycle | null> {
     return this.#thread(threadId).startRecovery(input);
   }
@@ -4163,6 +4211,7 @@ export class Orchestrator extends EventEmitter {
       context: this.context,
       work: this.work,
       bridge: this.#bridge,
+      registries: this.#registries,
       emit: (event) => this.emit('event', event),
       onState: () => this.emit('state', thread.state()),
       checkWorkers: (profileIds) => this.workerDiagnostics({ profileIds, probe: true }),

@@ -14,7 +14,6 @@ import type { HarnessConfig } from './config.js';
 import { TransitionEvaluationConflictError, type Orchestrator } from './orchestrator.js';
 import { RecoveryConflictError } from './work/recovery.js';
 import { createLogger } from './util/logger.js';
-import { probeWorkerProfiles } from './adapters/registry.js';
 
 const log = createLogger('server');
 
@@ -545,6 +544,6 @@ export class HarnessServer {
   }
 
   async #probeAgents(): Promise<AgentAvailability[]> {
-    return probeWorkerProfiles(this.#config);
+    return this.#orchestrator.probeAgents();
   }
 }

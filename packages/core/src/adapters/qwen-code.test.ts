@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { AdapterEvent, ModelTarget, PermissionMode } from '@awos/protocol';
-import type { Query } from '@qwen-code/sdk';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import type { AdapterEvent, ModelTarget, PermissionMode, WorkerProfileId } from '@awos/protocol';
+import type { CanUseTool, Query } from '@qwen-code/sdk';
 import { HUMAN_AUTH_TOKEN_ENV } from '../config.js';
 import type { HarnessConfig } from '../config.js';
 import type { AdapterContext } from './agent.js';
@@ -32,9 +35,16 @@ const target: ModelTarget = {
   endpoint: 'http://127.0.0.1:1234/v1', authProfile: 'local-placeholder',
 };
 
-function context(events: AdapterEvent[], permissionMode: PermissionMode = 'default', resumeSessionId: string | null = null): AdapterContext {
+function context(
+  events: AdapterEvent[],
+  permissionMode: PermissionMode = 'default',
+  resumeSessionId: string | null = null,
+  cwd = process.cwd(),
+  workerProfileIds: readonly WorkerProfileId[] = ['qwen-local'],
+  workerProfileId: WorkerProfileId = 'qwen-local',
+): AdapterContext {
   return {
-    threadId: 't1', cwd: process.cwd(), config: config(), permissionMode,
+    threadId: 't1', workerProfileId, workerProfileIds, agentId: 'qwen-local', cwd, config: config(), permissionMode,
     permissionBridge: {} as AdapterContext['permissionBridge'], resumeSessionId,
     emit: (event) => events.push(event), onSessionId: () => {},
   };
@@ -88,6 +98,47 @@ describe('Qwen Code policy', () => {
     assert.equal(qwenPermissionPolicy('edit', {}, 'acceptEdits', []), 'allow');
     assert.equal(qwenPermissionPolicy('edit', {}, 'bypassPermissions', []), 'allow');
     assert.deepEqual(QWEN_CORE_TOOLS, ['read_file', 'glob', 'grep_search', 'edit', 'run_shell_command']);
+  });
+
+  test('resolves custom Qwen profiles before applying workspace verification policy', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'awos-qwen-profile-'));
+    const workspaceDir = join(root, '.awos');
+    const workspaceFile = join(workspaceDir, 'workspace.json');
+    const events: AdapterEvent[] = [];
+    let canUseTool: CanUseTool | undefined;
+    try {
+      mkdirSync(workspaceDir, { recursive: true });
+      writeFileSync(workspaceFile, JSON.stringify({
+        version: 3,
+        name: 'Custom Qwen workspace',
+        agents: ['qwen-custom'],
+        verify: [{ name: 'custom-test', command: 'npm run custom-test' }],
+      }), 'utf8');
+
+      const adapter = new QwenCodeAdapter(
+        context(events, 'bypassPermissions', null, root, ['qwen-custom'], 'qwen-custom'),
+        target,
+        {
+          query: (args) => {
+            canUseTool = args.options.canUseTool;
+            return fakeQuery([successResult()]);
+          },
+        },
+      );
+      await adapter.sendTurn('verify the workspace');
+
+      assert.ok(canUseTool);
+      const allowed = await canUseTool('run_shell_command', { command: 'npm run custom-test' }, {
+        signal: new AbortController().signal,
+      });
+      const denied = await canUseTool('run_shell_command', { command: 'npm test' }, {
+        signal: new AbortController().signal,
+      });
+      assert.equal(allowed.behavior, 'allow');
+      assert.equal(denied.behavior, 'deny');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -61,7 +61,7 @@ describe('worker profile registry', () => {
       create: () => { creates += 1; return adapter; },
     };
     const profile = (id: AgentId) => ({
-      id, label: id, adapterId: factory.id, targetId: target.id,
+      id, agent: id, label: id, adapterId: factory.id, targetId: target.id,
       policy: { permissionModes: ['default'] as const, nativeTurnDiff: false },
       probe: async () => ({ available: true, detail: 'ok' }),
     });
@@ -105,6 +105,7 @@ describe('worker capability facts', () => {
     const registries: WorkerRegistries = {
       profiles: [{
         id: 'claude', label: 'Claude', adapterId: 'claude-only', targetId: target.id,
+        agent: 'claude',
         policy: { permissionModes: ['default'], nativeTurnDiff: false },
         probe: async () => ({ available: true, detail: 'never called' }),
       }],
@@ -156,6 +157,7 @@ describe('worker capability facts', () => {
     const registries: WorkerRegistries = {
       profiles: [{
         id: 'qwen-local', label: 'Qwen', adapterId: 'claude-only', targetId: target.id,
+        agent: 'qwen-local',
         policy: { permissionModes: ['default'], nativeTurnDiff: false },
         probe: async () => ({ available: true, detail: 'never called' }),
       }],
@@ -179,7 +181,7 @@ describe('targeted worker probes', () => {
       id: 'shared-target', provider: 'openai-compatible', model: 'm', endpoint: null, authProfile: null,
     };
     const profile = (id: AgentId, available: boolean): WorkerProfileDefinition => ({
-      id, label: id, adapterId: 'test-factory', targetId: target.id,
+      id, agent: id, label: id, adapterId: 'test-factory', targetId: target.id,
       policy: { permissionModes: ['default'], nativeTurnDiff: false },
       probe: async () => {
         started.push(id);

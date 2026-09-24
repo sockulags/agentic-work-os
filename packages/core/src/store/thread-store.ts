@@ -18,6 +18,7 @@ import type {
   HarnessEvent,
   ThreadSummary,
   TransitionEvaluation,
+  WorkerProfileId,
 } from '@awos/protocol';
 import { AGENT_IDS, isTrustedVisualEventKind } from '@awos/protocol';
 import { createLogger } from '../util/logger.js';
@@ -44,6 +45,7 @@ export interface ExpectedTransitionAttempt {
 
 export interface CompareAndAppendEntry {
   agent: AgentId | null;
+  workerProfileId?: WorkerProfileId | null;
   body: AdapterEvent;
 }
 
@@ -259,7 +261,7 @@ export class ThreadStore {
   // Writes
   // -------------------------------------------------------------------------
 
-  create(options: { cwd: string; title?: string; agent?: AgentId; workItemId?: string | null }): ThreadSummary {
+  create(options: { cwd: string; title?: string; agent?: WorkerProfileId; workItemId?: string | null }): ThreadSummary {
     const id = randomUUID();
     const now = this.#tick();
     const summary: ThreadSummary = {
@@ -270,7 +272,7 @@ export class ThreadStore {
       updatedAt: now,
       activeAgent: options.agent ?? 'claude',
       nativeSessions: {},
-      watermarks: Object.fromEntries(AGENT_IDS.map((agent) => [agent, 0])) as Record<AgentId, number>,
+      watermarks: Object.fromEntries(AGENT_IDS.map((agent) => [agent, 0])),
       eventCount: 0,
       workItemId: options.workItemId ?? null,
       parallel: false,
@@ -291,16 +293,26 @@ export class ThreadStore {
   }
 
   /** Stamp identity and ordering onto an adapter event, persist, return it. */
-  append(threadId: string, agent: AgentId | null, body: AdapterEvent): HarnessEvent {
+  append(
+    threadId: string,
+    agent: AgentId | null,
+    body: AdapterEvent,
+    workerProfileId?: WorkerProfileId | null,
+  ): HarnessEvent {
     return this.#withThreadLock(threadId, () => {
       // Ordinary events also cross process boundaries. Do not let a stale instance reuse
       // the last sequence it saw before acquiring the reservation.
       this.#reloadThreadFromDisk(threadId);
-      return this.#appendUnlocked(threadId, agent, body);
+      return this.#appendUnlocked(threadId, agent, body, workerProfileId);
     });
   }
 
-  #appendUnlocked(threadId: string, agent: AgentId | null, body: AdapterEvent): HarnessEvent {
+  #appendUnlocked(
+    threadId: string,
+    agent: AgentId | null,
+    body: AdapterEvent,
+    workerProfileId?: WorkerProfileId | null,
+  ): HarnessEvent {
     const summary = this.#summaries.get(threadId);
     if (!summary) throw new Error(`Unknown thread ${threadId}`);
     if (agent !== null && (
@@ -319,6 +331,7 @@ export class ThreadStore {
       seq: this.head(threadId) + 1,
       threadId,
       agent,
+      profileId: workerProfileId ?? agent,
       turnId: turnId ?? null,
       ts: ts ?? Date.now(),
     }) as HarnessEvent;
@@ -349,8 +362,9 @@ export class ThreadStore {
     agent: AgentId | null,
     body: AdapterEvent,
     expectedAttempt?: ExpectedTransitionAttempt,
+    workerProfileId?: WorkerProfileId | null,
   ): HarnessEvent | null {
-    const events = this.compareAndAppendBatch(threadId, expectedHead, [{ agent, body }], expectedAttempt);
+    const events = this.compareAndAppendBatch(threadId, expectedHead, [{ agent, body, workerProfileId }], expectedAttempt);
     return events?.[0] ?? null;
   }
 
@@ -395,7 +409,7 @@ export class ThreadStore {
         }
         const built = request.build(canonical);
         if (!this.#validEvaluationBatch(canonical, request, built.entries)) return null;
-        const events = built.entries.map((entry) => this.#appendUnlocked(threadId, entry.agent, entry.body));
+        const events = built.entries.map((entry) => this.#appendUnlocked(threadId, entry.agent, entry.body, entry.workerProfileId));
         return { events, value: built.value };
       }
       if (expectedAttempt !== undefined && !this.#matchesExpectedAttempt(threadId, expectedAttempt)) return null;
@@ -405,7 +419,7 @@ export class ThreadStore {
           return null;
         }
       }
-      return entries.map((entry) => this.#appendUnlocked(threadId, entry.agent, entry.body));
+      return entries.map((entry) => this.#appendUnlocked(threadId, entry.agent, entry.body, entry.workerProfileId));
     });
   }
 
@@ -421,7 +435,7 @@ export class ThreadStore {
     });
   }
 
-  setNativeSession(threadId: string, agent: AgentId, sessionId: string): void {
+  setNativeSession(threadId: string, agent: WorkerProfileId, sessionId: string): void {
     const summary = this.#summaries.get(threadId);
     if (!summary) return;
     if (summary.nativeSessions[agent] === sessionId) return;
@@ -431,7 +445,7 @@ export class ThreadStore {
   }
 
   /** Drop a proven-stale native session and make the next turn replay from the log head. */
-  clearNativeSession(threadId: string, agent: AgentId): void {
+  clearNativeSession(threadId: string, agent: WorkerProfileId): void {
     const summary = this.#summaries.get(threadId);
     if (!summary) return;
     const nativeSessions = { ...summary.nativeSessions };
@@ -442,7 +456,7 @@ export class ThreadStore {
     });
   }
 
-  setWatermark(threadId: string, agent: AgentId, seq: number): void {
+  setWatermark(threadId: string, agent: WorkerProfileId, seq: number): void {
     const summary = this.#summaries.get(threadId);
     if (!summary) return;
     this.update(threadId, { watermarks: { ...summary.watermarks, [agent]: seq } });
@@ -648,7 +662,7 @@ export class ThreadStore {
 
     const summary = JSON.parse(readFileSync(metaPath, 'utf8')) as ThreadSummary;
     // Defend against meta written by an older build.
-    summary.watermarks ??= Object.fromEntries(AGENT_IDS.map((agent) => [agent, 0])) as Record<AgentId, number>;
+    summary.watermarks ??= Object.fromEntries(AGENT_IDS.map((agent) => [agent, 0]));
     for (const agent of AGENT_IDS) summary.watermarks[agent] ??= 0;
     summary.nativeSessions ??= {};
     // Written by a build that had no work items. Null is the same answer as "this thread
@@ -666,7 +680,10 @@ export class ThreadStore {
       for (const line of raw.split('\n')) {
         if (line.trim() === '') continue;
         try {
-          events.push(JSON.parse(line) as HarnessEvent);
+          const event = JSON.parse(line) as HarnessEvent;
+          // Legacy transcripts have only provider attribution. Resolve the profile key in
+          // memory without rewriting the append-only file or changing `agent`.
+          events.push(event.profileId === undefined ? { ...event, profileId: event.agent } : event);
         } catch {
           if (strict) throw new Error(`Thread ${id} has an incomplete or corrupt event line.`);
           // A torn final line is the expected shape of a crash mid-append. Drop it and

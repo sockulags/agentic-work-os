@@ -104,6 +104,8 @@ describe('turn identity', () => {
     let adapter: CodexAdapter;
     adapter = new CodexAdapter({
       threadId: 'thread-1',
+      workerProfileId: 'codex', workerProfileIds: ['codex'],
+      agentId: 'codex',
       cwd: dir,
       config: testConfig(dir, {
         codexBinArgs: [FAKE_CODEX, '--tool', '--approval', '--diff'],
@@ -157,13 +159,15 @@ describe('turn identity', () => {
 
     adapter = new ClaudeAdapter({
       threadId: 'thread-1',
+      workerProfileId: 'claude', workerProfileIds: ['claude'],
+      agentId: 'claude',
       cwd: dir,
       config: testConfig(dir, { claudeBinArgs: [FAKE_CLAUDE, '--tool', '--think'] }),
       permissionMode: 'default',
       permissionBridge: {
         port: 0,
         token: 'test-token',
-        registerThread: (_threadId: string, handler: BridgeHandler) => {
+        registerThread: (_threadId: string, _profileId: string, handler: BridgeHandler) => {
           permission.ask = handler;
         },
         unregisterThread: () => {},
@@ -222,6 +226,8 @@ describe('turn identity', () => {
     adapter = new QwenCodeAdapter(
       {
         threadId: 'thread-1',
+        workerProfileId: 'qwen-local', workerProfileIds: ['qwen-local'],
+        agentId: 'qwen-local',
         cwd: dir,
         config: testConfig(dir),
         permissionMode: 'default',

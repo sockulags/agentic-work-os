@@ -11,7 +11,7 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import type {
-  AgentId,
+  WorkerProfileId,
   CandidateIdentity,
   EvaluatorFact,
   EvidenceItem as EvidenceRecord,
@@ -107,7 +107,7 @@ function RecoveryCycleCard({ cycle, runs }: { cycle: RecoveryCycle; runs: readon
   const correctionsRemaining = Math.max(0, cycle.maxRuns - cycle.correctionsUsed);
   const evaluationsRemaining = Math.max(0, cycle.maxEvaluations - cycle.evaluationsUsed);
 
-  const start = (agent: AgentId): void => {
+  const start = (agent: WorkerProfileId): void => {
     if (latest === null) return;
     void startRecovery({
       transitionId: cycle.transitionId,
@@ -394,8 +394,8 @@ function RecoveryActions({
   cycle: RecoveryCycle;
   latest: TransitionEvaluation | null;
   refusal: NonNullable<TransitionEvaluation['refusal']> | null;
-  worker: AgentId | null;
-  onStart: (agent: AgentId) => void;
+  worker: WorkerProfileId | null;
+  onStart: (agent: WorkerProfileId) => void;
   onAction: (action: RecoveryActionRequest) => void;
 }): React.JSX.Element | null {
   const [dialog, setDialog] = useState<DialogKind | null>(null);
@@ -948,7 +948,7 @@ function recoveryWorker(
   cycle: RecoveryCycle,
   refusal: NonNullable<TransitionEvaluation['refusal']> | null,
   resuming: boolean,
-): AgentId | null {
+): WorkerProfileId | null {
   if (resuming) return cycle.correctionRuns.at(-1)?.workerProfileId ?? null;
   if (cycle.worker.profileId !== null) return cycle.worker.profileId;
   return refusal?.responsibleActor === 'claude' || refusal?.responsibleActor === 'codex' || refusal?.responsibleActor === 'qwen-local'

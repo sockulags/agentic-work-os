@@ -1,4 +1,4 @@
-import type { AgentId } from './events.js';
+import type { AgentId, WorkerProfileId } from './events.js';
 import type { WorkSourceError } from './work.js';
 
 export type CatalogFreshness = 'not-fetched' | 'cached' | 'current';
@@ -48,6 +48,7 @@ export interface CatalogRunEvidence {
   runId: string;
   threadId: string;
   agent: AgentId | null;
+  workerProfileId?: WorkerProfileId | null;
   startedAt: number;
   state: CatalogRunState;
   /** True only when the matching run is backed by a currently busy in-memory runtime. */

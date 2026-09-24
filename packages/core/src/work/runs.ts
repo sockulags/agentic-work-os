@@ -1,4 +1,4 @@
-import type { CatalogRunEvidence, HarnessEvent } from '@awos/protocol';
+import { eventWorkerProfileId, type CatalogRunEvidence, type HarnessEvent } from '@awos/protocol';
 
 /**
  * Project persisted run evidence with the live runtime overlay.
@@ -23,6 +23,7 @@ export function projectRunEvidence(
         runId: event.runId,
         threadId: event.threadId,
         agent: event.agent,
+        workerProfileId: eventWorkerProfileId(event),
         startedAt: event.ts,
         state: live ? 'running' : 'interrupted',
         live,

@@ -4,7 +4,6 @@ import {
   WORKSPACE_SCHEMA_VERSION,
 } from '@awos/protocol';
 import type {
-  AgentId,
   EvidenceKind,
   VerifyCommand,
   WorkspaceProblem,
@@ -16,6 +15,7 @@ import type {
   WorkspaceGuardrailKind,
   WorkspaceGuardrailParameters,
   WorkspacePixelCaptureContract,
+  WorkerProfileId,
 } from '@awos/protocol';
 
 /**
@@ -36,7 +36,7 @@ export interface WorkspaceDeclaration {
   version: number;
   name?: string;
   repository?: { root?: string; github?: string | null };
-  agents?: AgentId[];
+  agents?: WorkerProfileId[];
   setup?: { command: string; timeoutMs?: number };
   verify?: VerifyCommand[];
   integration?: { requires?: string[]; allowOverride?: boolean };
@@ -69,6 +69,8 @@ export interface ParseOptions {
   expectationItemIds?: readonly string[];
   /** Registered independent evaluator capability ids; required by model-rubric guardrails. */
   evaluatorProfileIds?: readonly string[];
+  /** Registered selectable worker profile ids; defaults to the persisted provider ids. */
+  workerProfileIds?: readonly WorkerProfileId[];
 }
 
 const TOP_LEVEL_KEYS = [
@@ -199,13 +201,21 @@ export function parseDeclaration(raw: string, options: ParseOptions): ParsedDecl
   const agents = parsed['agents'];
   if (agents !== undefined) {
     if (!Array.isArray(agents) || agents.length === 0) {
-      fail('agents', '"agents" must be a non-empty array of agent ids.');
+      fail('agents', '"agents" must be a non-empty array of WorkerProfile ids.');
     } else {
       const seen = new Set<string>();
-      const value: AgentId[] = [];
+      const value: WorkerProfileId[] = [];
       agents.forEach((entry, index) => {
-        if (typeof entry !== 'string' || !(AGENT_IDS as readonly string[]).includes(entry)) {
-          fail(`agents[${index}]`, `Unknown agent "${String(entry)}". Known agents: ${AGENT_IDS.join(', ')}.`);
+        if (typeof entry !== 'string' || !STABLE_ID_RE.test(entry)) {
+          fail(`agents[${index}]`, `Invalid WorkerProfile id "${String(entry)}". Use lowercase letters, digits and hyphens.`);
+          return;
+        }
+        const knownProfileIds = options.workerProfileIds ?? AGENT_IDS;
+        if (!knownProfileIds.includes(entry)) {
+          fail(
+            `agents[${index}]`,
+            `Unknown WorkerProfile "${entry}". Known profiles: ${knownProfileIds.join(', ')}.`,
+          );
           return;
         }
         if (seen.has(entry)) {
@@ -213,7 +223,7 @@ export function parseDeclaration(raw: string, options: ParseOptions): ParsedDecl
           return;
         }
         seen.add(entry);
-        value.push(entry as AgentId);
+        value.push(entry as WorkerProfileId);
       });
       if (value.length > 0) declaration.agents = value;
     }
@@ -417,7 +427,7 @@ function parseRouting(
   const roleIds = new Set((declaration.roles ?? []).map((role) => role.id));
   const allowedAgents = new Set(declaration.agents ?? AGENT_IDS);
   if (parsed.steps !== undefined) {
-    const steps = parseSteps(parsed.steps, roleIds, allowedAgents, fail);
+    const steps = parseSteps(parsed.steps, roleIds, allowedAgents, new Set(options.workerProfileIds ?? AGENT_IDS), fail);
     if (steps !== undefined) declaration.steps = steps;
   }
 
@@ -872,7 +882,8 @@ function parseRoles(
 function parseSteps(
   raw: unknown,
   roleIds: Set<string>,
-  allowedAgents: Set<AgentId>,
+  allowedAgents: Set<WorkerProfileId>,
+  knownProfileIds: Set<WorkerProfileId>,
   fail: (path: string, message: string) => void,
 ): WorkspaceStep[] | undefined {
   if (!Array.isArray(raw)) {
@@ -900,27 +911,34 @@ function parseSteps(
     }
 
     const workers = entry.workers;
-    const workerIds: AgentId[] = [];
-    const seenWorkers = new Set<AgentId>();
+    const workerIds: WorkerProfileId[] = [];
+    const seenWorkers = new Set<WorkerProfileId>();
     if (!Array.isArray(workers) || workers.length === 0) {
       fail(`${at}.workers`, '"workers" must be a non-empty array of WorkerProfile ids.');
     } else {
       workers.forEach((worker, workerIndex) => {
-        if (typeof worker !== 'string' || !(AGENT_IDS as readonly string[]).includes(worker)) {
+        if (typeof worker !== 'string' || !STABLE_ID_RE.test(worker)) {
           fail(
             `${at}.workers[${workerIndex}]`,
-            `Unknown WorkerProfile "${String(worker)}". Known profiles: ${AGENT_IDS.join(', ')}.`,
+            `Invalid WorkerProfile id "${String(worker)}". Use lowercase letters, digits and hyphens.`,
           );
           return;
         }
-        if (!allowedAgents.has(worker as AgentId)) {
+        if (!knownProfileIds.has(worker as WorkerProfileId)) {
+          fail(
+            `${at}.workers[${workerIndex}]`,
+            `Unknown WorkerProfile "${worker}". Known profiles: ${[...knownProfileIds].join(', ')}.`,
+          );
+          return;
+        }
+        if (!allowedAgents.has(worker as WorkerProfileId)) {
           fail(
             `${at}.workers[${workerIndex}]`,
             `WorkerProfile "${worker}" is not allowed by this workspace's "agents" list.`,
           );
           return;
         }
-        const workerId = worker as AgentId;
+        const workerId = worker as WorkerProfileId;
         if (seenWorkers.has(workerId)) {
           fail(`${at}.workers[${workerIndex}]`, `WorkerProfile "${workerId}" is listed more than once in this step.`);
           return;

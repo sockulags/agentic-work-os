@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { GitMerge, X } from 'lucide-react';
-import type { AgentAvailability, AgentId, PermissionMode } from '@awos/protocol';
+import type { AgentAvailability, PermissionMode, WorkerProfileId } from '@awos/protocol';
 import { useHarnessContext } from '@/state/HarnessContext';
 import { ThreadSidebar } from '@/components/ThreadSidebar';
 import { Transcript } from '@/components/Transcript';
@@ -133,10 +133,10 @@ function Header({
   onPermissionMode: (mode: PermissionMode) => void;
   hasThread: boolean;
   parallel: boolean;
-  lanes: Partial<Record<AgentId, string>>;
-  busy: AgentId[];
+  lanes: Partial<Record<WorkerProfileId, string>>;
+  busy: WorkerProfileId[];
   onParallel: (on: boolean) => void;
-  onIntegrate: (agent: AgentId) => void;
+  onIntegrate: (agent: WorkerProfileId) => void;
 }): React.JSX.Element {
   return (
     <header className="awos-header flex shrink-0 items-center gap-[var(--density-shell-gap)] border-b border-border bg-surface-rail px-[var(--density-shell-gutter)] py-[var(--density-shell-header-padding)]">
@@ -151,7 +151,7 @@ function Header({
               the thread directory is the user's, and files arriving in it unasked is the
               surprise this whole mode has to avoid. */}
           {parallel &&
-            (Object.keys(lanes) as AgentId[]).map((agent) => (
+            (Object.keys(lanes) as WorkerProfileId[]).map((agent) => (
               <Button
                 key={agent}
                 type="button"

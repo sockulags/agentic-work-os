@@ -17,7 +17,7 @@
  * is still in the log, in order, with its author and its time.
  */
 
-import type { AgentId } from './events.js';
+import type { AgentId, WorkerProfileId } from './events.js';
 
 /** What a run claims to have achieved. Distinct from how the turn ended. */
 export type RunClaim = 'delivered' | 'partial' | 'blocked' | 'abandoned';
@@ -649,7 +649,7 @@ export interface RecoveryCorrectionRun {
   transitionId: string;
   refusalAttempt: number;
   correctionIndex: number;
-  workerProfileId: AgentId;
+  workerProfileId: WorkerProfileId;
   fingerprint: TransitionFingerprint;
   startedAt: number;
   state: 'running' | 'completed' | 'interrupted' | 'error';
@@ -689,7 +689,7 @@ export interface RecoveryCycle {
   escalation: { reason: RecoveryEscalationReason; action: 'waiting-for-human' | 'blocked'; detail: string } | null;
   cancelled: boolean;
   worker: {
-    profileId: AgentId | null;
+    profileId: WorkerProfileId | null;
     available: boolean | null;
     detail: string | null;
   };

@@ -246,6 +246,7 @@ export class QwenCodeAdapter implements WorkerAdapter {
       laneSetup: ctx.config.laneSetup,
       expectationItemIds: CORE_EXPECTATION_ITEM_IDS,
       evaluatorProfileIds: CORE_EVALUATOR_PROFILE_IDS,
+      workerProfileIds: ctx.workerProfileIds,
     });
     this.#verifyCommands = workspace.status === 'ok' ? workspace.workspace.verify.map((entry) => entry.command) : [];
   }

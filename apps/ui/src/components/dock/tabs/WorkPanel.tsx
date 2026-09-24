@@ -5,7 +5,7 @@ import {
   Plus,
 } from 'lucide-react';
 import type {
-  AgentId,
+  WorkerProfileId,
   RetainedItem,
   RetainedKind,
   RunClaim,
@@ -500,7 +500,7 @@ function Retained({ items }: { items: RetainedItem[] }): React.JSX.Element {
  */
 function Gates(): React.JSX.Element | null {
   const { runtime } = useHarnessContext();
-  const lanes = Object.keys(runtime?.lanes ?? {}) as AgentId[];
+  const lanes = Object.keys(runtime?.lanes ?? {}) as WorkerProfileId[];
   if (lanes.length === 0) return null;
 
   return (
@@ -512,7 +512,7 @@ function Gates(): React.JSX.Element | null {
   );
 }
 
-function Gate({ agent }: { agent: AgentId }): React.JSX.Element | null {
+function Gate({ agent }: { agent: WorkerProfileId }): React.JSX.Element | null {
   const { gates, readGate, runCheck, integrateLane, runs, workspace } = useHarnessContext();
   const gate = gates[agent];
   const [overriding, setOverriding] = useState(false);
@@ -626,7 +626,7 @@ function Gate({ agent }: { agent: AgentId }): React.JSX.Element | null {
 function StartWork(): React.JSX.Element {
   const { startRun, activeThread, runtime } = useHarnessContext();
   const [text, setText] = useState('');
-  const agent: AgentId = activeThread?.activeAgent ?? 'claude';
+  const agent: WorkerProfileId = activeThread?.activeAgent ?? 'claude';
   const busy = runtime?.busy.includes(agent) ?? false;
 
   return (

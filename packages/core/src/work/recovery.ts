@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type {
-  AgentId,
+  WorkerProfileId,
   HarnessEvent,
   RecoveryAction,
   RecoveryCorrectionRun,
@@ -364,7 +364,7 @@ interface MutableCycle {
   waiting: RecoveryCycle['waiting'];
   escalation: RecoveryCycle['escalation'];
   cancelled: boolean;
-  workerProfileId: AgentId | null;
+  workerProfileId: WorkerProfileId | null;
   workerAvailable: boolean | null;
   workerDetail: string | null;
   lastEventSeq: number;

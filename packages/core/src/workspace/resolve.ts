@@ -8,7 +8,6 @@ import {
   WORKSPACE_SCHEMA_VERSION,
 } from '@awos/protocol';
 import type {
-  AgentId,
   EffectiveWorkspace,
   WorkspaceGuardrail,
   WorkspaceField,
@@ -47,6 +46,8 @@ export interface ResolveOptions {
   expectationItemIds?: readonly string[];
   /** Registered independent evaluator capability ids; absent means model guardrails fail closed. */
   evaluatorProfileIds?: readonly string[];
+  /** Registered selectable worker profile ids; absent retains the historical provider ids. */
+  workerProfileIds?: readonly string[];
 }
 
 export function resolveWorkspace(cwd: string, options: ResolveOptions = {}): WorkspaceResolution {
@@ -146,6 +147,7 @@ function readLayer(
     standalone,
     ...(options.expectationItemIds === undefined ? {} : { expectationItemIds: options.expectationItemIds }),
     ...(options.evaluatorProfileIds === undefined ? {} : { evaluatorProfileIds: options.evaluatorProfileIds }),
+    ...(options.workerProfileIds === undefined ? {} : { workerProfileIds: options.workerProfileIds }),
   });
   problems.push(...parsed.problems);
   return parsed.declaration === null ? null : { declaration: parsed.declaration, file };
@@ -223,7 +225,7 @@ function merge(
     root,
     name: '',
     repository: { root: '.', github: null },
-    agents: [...AGENT_IDS] as AgentId[],
+    agents: [...AGENT_IDS],
     setup: { command: '', timeoutMs: null },
     verify: [],
     // Nothing required and no override: a project that has said nothing has not asked for

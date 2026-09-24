@@ -15,7 +15,7 @@ const user = (text: string): TranscriptItem => ({
   ts: seq,
 });
 
-const message = (text: string, streaming = false, agent: 'claude' | 'codex' | 'future-profile' = 'claude'): TranscriptItem => ({
+const message = (text: string, streaming = false, agent: 'claude' | 'codex' | 'future-profile' | 'claude-build' | 'claude-review' = 'claude'): TranscriptItem => ({
   kind: 'message',
   id: `m${next()}`,
   seq,
@@ -35,7 +35,7 @@ const reasoning = (text: string, streaming = false): TranscriptItem => ({
   ts: seq,
 });
 
-const divider = (agent: 'claude' | 'codex'): TranscriptItem => ({
+const divider = (agent: 'claude' | 'codex' | 'claude-build' | 'claude-review'): TranscriptItem => ({
   kind: 'divider',
   id: `d${next()}`,
   seq,
@@ -145,6 +145,22 @@ describe('Transcript item kinds', () => {
 
     expect(screen.getByText('Claude Code')).toBeInTheDocument();
     expect(screen.getByText('Future Profile')).toBeInTheDocument();
+  });
+
+  test('labels same-provider custom profiles independently', () => {
+    renderWithHarness(
+      <Transcript
+        items={[divider('claude-build'), message('build', false, 'claude-build'), divider('claude-review'), message('review', false, 'claude-review')]}
+        profiles={[
+          { agent: 'claude', profileId: 'claude-build', label: 'Claude Build' },
+          { agent: 'claude', profileId: 'claude-review', label: 'Claude Review' },
+        ]}
+      />,
+      { runtime: idleRuntime() },
+    );
+
+    expect(screen.getAllByText('Claude Build')).toHaveLength(2);
+    expect(screen.getAllByText('Claude Review')).toHaveLength(2);
   });
 
   test('settled reasoning is collapsed behind its duration label', () => {
