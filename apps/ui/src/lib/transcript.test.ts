@@ -10,7 +10,12 @@ import { foldTranscript, TranscriptFolder, type TranscriptItem } from './transcr
 
 let seq = 0;
 
-function ev(agent: AgentId | null, turnId: string | null, body: HarnessEventBody): HarnessEvent {
+function ev(
+  agent: AgentId | null,
+  turnId: string | null,
+  body: HarnessEventBody,
+  profileId?: string,
+): HarnessEvent {
   seq += 1;
   return {
     id: `e${seq}`,
@@ -19,6 +24,7 @@ function ev(agent: AgentId | null, turnId: string | null, body: HarnessEventBody
     agent,
     turnId,
     ts: 1_700_000_000_000 + seq,
+    ...(profileId === undefined ? {} : { profileId }),
     ...body,
   } as HarnessEvent;
 }
@@ -28,6 +34,25 @@ function kinds(items: TranscriptItem[]): string[] {
 }
 
 describe('foldTranscript — streaming text', () => {
+  test('keeps same-provider profiles separate and falls back for legacy events', () => {
+    const { items } = foldTranscript([
+      ev('claude', 'build-turn', { kind: 'turn.started', nativeSessionId: null }, 'claude-build'),
+      ev('claude', 'build-turn', { kind: 'message.completed', itemId: 'same-item', text: 'build output' }, 'claude-build'),
+      ev('claude', 'review-turn', { kind: 'turn.started', nativeSessionId: null }, 'claude-review'),
+      ev('claude', 'review-turn', { kind: 'message.completed', itemId: 'same-item', text: 'review output' }, 'claude-review'),
+      ev('claude', 'legacy-turn', { kind: 'message.completed', itemId: 'same-item', text: 'legacy output' }),
+    ]);
+
+    expect(items.filter((item) => item.kind === 'divider').map((item) => item.agent)).toEqual([
+      'claude-build', 'claude-review',
+    ]);
+    expect(items.filter((item) => item.kind === 'message').map((item) => [item.agent, item.text])).toEqual([
+      ['claude-build', 'build output'],
+      ['claude-review', 'review output'],
+      ['claude', 'legacy output'],
+    ]);
+  });
+
   test('deltas produce a single streaming message', () => {
     const { items } = foldTranscript([
       ev('claude', 't', { kind: 'turn.started', nativeSessionId: null }),

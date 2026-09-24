@@ -191,7 +191,7 @@ process.stdin.on('end', () => process.exit(0));`,
     const config = codexTestConfig(dir, server);
     const adapter = new CodexAdapter({
       threadId: 'thread-1',
-      workerProfileId: 'codex',
+      workerProfileId: 'codex', workerProfileIds: ['codex'],
       agentId: 'codex',
       cwd: dir,
       config,
@@ -346,7 +346,7 @@ function codexHarness(dir: string, server: string, overrides: Partial<HarnessCon
   const deadlines = manualDeadlines();
   const adapter = new CodexAdapter({
     threadId: 'thread-1',
-    workerProfileId: 'codex',
+    workerProfileId: 'codex', workerProfileIds: ['codex'],
     agentId: 'codex',
     cwd: dir,
     config: codexTestConfig(dir, server, overrides),
@@ -579,7 +579,7 @@ describe('CodexAdapter abandoned turns', () => {
     // arrive later.
     const adapter = new CodexAdapter({
       threadId: 'thread-1',
-      workerProfileId: 'codex',
+      workerProfileId: 'codex', workerProfileIds: ['codex'],
       agentId: 'codex',
       cwd: dir,
       config: codexTestConfig(dir, server, { codexTurnTimeoutMs: 50 }),
@@ -878,7 +878,7 @@ describe('CodexAdapter failed handshake', () => {
     const named: Array<string | null> = [];
     const adapter = new CodexAdapter({
       threadId: 'thread-1',
-      workerProfileId: 'codex',
+      workerProfileId: 'codex', workerProfileIds: ['codex'],
       agentId: 'codex',
       cwd: dir,
       config: codexTestConfig(dir, server),

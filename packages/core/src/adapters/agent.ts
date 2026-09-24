@@ -87,6 +87,8 @@ export interface AdapterContext {
   threadId: string;
   /** Stable configured profile identity; every adapter instance belongs to one profile. */
   workerProfileId: WorkerProfileId;
+  /** Every selectable profile registered by the orchestrator, for workspace policy resolution. */
+  workerProfileIds: readonly WorkerProfileId[];
   /** Closed provider identity used for persisted event attribution. */
   agentId: AgentId;
   cwd: string;

@@ -6,6 +6,7 @@ import { join, resolve as resolvePath } from 'node:path';
 import { promisify } from 'node:util';
 import type {
   AdapterEvent,
+  AgentAvailability,
   AnswerRecordedBody,
   AgentId,
   ApprovalRequestedBody,
@@ -75,6 +76,7 @@ import {
   DEFAULT_WORKER_REGISTRIES,
   createWorkerAdapter,
   probeWorkerHealth,
+  probeWorkerProfiles,
   registeredWorkerProfiles,
   resolveWorkerCapabilityFacts,
   workerProfile,
@@ -2748,6 +2750,7 @@ class Thread {
     const ctx: AdapterContext = {
       threadId: this.id,
       workerProfileId: agent,
+      workerProfileIds: this.#registries.profiles.map((profile) => profile.id),
       agentId: workerProfile(agent, this.#config, this.#registries).agent,
       cwd,
       config: this.#config,
@@ -3067,6 +3070,15 @@ export class Orchestrator extends EventEmitter {
     const profileIds = options.profileIds ?? registeredWorkerProfiles(this.#config, this.#registries).map((profile) => profile.id);
     if (options.probe === true) await this.#recordWorkerProbe(profileIds);
     return this.#projectWorkerDiagnostics(profileIds);
+  }
+
+  /** Probe the selectable profiles from this orchestrator's configured registry. */
+  async probeAgents(): Promise<AgentAvailability[]> {
+    return probeWorkerProfiles(
+      this.#config,
+      this.#registries.profiles.map((profile) => profile.id),
+      this.#registries,
+    );
   }
 
   async #recordWorkerProbe(profileIds: readonly WorkerProfileId[]): Promise<void> {

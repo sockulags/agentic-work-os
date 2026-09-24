@@ -4,10 +4,12 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { WebSocket, type RawData } from 'ws';
-import type { WorkerDiagnostic } from '@awos/protocol';
+import type { AgentAvailability, AgentCapabilities, ModelTarget, WorkerDiagnostic } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
 import { Orchestrator } from './orchestrator.js';
 import { HarnessServer, validateWorkingDirectory } from './server.js';
+import type { AdapterFactory, WorkerProfileDefinition, WorkerRegistries } from './adapters/registry.js';
+import type { WorkerAdapter } from './adapters/agent.js';
 
 const dataDirs: string[] = [];
 const sockets: WebSocket[] = [];
@@ -71,6 +73,36 @@ function config(dataDir: string): HarnessConfig {
     ghBin: 'unused',
     ghBinArgs: [],
     ghTimeoutMs: 100,
+  };
+}
+
+function customClaudeRegistry(): WorkerRegistries {
+  const target: ModelTarget = {
+    id: 'shared-claude-target', provider: 'claude', model: 'shared-model', endpoint: null, authProfile: null,
+  };
+  const capabilities: AgentCapabilities = {
+    streamingToolOutput: false, streamingText: false, reasoning: false, plans: false,
+    turnDiff: false, approvals: false, resumableSessions: false,
+  };
+  const factory: AdapterFactory = {
+    id: 'shared-claude-adapter',
+    capabilities,
+    supports: (candidate) => candidate.provider === 'claude',
+    create: () => ({ id: 'shared-claude-adapter' } as WorkerAdapter),
+  };
+  const profile = (id: string, label: string): WorkerProfileDefinition => ({
+    id,
+    agent: 'claude',
+    label,
+    adapterId: factory.id,
+    targetId: target.id,
+    policy: { permissionModes: ['default'], nativeTurnDiff: false },
+    probe: async () => ({ available: true, detail: `${label} ready` }),
+  });
+  return {
+    profiles: [profile('claude-build', 'Claude Build'), profile('claude-review', 'Claude Review')],
+    targets: [{ target, resolve: () => target }],
+    factories: [factory],
   };
 }
 
@@ -216,4 +248,43 @@ test('worker diagnostics report configuration always and liveness only after an 
   const after = await read();
   assert.equal(after.find((diagnostic) => diagnostic.profileId === 'claude')?.reasonCode, 'unavailable');
   assert.equal(after.find((diagnostic) => diagnostic.profileId === 'codex')?.reasonCode, 'not-checked');
+});
+
+test('agents.probe uses configured custom profiles and keeps same-provider profiles selectable', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'awos-ws-custom-profiles-'));
+  dataDirs.push(dataDir);
+  const cfg = config(dataDir);
+  const orchestrator = new Orchestrator(cfg, customClaudeRegistry());
+  orchestrators.push(orchestrator);
+  const server = new HarnessServer(cfg, orchestrator);
+  servers.push(server);
+  const port = await server.listen();
+
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  sockets.push(socket);
+  socket.on('error', () => {});
+  await opened(socket);
+  assert.equal((await response(socket, 'hello', { token: server.token }))['type'], 'ok');
+
+  const probe = await response(socket, 'agents.probe');
+  const agents = probe['agents'] as AgentAvailability[];
+  assert.deepEqual(agents.map((agent) => agent.profileId), ['claude-build', 'claude-review']);
+  assert.deepEqual(agents.map((agent) => agent.agent), ['claude', 'claude']);
+  assert.deepEqual(agents.map((agent) => agent.label), ['Claude Build', 'Claude Review']);
+
+  const created = await response(socket, 'thread.create', {
+    cwd: dataDir,
+    title: 'custom profile selection',
+    agent: 'claude-build',
+  });
+  assert.equal(created['type'], 'thread.created');
+  const thread = created['thread'] as { id: string; activeAgent: string };
+  assert.equal(thread.activeAgent, 'claude-build');
+
+  assert.equal((await response(socket, 'thread.setAgent', {
+    threadId: thread.id,
+    agent: 'claude-review',
+  }))['type'], 'ok');
+  const openedThread = await response(socket, 'thread.open', { threadId: thread.id });
+  assert.equal((openedThread['thread'] as { activeAgent: string }).activeAgent, 'claude-review');
 });

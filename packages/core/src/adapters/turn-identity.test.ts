@@ -104,7 +104,7 @@ describe('turn identity', () => {
     let adapter: CodexAdapter;
     adapter = new CodexAdapter({
       threadId: 'thread-1',
-      workerProfileId: 'codex',
+      workerProfileId: 'codex', workerProfileIds: ['codex'],
       agentId: 'codex',
       cwd: dir,
       config: testConfig(dir, {
@@ -159,7 +159,7 @@ describe('turn identity', () => {
 
     adapter = new ClaudeAdapter({
       threadId: 'thread-1',
-      workerProfileId: 'claude',
+      workerProfileId: 'claude', workerProfileIds: ['claude'],
       agentId: 'claude',
       cwd: dir,
       config: testConfig(dir, { claudeBinArgs: [FAKE_CLAUDE, '--tool', '--think'] }),
@@ -226,7 +226,7 @@ describe('turn identity', () => {
     adapter = new QwenCodeAdapter(
       {
         threadId: 'thread-1',
-        workerProfileId: 'qwen-local',
+        workerProfileId: 'qwen-local', workerProfileIds: ['qwen-local'],
         agentId: 'qwen-local',
         cwd: dir,
         config: testConfig(dir),

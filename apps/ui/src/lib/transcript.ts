@@ -4,7 +4,9 @@ import type {
   HarnessEvent,
   RequirementResult,
   ToolKind,
+  WorkerProfileId,
 } from '@awos/protocol';
+import { eventWorkerProfileId } from '@awos/protocol';
 
 /**
  * Folds the raw event log into renderable transcript items.
@@ -32,7 +34,7 @@ export type TranscriptItem =
       kind: 'message';
       id: string;
       seq: number;
-      agent: AgentId;
+      agent: WorkerProfileId;
       text: string;
       streaming: boolean;
       ts: number;
@@ -41,7 +43,7 @@ export type TranscriptItem =
       kind: 'reasoning';
       id: string;
       seq: number;
-      agent: AgentId;
+      agent: WorkerProfileId;
       text: string;
       streaming: boolean;
       ts: number;
@@ -50,7 +52,7 @@ export type TranscriptItem =
       kind: 'tool';
       id: string;
       seq: number;
-      agent: AgentId;
+      agent: WorkerProfileId;
       name: string;
       toolKind: ToolKind;
       title: string;
@@ -64,7 +66,7 @@ export type TranscriptItem =
       kind: 'divider';
       id: string;
       seq: number;
-      agent: AgentId;
+      agent: WorkerProfileId;
       ts: number;
     }
   | {
@@ -90,16 +92,16 @@ interface FoldState {
   legacyCandidates: Map<string, Set<string>>;
   totals: { inputTokens: number; outputTokens: number; costUsd: number };
   /** Which agent each turn belongs to, so a divider only appears when it changes. */
-  lastDividerAgent: AgentId | null;
+  lastDividerProfileId: WorkerProfileId | null;
 }
 
 /** One line saying where an agent's files are, and whether the user has them yet. */
 function laneNotice(
-  agent: AgentId | null,
+  profileId: WorkerProfileId | null,
   status: 'provisioned' | 'integrated' | 'refused' | 'removed',
   detail: string | null,
 ): string {
-  const who = agent ?? 'the agent';
+  const who = profileId ?? 'the agent';
   const suffix = detail ? ` — ${detail}` : '';
   switch (status) {
     case 'provisioned':
@@ -153,7 +155,7 @@ function createFoldState(): FoldState {
     index: new Map(),
     legacyCandidates: new Map(),
     totals: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
-    lastDividerAgent: null,
+    lastDividerProfileId: null,
   };
 }
 
@@ -162,20 +164,26 @@ function nativeMessageBase(itemId: string): string | null {
   return match?.[1] ?? null;
 }
 
-function legacyIdentity(agent: AgentId, turnId: string | null, nativeBase: string): string {
-  return JSON.stringify([agent, turnId, nativeBase]);
+function legacyIdentity(
+  provider: AgentId,
+  profileId: WorkerProfileId,
+  turnId: string | null,
+  nativeBase: string,
+): string {
+  return JSON.stringify([provider, profileId, turnId, nativeBase]);
 }
 
 function addLegacyCandidate(
   state: FoldState,
   key: string,
-  agent: AgentId,
+  provider: AgentId,
+  profileId: WorkerProfileId,
   turnId: string | null,
   itemId: string,
 ): void {
   const base = nativeMessageBase(itemId);
-  if (agent !== 'claude' || base === null) return;
-  const identity = legacyIdentity(agent, turnId, base);
+  if (provider !== 'claude' || base === null) return;
+  const identity = legacyIdentity(provider, profileId, turnId, base);
   const candidates = state.legacyCandidates.get(identity) ?? new Set<string>();
   candidates.add(key);
   state.legacyCandidates.set(identity, candidates);
@@ -184,13 +192,14 @@ function addLegacyCandidate(
 function removeLegacyCandidate(
   state: FoldState,
   key: string,
-  agent: AgentId,
+  provider: AgentId,
+  profileId: WorkerProfileId,
   turnId: string | null,
   itemId: string,
 ): void {
   const base = nativeMessageBase(itemId);
-  if (agent !== 'claude' || base === null) return;
-  const identity = legacyIdentity(agent, turnId, base);
+  if (provider !== 'claude' || base === null) return;
+  const identity = legacyIdentity(provider, profileId, turnId, base);
   const candidates = state.legacyCandidates.get(identity);
   if (!candidates) return;
   candidates.delete(key);
@@ -200,18 +209,19 @@ function removeLegacyCandidate(
 function findLegacyMessageKey(
   state: FoldState,
   itemId: string,
-  agent: AgentId,
+  provider: AgentId,
+  profileId: WorkerProfileId,
   turnId: string | null,
   text: string,
 ): string | null {
-  if (agent !== 'claude') return null;
+  if (provider !== 'claude') return null;
   const base = nativeMessageBase(itemId);
   if (base === null) return null;
-  const directKey = `msg:${itemId}`;
+  const directKey = `msg:${profileId}:${itemId}`;
   // A current producer already uses the direct semantic id. Never reinterpret it as
   // a historical raw-index sequence.
   if (state.index.has(directKey)) return null;
-  const candidates = state.legacyCandidates.get(legacyIdentity(agent, turnId, base));
+  const candidates = state.legacyCandidates.get(legacyIdentity(provider, profileId, turnId, base));
   if (!candidates) return null;
 
   for (const key of candidates) {
@@ -261,34 +271,35 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
         ts: event.ts,
       });
       // A user message always reopens the floor; the next agent block gets a divider.
-      state.lastDividerAgent = null;
+      state.lastDividerProfileId = null;
       break;
 
     case 'turn.started': {
-      if (event.agent === null || event.agent === state.lastDividerAgent) break;
-      state.lastDividerAgent = event.agent;
+      const profileId = eventWorkerProfileId(event);
+      if (event.agent === null || profileId === null || profileId === state.lastDividerProfileId) break;
+      state.lastDividerProfileId = profileId;
       items.push({
         kind: 'divider',
         id: event.id,
         seq: event.seq,
-        agent: event.agent,
+        agent: profileId,
         ts: event.ts,
       });
       break;
     }
 
     case 'message.delta': {
-      const agent = event.agent;
-      if (agent === null) break;
-      const key = `msg:${event.itemId}`;
-      addLegacyCandidate(state, key, agent, event.turnId, event.itemId);
+      const profileId = eventWorkerProfileId(event);
+      if (event.agent === null || profileId === null) break;
+      const key = `msg:${profileId}:${event.itemId}`;
+      addLegacyCandidate(state, key, event.agent, profileId, event.turnId, event.itemId);
       upsert(
         key,
         () => ({
           kind: 'message',
           id: event.itemId,
           seq: event.seq,
-          agent,
+          agent: profileId,
           text: event.text,
           streaming: true,
           ts: event.ts,
@@ -302,13 +313,14 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
     }
 
     case 'message.completed': {
-      const agent = event.agent;
-      if (agent === null) break;
-      const directKey = `msg:${event.itemId}`;
+      const profileId = eventWorkerProfileId(event);
+      if (event.agent === null || profileId === null) break;
+      const directKey = `msg:${profileId}:${event.itemId}`;
       const candidateKey = findLegacyMessageKey(
         state,
         event.itemId,
-        agent,
+        event.agent,
+        profileId,
         event.turnId,
         event.text,
       );
@@ -326,7 +338,7 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
           kind: 'message',
           id: event.itemId,
           seq: event.seq,
-          agent,
+          agent: profileId,
           text: event.text,
           streaming: false,
           ts: event.ts,
@@ -336,20 +348,20 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
             ? { ...item, id: event.itemId, text: event.text, streaming: false }
             : null,
       );
-      removeLegacyCandidate(state, key, agent, event.turnId, event.itemId);
+      removeLegacyCandidate(state, key, event.agent, profileId, event.turnId, event.itemId);
       break;
     }
 
     case 'reasoning.delta': {
-      const agent = event.agent;
-      if (agent === null) break;
+      const profileId = eventWorkerProfileId(event);
+      if (event.agent === null || profileId === null) break;
       upsert(
-        `think:${event.itemId}`,
+        `think:${profileId}:${event.itemId}`,
         () => ({
           kind: 'reasoning',
           id: event.itemId,
           seq: event.seq,
-          agent,
+          agent: profileId,
           text: event.text,
           streaming: true,
           ts: event.ts,
@@ -363,15 +375,15 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
     }
 
     case 'reasoning.completed': {
-      const agent = event.agent;
-      if (agent === null) break;
+      const profileId = eventWorkerProfileId(event);
+      if (event.agent === null || profileId === null) break;
       upsert(
-        `think:${event.itemId}`,
+        `think:${profileId}:${event.itemId}`,
         () => ({
           kind: 'reasoning',
           id: event.itemId,
           seq: event.seq,
-          agent,
+          agent: profileId,
           text: event.text,
           streaming: false,
           ts: event.ts,
@@ -383,15 +395,15 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
     }
 
     case 'tool.started': {
-      const agent = event.agent;
-      if (agent === null) break;
+      const profileId = eventWorkerProfileId(event);
+      if (event.agent === null || profileId === null) break;
       upsert(
-        `tool:${event.itemId}`,
+        `tool:${profileId}:${event.itemId}`,
         () => ({
           kind: 'tool',
           id: event.itemId,
           seq: event.seq,
-          agent,
+          agent: profileId,
           name: event.name,
           toolKind: event.toolKind,
           title: event.title,
@@ -408,7 +420,9 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
     }
 
     case 'tool.output': {
-      const at = index.get(`tool:${event.itemId}`);
+      const profileId = eventWorkerProfileId(event);
+      if (profileId === null) break;
+      const at = index.get(`tool:${profileId}:${event.itemId}`);
       if (at === undefined) break;
       const item = items[at];
       if (item?.kind === 'tool') items[at] = { ...item, output: item.output + event.chunk };
@@ -416,15 +430,15 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
     }
 
     case 'tool.completed': {
-      const agent = event.agent;
-      if (agent === null) break;
+      const profileId = eventWorkerProfileId(event);
+      if (event.agent === null || profileId === null) break;
       upsert(
-        `tool:${event.itemId}`,
+        `tool:${profileId}:${event.itemId}`,
         () => ({
           kind: 'tool',
           id: event.itemId,
           seq: event.seq,
-          agent,
+          agent: profileId,
           name: 'tool',
           toolKind: 'other',
           title: 'tool',
@@ -492,7 +506,7 @@ function applyEvent(state: FoldState, event: HarnessEvent): void {
         id: event.id,
         seq: event.seq,
         level: event.status === 'refused' ? 'error' : 'info',
-        text: laneNotice(event.agent, event.status, event.detail),
+        text: laneNotice(eventWorkerProfileId(event), event.status, event.detail),
         ts: event.ts,
       });
       break;

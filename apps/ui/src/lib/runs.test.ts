@@ -10,7 +10,7 @@ let seq = 0;
  * Loosely typed on purpose: these fixtures name one body at a time, and a union of every
  * body would make each call site declare fields the fold does not read.
  */
-function event(body: Record<string, unknown> & { kind: string }): HarnessEvent {
+function event(body: Record<string, unknown> & { kind: string }, profileId?: string): HarnessEvent {
   seq += 1;
   return {
     id: `e${seq}`,
@@ -19,6 +19,7 @@ function event(body: Record<string, unknown> & { kind: string }): HarnessEvent {
     agent: 'claude',
     turnId: null,
     ts: 1_000 + seq,
+    ...(profileId === undefined ? {} : { profileId }),
     ...body,
   } as unknown as HarnessEvent;
 }
@@ -37,6 +38,20 @@ function started(runId: string, overrides: Record<string, unknown> = {}): Harnes
 }
 
 describe('foldRuns', () => {
+  test('owns same-provider runs by profile and falls back to the legacy provider', () => {
+    const runs = foldRuns([
+      event({ ...started('r-build'), agent: 'claude' }, 'claude-build'),
+      event({ ...started('r-review'), agent: 'claude' }, 'claude-review'),
+      started('r-legacy'),
+    ]);
+
+    expect(runs.map((run) => [run.runId, run.agent])).toEqual([
+      ['r-legacy', 'claude'],
+      ['r-review', 'claude-review'],
+      ['r-build', 'claude-build'],
+    ]);
+  });
+
   test('a log with no runs has none', () => {
     expect(foldRuns([event({ kind: 'user.message', text: 'hi', hadReplay: false })])).toEqual([]);
   });
