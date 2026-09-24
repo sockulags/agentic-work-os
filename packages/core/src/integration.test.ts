@@ -412,6 +412,13 @@ describe('Codex adapter end to end', () => {
 });
 
 describe('cross-agent handoff', () => {
+  function receivedBy(orch: Orchestrator, threadId: string, agent: 'claude' | 'codex'): string[] {
+    return orch.store
+      .events(threadId)
+      .filter((e) => e.kind === 'message.completed' && e.agent === agent)
+      .map((e) => (e.kind === 'message.completed' ? e.text : ''));
+  }
+
   test('replays the other agent\'s work into the incoming agent', async () => {
     const { orch } = await boot(makeConfig({ claudeBinArgs: [FAKE_CLAUDE, '--tool'] }));
     const thread = orch.createThread({ cwd: workDir });
@@ -451,6 +458,41 @@ describe('cross-agent handoff', () => {
       (afterRepeat?.watermarks.codex ?? 0) > codexWatermark,
       'watermark keeps advancing',
     );
+  });
+
+  test('replays another lane\'s completed turn after it overlaps this turn', async () => {
+    const { orch } = await boot(makeConfig({ claudeBinArgs: [FAKE_CLAUDE, '--slow', '--think'] }));
+    const thread = orch.createThread({ cwd: makeRepo() });
+    await orch.setParallel(thread.id, true);
+
+    const first = orch.send(thread.id, 'claude', 'long running A turn');
+    const startedDeadline = Date.now() + 5_000;
+    while (
+      !orch.store.events(thread.id).some((event) => event.agent === 'claude' && event.kind === 'turn.started') &&
+      Date.now() < startedDeadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(
+      orch.store.events(thread.id).some((event) => event.agent === 'claude' && event.kind === 'turn.started'),
+      'A turn is in flight before B starts',
+    );
+    await orch.send(thread.id, 'codex', 'full B turn while A is running');
+    await first;
+
+    await orch.send(thread.id, 'claude', 'A follow-up');
+
+    const claudeMessages = receivedBy(orch, thread.id, 'claude');
+    assert.match(claudeMessages.at(-1) ?? '', /full B turn while A is running/);
+  });
+
+  test('does not advance the watermark when sendTurn fails before delivery', async () => {
+    const { orch } = await boot(makeConfig({ codexBin: join(workDir, 'missing-codex') }));
+    const thread = orch.createThread({ cwd: workDir });
+
+    await assert.rejects(() => orch.send(thread.id, 'codex', 'not delivered'));
+
+    assert.equal(orch.store.get(thread.id)?.watermarks.codex, 0);
   });
 
   test('the first turn for an agent carries no replay block', async () => {

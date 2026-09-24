@@ -686,7 +686,7 @@ class Thread {
     let item: WorkItem | null = null;
     let runId: string | null = null;
     let runFrom = this.#store.head(this.id);
-    let recorded = false;
+    let watermarkCutoff: number | null = null;
     // Agents that don't report their own turn diff (Claude) get one synthesized from a
     // git snapshot taken around the turn. Ground truth from the working tree, never a
     // guess parsed from tool output. Codex reports its own, so we don't shadow it.
@@ -701,6 +701,7 @@ class Thread {
       // foreign event (its agent is null), so recording first would fold the prompt into
       // its own preamble and the agent would receive it twice.
       const watermark = summary.watermarks[agent] ?? 0;
+      const replayCutoff = this.#store.head(this.id);
       const unseen = this.#store.eventsSince(this.id, watermark);
       const replay = buildReplay(unseen, agent, {
         maxChars: this.#config.replayMaxChars,
@@ -715,7 +716,7 @@ class Thread {
         hadReplay: replay.preamble !== null,
       });
       const userMessageSeq = this.#store.head(this.id);
-      recorded = true;
+      watermarkCutoff = replayCutoff;
 
       if (replay.preamble) {
         log.info('replaying context', {
@@ -783,13 +784,25 @@ class Thread {
       diffBaseline = adapter.capabilities.turnDiff ? null : await snapshotWorkingTree(cwd);
       let retriedStaleResume = false;
       for (;;) {
+        const attemptHead = this.#store.head(this.id);
         try {
           const turnOptions: WorkerTurnOptions | undefined = options.recoveryContext === undefined
             ? undefined
             : { recoveryContext: options.recoveryContext };
           await adapter.sendTurn(payload, turnOptions);
+          if (watermarkCutoff !== null) this.#store.setWatermark(this.id, agent, watermarkCutoff);
           break;
         } catch (err) {
+          // An adapter can reject before it accepts the payload (for example, while
+          // starting or resuming its native session). Only an attempt that emitted its
+          // turn start reached the worker, so preserve the cutoff for failures after that
+          // boundary as well as for successful turns.
+          const accepted = this.#store.eventsSince(this.id, attemptHead).some(
+            (event) => event.agent === agent && event.kind === 'turn.started',
+          );
+          if (accepted && watermarkCutoff !== null) {
+            this.#store.setWatermark(this.id, agent, watermarkCutoff);
+          }
           if (!retriedStaleResume && (isQwenResumeNotFoundError(err) || isNativeResumeNotFoundError(err))) {
             retriedStaleResume = true;
             await this.#resetStaleNativeSession(agent);
@@ -833,11 +846,6 @@ class Thread {
       // watcher with its own debounce and restart story.
       if (item) this.#ingestRetained(agent, cwd, item.id, runId);
       if (runId) this.#closeRun(agent, runId, runFrom, failure);
-      // Advance the watermark whether or not the turn succeeded: the agent received the
-      // context either way, and re-sending it would duplicate history in its session. A
-      // turn that failed before its message was recorded received nothing, so it leaves
-      // the mark where it was rather than skipping history nobody replayed.
-      if (recorded) this.#store.setWatermark(this.id, agent, this.#store.head(this.id));
       this.#onState();
     }
   }
