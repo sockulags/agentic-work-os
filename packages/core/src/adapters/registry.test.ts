@@ -248,6 +248,37 @@ describe('boundedWorkerDetail', () => {
     assert.equal(boundedWorkerDetail('CLIENT_SECRET=ABC'), 'CLIENT_SECRET=***');
   });
 
+  test('hides the whole credential, not the scheme word in front of it', () => {
+    // A credential is written `<scheme> <credentials>`, so a rule that names only `Bearer`
+    // spends the marker on the scheme and prints the secret next to it.
+    assert.equal(boundedWorkerDetail('Authorization: Basic dXNlcjpwYXNz'), 'Authorization: ***');
+    assert.equal(boundedWorkerDetail('authorization: Negotiate YIIZ'), 'authorization: ***');
+    assert.equal(boundedWorkerDetail('Authorization: Token abc123'), 'Authorization: ***');
+    assert.equal(boundedWorkerDetail('Authorization: NTLM TlRMTVNTUAAB'), 'Authorization: ***');
+    assert.equal(boundedWorkerDetail('Authorization: ApiKey k1'), 'Authorization: ***');
+    assert.equal(boundedWorkerDetail('x-api-key: Basic zzz'), 'x-api-key: ***');
+
+    // `Digest` puts the secret in `response=`, not in the first parameter, so the comma-separated
+    // list counts as one value once a scheme has introduced it.
+    assert.equal(
+      boundedWorkerDetail('Authorization: Digest username="u", response="abc"'),
+      'Authorization: ***',
+    );
+    assert.equal(
+      boundedWorkerDetail('Authorization: Digest realm="r", nonce="n", cnonce="c", response="r2"'),
+      'Authorization: ***',
+    );
+
+    // A quoted value is one value including its spaces, and the closing quote goes with it.
+    assert.equal(boundedWorkerDetail('api_key="secret with spaces"'), 'api_key=***');
+    assert.equal(boundedWorkerDetail("api_key='secret with spaces'"), 'api_key=***');
+    // An unbalanced quote still has to be consumed rather than skipped as unmatchable.
+    assert.equal(boundedWorkerDetail('api_key="abc'), 'api_key=***');
+
+    // Only a scheme makes a comma continue the value; elsewhere the next field is not a secret.
+    assert.equal(boundedWorkerDetail('secret=abc, host=foo'), 'secret=*** host=foo');
+  });
+
   test('leaves text that only reads like a credential name alone', () => {
     // Redaction that eats diagnostic detail costs the same reader the answer twice: once
     // because the worker failed, once because the reason came back mangled.

@@ -132,14 +132,52 @@ const WORKER_DETAIL_MAX_CHARS = 200;
 const CREDENTIAL_FIELD_NAME = String.raw`(?:[a-z0-9]+[-_])*(?:authorization|secret|password|passwd|token|credentials?|(?:api|access)[-_]?key|client[-_]?id|(?<=[-_])key)`;
 
 /**
+ * HTTP authentication schemes, as a label in front of the secret rather than the secret itself.
+ *
+ * A credential is written `<scheme> <credentials>`, so the first word of the value is a label
+ * and what follows it is the part worth hiding. Naming only `Bearer` hid the scheme word of
+ * every other scheme and left its credential standing next to the marker. Adding a scheme is
+ * one word here.
+ */
+const AUTH_SCHEME = String.raw`(?:apikey|basic|bearer|digest|negotiate|ntlm|token)`;
+
+/**
+ * One value, as far as a line of free text delimits it.
+ *
+ * A quoted value runs to its closing quote, spaces included, and the quotes go with it so
+ * `api_key="a b"` leaves no dangling `"` beside the marker. Anything else runs to the next
+ * space one character at a time, which is what keeps an unbalanced `api_key="abc` matching:
+ * a quote-only rule would fail the match there and print the value it opened.
+ */
+const CREDENTIAL_VALUE = String.raw`(?:"[^"]*"|'[^']*'|\S)+`;
+
+/**
+ * One value, or a `Digest`-style comma-separated parameter list read as a single value.
+ *
+ * `Digest` and `NTLM` keep the secret in a later parameter (`response=`, `cnonce=`) rather than
+ * the first, so stopping at the first space redacts the username and prints the response. Only
+ * a comma continues the value, and only where a scheme said the whole list is one credential:
+ * `secret=a, host=b` still has to report which host.
+ */
+const CREDENTIAL_VALUE_LIST = String.raw`${CREDENTIAL_VALUE}(?:(?<=,)\s*${CREDENTIAL_VALUE})*`;
+
+/**
  * One `name<separator>value` pair inside a line of free text.
  *
- * Both guards are about not mangling harmless text: the value is whatever runs to the next
- * space, and the trailing guard keeps `tokens: 42` and `/usr/lib/tokenizer` intact by refusing
- * a name that continues into another word.
+ * Both guards are about not mangling harmless text: the value ends where the line stops
+ * spelling one, and the trailing guard keeps `tokens: 42` and `/usr/lib/tokenizer` intact by
+ * refusing a name that continues into another word.
+ *
+ * An unrecognized scheme is deliberately still read as the secret, so `Authorization: Kerberos
+ * abc` hides `Kerberos` and keeps `abc` — the pre-existing behavior for every scheme, now
+ * narrowed to the ones `AUTH_SCHEME` does not name. Treating any first word as a scheme is not
+ * available: this pattern matches case-insensitively so a field name may be spelled
+ * `AUTHORIZATION` or `x-api-key`, and under that flag `[A-Z]` matches lowercase too, so the
+ * rule could not tell `Kerberos abc` from `secret: not configured` and would cost the reader
+ * the reason on every prose value.
  */
 const CREDENTIAL_ASSIGNMENT = new RegExp(
-  String.raw`(?<![a-z0-9])(${CREDENTIAL_FIELD_NAME})(?![a-z0-9])([\s:=]+)(?:bearer\s+)?\S+`,
+  String.raw`(?<![a-z0-9])(${CREDENTIAL_FIELD_NAME})(?![a-z0-9])([\s:=]+)(?:${AUTH_SCHEME}\s+${CREDENTIAL_VALUE_LIST}|${CREDENTIAL_VALUE})`,
   'gi',
 );
 
