@@ -1,5 +1,5 @@
-import type { AgentAvailability } from './rpc.js';
 import type { WorkerProfileId } from './events.js';
+import type { WorkerDiagnostic } from './worker-health.js';
 import type { CatalogFreshness, CatalogIssue, IssueCatalogSource } from './catalog.js';
 import type { WorkspaceRoleSelection } from './role-selection.js';
 import type {
@@ -29,8 +29,15 @@ export type IssueRouteReasonCode =
 
 export interface IssueRouteAvailabilityFact {
   profileId: WorkerProfileId;
-  /** Zero entries means the current probe did not report this allowed profile. */
-  entries: readonly AgentAvailability[];
+  /**
+   * The core-owned capability and health projection for this allowed profile.
+   *
+   * Null only when the caller projected routing alone and asked for no worker projection;
+   * it never means "healthy" or "missing". A surface that shows workers is given one
+   * diagnostic per allowed profile, so absence is never the thing it reads.
+   */
+  diagnostic: WorkerDiagnostic | null;
+  /** Mirrors `diagnostic.dispatchable`. False whenever there is no diagnostic. */
   available: boolean;
 }
 
@@ -65,6 +72,11 @@ export interface IssueRouteProjectionInput {
   issue: CatalogIssue;
   source: IssueCatalogSource;
   roleSelection: WorkspaceRoleSelection;
-  /** Entries from one current worker-availability probe. */
-  availability: readonly AgentAvailability[];
+  /**
+   * Worker diagnostics for the profiles this projection may allow.
+   *
+   * Empty projects routing only: every allowed worker is then reported without a
+   * diagnostic and therefore as not dispatchable, which is what an unchecked worker is.
+   */
+  workerDiagnostics: readonly WorkerDiagnostic[];
 }

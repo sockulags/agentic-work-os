@@ -16,6 +16,7 @@ import type { WorkItem, WorkSourceError } from './work.js';
 import type { IssueOpenResult } from './issue-open.js';
 import type { ProjectOverview } from './project-overview.js';
 import type { ProjectIssueDetail } from './project-issue.js';
+import type { WorkerDiagnostic } from './worker-health.js';
 import type {
   EvidenceKind,
   EvidenceRef,
@@ -121,6 +122,8 @@ export interface AgentAvailability {
    */
   capabilities: AgentCapabilities;
   model: string;
+  /** When this probe ran. An observation without a time cannot be called stale. */
+  checkedAt: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -272,7 +275,15 @@ export type ClientRequest =
       selected?: boolean;
       retired?: boolean;
     }
-  | { type: 'agents.probe' };
+  | { type: 'agents.probe' }
+  /**
+   * Read the worker capability and health projection.
+   *
+   * Reading never probes. `probe` is the explicit refresh, and it is targeted: only the
+   * named profiles are contacted. Without it the answer reports the last observation and
+   * how old it is, which is what makes `not-checked` and `stale` visible at all.
+   */
+  | { type: 'workers.diagnostics'; profileIds?: readonly WorkerProfileId[]; probe?: boolean };
 
 export type RecoveryActionRequest =
   | {
@@ -413,7 +424,8 @@ export type ServerResponseBody =
   | { type: 'transition.conflict'; threadId: string; conflict: TransitionEvaluationConflict }
   | { type: 'recovery'; threadId: string; cycle: RecoveryCycle | null }
   | { type: 'recovery.conflict'; threadId: string; conflict: RecoveryConflict }
-  | { type: 'agents.probe'; agents: AgentAvailability[] };
+  | { type: 'agents.probe'; agents: AgentAvailability[] }
+  | { type: 'workers.diagnostics'; diagnostics: WorkerDiagnostic[] };
 
 export type ServerResponse = ServerResponseBody & { requestId: string };
 

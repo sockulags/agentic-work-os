@@ -13,6 +13,7 @@ import { useHarnessContext } from '@/state/HarnessContext';
 import { WorkspaceRoleSelector } from '@/components/WorkspaceRoleSelector';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+import { workerStatusLabel } from '@/lib/capabilities';
 import { cn, formatRelative } from '@/lib/utils';
 import { ProjectIssueDetail } from '@/components/ProjectIssueDetail';
 
@@ -507,8 +508,16 @@ function IssueRow({
 
 function WorkerSummary({ item }: { item: ProjectOverviewItem }): React.JSX.Element {
   if (item.workers.length === 0) return <span>No worker selected</span>;
-  const available = item.workers.filter((worker) => worker.available).map((worker) => worker.label);
-  return <span>{available.length === 0 ? 'No allowed worker available' : `${available.join(', ')} available`}</span>;
+  const available = item.workers.filter((worker) => worker.dispatchable).map((worker) => worker.label);
+  if (available.length > 0) return <span>{`${available.join(', ')} available`}</span>;
+  // With nothing dispatchable the row names each worker's own reason code. "Unavailable"
+  // and "not checked" both used to read as one blank refusal, and they are acted on
+  // differently: one needs an install, the other needs a check.
+  return (
+    <span title={item.workers.map((worker) => worker.reason).join(' ')}>
+      {item.workers.map((worker) => `${worker.label}: ${workerStatusLabel(worker.reasonCode)}`).join(' · ')}
+    </span>
+  );
 }
 
 function PreparationDialog({

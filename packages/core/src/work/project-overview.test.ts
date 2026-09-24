@@ -1,24 +1,16 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type {
-  AgentAvailability,
   CatalogIssue,
   EffectiveWorkspace,
   IssueCatalogSource,
+  WorkerDiagnostic,
+  WorkerProfileId,
   WorkspaceResolution,
   WorkspaceRoleSelection,
 } from '@awos/protocol';
+import { testWorkerDiagnostic } from '../testing/worker-diagnostics.js';
 import { projectProjectOverview, type ProjectOverviewEntry } from './project-overview.js';
-
-const capabilities = {
-  streamingToolOutput: false,
-  streamingText: false,
-  reasoning: false,
-  plans: false,
-  turnDiff: false,
-  approvals: false,
-  resumableSessions: false,
-};
 
 const workspace: Extract<WorkspaceResolution, { status: 'ok' }> = {
   status: 'ok',
@@ -79,17 +71,11 @@ function selection(roleId: string | null = 'implementer'): WorkspaceRoleSelectio
     : { status: 'selected', roleId, role: workspace.status === 'ok' ? workspace.workspace.roles.find((role) => role.id === roleId) ?? null : null };
 }
 
-function availability(profileId: AgentAvailability['profileId'], available: boolean): AgentAvailability {
-  return {
-    agent: profileId,
-    profileId,
+function availability(profileId: WorkerProfileId, available: boolean): WorkerDiagnostic {
+  return testWorkerDiagnostic(profileId, {
+    reachable: available,
     label: profileId === 'claude' ? 'Claude' : 'Codex',
-    adapterId: `${profileId}-adapter`,
-    available,
-    detail: available ? 'ready' : 'not installed',
-    capabilities,
-    model: 'test-model',
-  };
+  });
 }
 
 function project(
@@ -97,7 +83,7 @@ function project(
   overrides: Partial<{
     freshness: IssueCatalogSource['freshness'];
     role: WorkspaceRoleSelection;
-    availability: AgentAvailability[];
+    workerDiagnostics: WorkerDiagnostic[];
     linkedThreads: ProjectOverviewEntry['linkedThreads'];
     runs: ProjectOverviewEntry['runs'];
     issues: CatalogIssue[];
@@ -109,8 +95,7 @@ function project(
     workspace,
     source: source(overrides.freshness ?? 'current', issues),
     roleSelection: overrides.role ?? selection(),
-    availability: overrides.availability ?? [availability('claude', true)],
-    workerLabels: { claude: 'Claude', codex: 'Codex' },
+    workerDiagnostics: overrides.workerDiagnostics ?? [availability('claude', true), availability('codex', false)],
     entries: [{
       issue: item,
       linkedThreads: overrides.linkedThreads ?? [],
@@ -127,7 +112,10 @@ describe('project overview projection', () => {
     assert.equal(item.group, 'available');
     assert.equal(item.action, 'take');
     assert.equal(item.reasonCode, 'available');
-    assert.deepEqual(item.workers.map((worker) => [worker.label, worker.available]), [['Claude', true], ['Codex', false]]);
+    assert.deepEqual(
+      item.workers.map((worker) => [worker.label, worker.dispatchable, worker.reasonCode]),
+      [['Claude', true, 'reachable'], ['Codex', false, 'unavailable']],
+    );
   });
 
   test('keeps a role mismatch visible in the source lens without exposing a Take action', () => {
@@ -141,7 +129,7 @@ describe('project overview projection', () => {
   });
 
   test('uses explicit route, source, and worker preconditions for Blocked', () => {
-    const unavailable = project(issue(3), { availability: [availability('claude', false), availability('codex', false)] }).items[0]!;
+    const unavailable = project(issue(3), { workerDiagnostics: [availability('claude', false), availability('codex', false)] }).items[0]!;
     assert.equal(unavailable.group, 'blocked');
     assert.equal(unavailable.reasonCode, 'worker-unavailable');
     assert.equal(unavailable.action, 'none');
@@ -159,7 +147,7 @@ describe('project overview projection', () => {
   test('keeps linked local work Active through source failure and marks restart interruption', () => {
     const result = project(issue(6), {
       freshness: 'cached',
-      availability: [],
+      workerDiagnostics: [],
       linkedThreads: [{ threadId: 'thread-6', workItemId: 'work-6', title: 'Issue 6 thread', updatedAt: 3 }],
       runs: [{
         runId: 'run-6',

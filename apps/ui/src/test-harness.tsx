@@ -1,6 +1,12 @@
 import { render, type RenderResult } from '@testing-library/react';
 import { vi } from 'vitest';
-import type { ThreadRuntimeState } from '@awos/protocol';
+import type {
+  ThreadRuntimeState,
+  WorkerDiagnostic,
+  WorkerDiagnosticReasonCode,
+  WorkerHealth,
+  WorkerProfileId,
+} from '@awos/protocol';
 import type { Harness } from '@/hooks/useHarness';
 import { HarnessValueProvider } from '@/state/HarnessContext';
 import { DisplaySettingsProvider } from '@/state/DisplaySettingsContext';
@@ -63,6 +69,56 @@ export function idleRuntime(overrides: Partial<ThreadRuntimeState> = {}): Thread
       'qwen-local': { status: 'idle', model: null },
     },
     ...overrides,
+  };
+}
+
+/**
+ * One core-projected worker diagnostic, for tests about the surfaces that render them.
+ *
+ * Written out here rather than derived from the core, because the UI package depends on the
+ * protocol alone and a panel's job is to render whatever the core sent. The defaults are
+ * the ordinary case — resolved, reachable, checked just now — so a test names only the part
+ * it is about.
+ */
+export function workerDiagnostic(
+  profileId: WorkerProfileId,
+  options: {
+    label?: string;
+    dispatchable?: boolean;
+    reasonCode?: WorkerDiagnosticReasonCode;
+    reason?: string;
+    health?: Partial<WorkerHealth>;
+  } = {},
+): WorkerDiagnostic {
+  const label = options.label ?? profileId;
+  const dispatchable = options.dispatchable ?? true;
+  const reasonCode = options.reasonCode ?? (dispatchable ? 'reachable' : 'unavailable');
+  return {
+    profileId,
+    label,
+    capability: {
+      profileId,
+      label,
+      adapterId: `${profileId}-adapter`,
+      target: { id: `${profileId}-target`, provider: 'claude', model: 'test-model', endpoint: null, authProfile: null },
+      capabilities: null,
+      policy: null,
+      configured: true,
+      supported: true,
+      reasonCode: 'configured',
+      detail: null,
+    },
+    health: {
+      state: dispatchable ? 'reachable' : 'unavailable',
+      reasonCode: 'reachable',
+      checkedAt: 1_700_000_000_000,
+      stale: false,
+      detail: null,
+      ...options.health,
+    },
+    reasonCode,
+    reason: options.reason ?? `${label} answered the last check.`,
+    dispatchable,
   };
 }
 

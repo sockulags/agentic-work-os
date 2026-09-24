@@ -1,4 +1,12 @@
-import type { AgentAvailability, AgentId, ModelTarget, WorkerProfile, WorkerProfileId } from '@awos/protocol';
+import type {
+  AgentAvailability,
+  AgentId,
+  ModelTarget,
+  WorkerCapabilityFacts,
+  WorkerProbeObservation,
+  WorkerProfile,
+  WorkerProfileId,
+} from '@awos/protocol';
 import { AGENT_IDS } from '@awos/protocol';
 import type { HarnessConfig } from '../config.js';
 import { runCapture } from '../util/spawn.js';
@@ -98,57 +106,186 @@ export const WORKER_PROFILE_REGISTRY: readonly WorkerProfileDefinition[] = [
   },
 ] as const;
 
-const DEFAULT_REGISTRIES: WorkerRegistries = {
+/** The effective profile source. Issue #152 replaces what fills it, not who reads it. */
+export const DEFAULT_WORKER_REGISTRIES: WorkerRegistries = {
   profiles: WORKER_PROFILE_REGISTRY,
   targets: MODEL_TARGET_REGISTRY,
   factories: ADAPTER_FACTORY_REGISTRY,
 };
+
+/** How much probe or resolution text may reach a display surface. */
+const WORKER_DETAIL_MAX_CHARS = 200;
+
+type ResolvedProfileParts =
+  | { ok: true; definition: WorkerProfileDefinition; target: ModelTarget; factory: AdapterFactory }
+  | {
+      ok: false;
+      /** Whether the source named this profile at all, as opposed to failing to serve it. */
+      configured: boolean;
+      message: string;
+      definition: WorkerProfileDefinition | null;
+      target: ModelTarget | null;
+    };
+
+/**
+ * Resolve one profile without throwing.
+ *
+ * The capability projection needs the refusal as a value: "this profile does not resolve" is
+ * an answer it has to report, not an exception it should convert back into one.
+ * `resolveParts` keeps the throwing contract for the call paths that cannot continue.
+ */
+function tryResolveParts(id: AgentId, config: HarnessConfig, registries: WorkerRegistries): ResolvedProfileParts {
+  const definition = registries.profiles.find((candidate) => candidate.id === id) ?? null;
+  if (definition === null) {
+    return { ok: false, configured: false, message: `No worker profile is registered for ${id}.`, definition: null, target: null };
+  }
+  const targetDefinition = registries.targets.find((candidate) => candidate.target.id === definition.targetId);
+  if (!targetDefinition) {
+    return {
+      ok: false, configured: false, definition, target: null,
+      message: `Worker profile ${id} references unknown model target ${definition.targetId}.`,
+    };
+  }
+  const factory = registries.factories.find((candidate) => candidate.id === definition.adapterId);
+  if (!factory) {
+    return {
+      ok: false, configured: false, definition, target: null,
+      message: `Worker profile ${id} references unknown adapter factory ${definition.adapterId}.`,
+    };
+  }
+  const target = targetDefinition.resolve(config);
+  if (!factory.supports(target)) {
+    return {
+      ok: false, configured: true, definition, target,
+      message: `Worker profile ${id} is incompatible: adapter ${factory.id} does not support model target ${target.id} (${target.provider}).`,
+    };
+  }
+  return { ok: true, definition, target, factory };
+}
 
 function resolveParts(id: AgentId, config: HarnessConfig, registries: WorkerRegistries): {
   definition: WorkerProfileDefinition;
   target: ModelTarget;
   factory: AdapterFactory;
 } {
-  const definition = registries.profiles.find((candidate) => candidate.id === id);
-  if (!definition) throw new Error(`No worker profile is registered for ${id}.`);
-  const targetDefinition = registries.targets.find((candidate) => candidate.target.id === definition.targetId);
-  if (!targetDefinition) throw new Error(`Worker profile ${id} references unknown model target ${definition.targetId}.`);
-  const factory = registries.factories.find((candidate) => candidate.id === definition.adapterId);
-  if (!factory) throw new Error(`Worker profile ${id} references unknown adapter factory ${definition.adapterId}.`);
-  const target = targetDefinition.resolve(config);
-  if (!factory.supports(target)) {
-    throw new Error(`Worker profile ${id} is incompatible: adapter ${factory.id} does not support model target ${target.id} (${target.provider}).`);
-  }
-  return { definition, target, factory };
+  const parts = tryResolveParts(id, config, registries);
+  if (!parts.ok) throw new Error(parts.message);
+  return { definition: parts.definition, target: parts.target, factory: parts.factory };
 }
 
-export function workerProfile(id: AgentId, config: HarnessConfig, registries: WorkerRegistries = DEFAULT_REGISTRIES): WorkerProfile {
+export function workerProfile(id: AgentId, config: HarnessConfig, registries: WorkerRegistries = DEFAULT_WORKER_REGISTRIES): WorkerProfile {
   const { definition, target, factory } = resolveParts(id, config, registries);
   return { id: definition.id, label: definition.label, adapterId: factory.id, target, capabilities: factory.capabilities, policy: definition.policy };
 }
 
-export function createWorkerAdapter(id: AgentId, context: AdapterContext, registries: WorkerRegistries = DEFAULT_REGISTRIES): WorkerAdapter {
+export function createWorkerAdapter(id: AgentId, context: AdapterContext, registries: WorkerRegistries = DEFAULT_WORKER_REGISTRIES): WorkerAdapter {
   const { target, factory } = resolveParts(id, context.config, registries);
   return factory.create(context, target);
+}
+
+/**
+ * Cut probe and resolution text down to one bounded, credential-free line.
+ *
+ * A probe runs a vendor CLI or calls an endpoint, and what comes back is whatever that
+ * program decided to print: a version, a stack trace, a path, or a URL with the endpoint's
+ * userinfo still attached. That text is useful next to a reason code and unfit to be one,
+ * so it is bounded here, at the boundary that produced it.
+ */
+export function boundedWorkerDetail(raw: string): string {
+  const line = (raw.split('\n').find((candidate) => candidate.trim() !== '') ?? '').replace(/\s+/g, ' ').trim();
+  const redacted = line
+    .replace(/(:\/\/)[^/\s@]+@/g, '$1***@')
+    .replace(/\b(authorization|api[-_]?key|access[-_]?key|secret|password|passwd|token)\b([\s:=]+)(?:bearer\s+)?\S+/gi, '$1$2***')
+    .replace(/\b(bearer)\s+\S+/gi, '$1 ***');
+  return redacted.length <= WORKER_DETAIL_MAX_CHARS ? redacted : `${redacted.slice(0, WORKER_DETAIL_MAX_CHARS - 1)}\u2026`;
+}
+
+/**
+ * The durable half of one worker's state, read from the effective profile source alone.
+ *
+ * Nothing here is contacted, so the answer is the same whether or not a probe ever runs.
+ */
+export function resolveWorkerCapabilityFacts(
+  id: WorkerProfileId,
+  config: HarnessConfig,
+  registries: WorkerRegistries = DEFAULT_WORKER_REGISTRIES,
+): WorkerCapabilityFacts {
+  const parts = tryResolveParts(id, config, registries);
+  if (!parts.ok) {
+    return {
+      profileId: id,
+      label: parts.definition?.label ?? id,
+      adapterId: parts.definition?.adapterId ?? null,
+      target: parts.target,
+      capabilities: null,
+      policy: parts.definition?.policy ?? null,
+      configured: parts.configured,
+      supported: false,
+      reasonCode: 'unsupported',
+      detail: boundedWorkerDetail(parts.message),
+    };
+  }
+  return {
+    profileId: parts.definition.id,
+    label: parts.definition.label,
+    adapterId: parts.factory.id,
+    target: parts.target,
+    capabilities: parts.factory.capabilities,
+    policy: parts.definition.policy,
+    configured: true,
+    supported: true,
+    reasonCode: 'configured',
+    detail: null,
+  };
+}
+
+/**
+ * Contact exactly the named profiles and timestamp what they answered.
+ *
+ * Targeted on purpose: asking about one worker must not start the others' binaries. A
+ * profile that does not resolve is left out rather than reported unreachable — it was never
+ * contacted, and its refusal is already a capability fact.
+ */
+export async function probeWorkerHealth(
+  config: HarnessConfig,
+  profileIds: readonly WorkerProfileId[],
+  registries: WorkerRegistries = DEFAULT_WORKER_REGISTRIES,
+): Promise<WorkerProbeObservation[]> {
+  const probes = [...new Set(profileIds)].flatMap((profileId) => {
+    const parts = tryResolveParts(profileId, config, registries);
+    return parts.ok ? [{ profileId, definition: parts.definition, target: parts.target }] : [];
+  });
+  return Promise.all(probes.map(async ({ profileId, definition, target }) => {
+    const result = await definition.probe(config, target);
+    return {
+      profileId,
+      reachable: result.available,
+      detail: boundedWorkerDetail(result.detail),
+      checkedAt: Date.now(),
+    };
+  }));
 }
 
 export async function probeWorkerProfiles(
   config: HarnessConfig,
   profileIds: readonly WorkerProfileId[] = AGENT_IDS,
+  registries: WorkerRegistries = DEFAULT_WORKER_REGISTRIES,
 ): Promise<AgentAvailability[]> {
-  const definitions = profileIds
-    .map((profileId) => WORKER_PROFILE_REGISTRY.find((candidate) => candidate.id === profileId))
-    .filter((definition): definition is WorkerProfileDefinition => definition !== undefined);
-  return Promise.all(definitions.map(async (definition) => {
-    const profile = workerProfile(definition.id, config);
-    const result = await definition.probe(config, profile.target);
-    return {
-      agent: profile.id, profileId: profile.id, label: profile.label, adapterId: profile.adapterId,
-      available: result.available, detail: result.detail, capabilities: profile.capabilities, model: profile.target.model,
-    };
-  }));
+  const observations = await probeWorkerHealth(config, profileIds, registries);
+  return observations.flatMap((observation) => {
+    const facts = resolveWorkerCapabilityFacts(observation.profileId, config, registries);
+    if (facts.adapterId === null || facts.capabilities === null || facts.target === null) return [];
+    return [{
+      agent: facts.profileId, profileId: facts.profileId, label: facts.label, adapterId: facts.adapterId,
+      available: observation.reachable, detail: observation.detail, capabilities: facts.capabilities,
+      model: facts.target.model, checkedAt: observation.checkedAt,
+    }];
+  });
 }
 
-export function registeredWorkerProfiles(config: HarnessConfig): WorkerProfile[] {
-  return WORKER_PROFILE_REGISTRY.map((definition) => workerProfile(definition.id, config));
+export function registeredWorkerProfiles(
+  config: HarnessConfig,
+  registries: WorkerRegistries = DEFAULT_WORKER_REGISTRIES,
+): WorkerProfile[] {
+  return registries.profiles.map((definition) => workerProfile(definition.id, config, registries));
 }

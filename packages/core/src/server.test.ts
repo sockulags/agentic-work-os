@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { WebSocket, type RawData } from 'ws';
+import type { WorkerDiagnostic } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
 import { Orchestrator } from './orchestrator.js';
 import { HarnessServer, validateWorkingDirectory } from './server.js';
@@ -161,4 +162,58 @@ test('an unvalidated frame closes only its own socket and leaves the daemon serv
   await opened(survivor);
   const reply = await response(survivor, 'hello', { token: server.token });
   assert.equal(reply['type'], 'ok');
+});
+
+/**
+ * The diagnostics RPC has to answer two different questions without confusing them: what
+ * the harness is configured to run, and what it last observed about those processes.
+ */
+test('worker diagnostics report configuration always and liveness only after an explicit check', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'awos-ws-workers-'));
+  dataDirs.push(dataDir);
+  const cfg = config(dataDir);
+  const orchestrator = new Orchestrator(cfg);
+  orchestrators.push(orchestrator);
+  const server = new HarnessServer(cfg, orchestrator);
+  servers.push(server);
+  const port = await server.listen();
+
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  sockets.push(socket);
+  socket.on('error', () => {});
+  await opened(socket);
+  assert.equal((await response(socket, 'hello', { token: server.token }))['type'], 'ok');
+
+  const read = async (payload: Record<string, unknown> = {}): Promise<WorkerDiagnostic[]> => {
+    const message = await response(socket, 'workers.diagnostics', payload);
+    assert.equal(message['type'], 'workers.diagnostics');
+    return message['diagnostics'] as WorkerDiagnostic[];
+  };
+
+  // This daemon has just started and nothing about a transient process is persisted, so
+  // every configured worker is unchecked — not reachable, and not missing either.
+  const before = await read();
+  assert.deepEqual(before.map((diagnostic) => diagnostic.profileId), ['claude', 'codex', 'qwen-local']);
+  for (const diagnostic of before) {
+    assert.equal(diagnostic.capability.configured, true);
+    assert.equal(diagnostic.capability.supported, true);
+    assert.equal(diagnostic.capability.reasonCode, 'configured');
+    assert.equal(diagnostic.reasonCode, 'not-checked');
+    assert.equal(diagnostic.health.checkedAt, null);
+    assert.equal(diagnostic.dispatchable, false);
+  }
+
+  const started = Date.now();
+  const [claude] = await read({ profileIds: ['claude'], probe: true });
+  assert.equal(claude?.reasonCode, 'unavailable', 'the configured binary is not on PATH in this test');
+  assert.equal(claude?.dispatchable, false);
+  assert.ok((claude?.health.checkedAt ?? 0) >= started);
+  assert.match(claude?.reason ?? '', /did not answer the last check/);
+  // The stable code carries the meaning; the probe's own words stay in bounded detail.
+  assert.notEqual(claude?.health.detail, null);
+  assert.ok((claude?.health.detail ?? '').length <= 200);
+
+  const after = await read();
+  assert.equal(after.find((diagnostic) => diagnostic.profileId === 'claude')?.reasonCode, 'unavailable');
+  assert.equal(after.find((diagnostic) => diagnostic.profileId === 'codex')?.reasonCode, 'not-checked');
 });

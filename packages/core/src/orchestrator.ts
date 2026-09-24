@@ -7,7 +7,6 @@ import { promisify } from 'node:util';
 import type {
   AdapterEvent,
   AnswerRecordedBody,
-  AgentAvailability,
   AgentId,
   ApprovalRequestedBody,
   HarnessEvent,
@@ -53,6 +52,9 @@ import type {
   ProjectIssueThreadHistory,
   ReferenceIdentity,
   TypedAnswer,
+  WorkerDiagnostic,
+  WorkerProbeObservation,
+  WorkerProfileId,
   WorkspaceGuardrail,
 } from '@awos/protocol';
 import {
@@ -68,7 +70,12 @@ import {
 } from '@awos/protocol';
 import type { HarnessConfig } from './config.js';
 import { isNativeResumeNotFoundError, type WorkerAdapter, type AdapterContext, type WorkerTurnOptions } from './adapters/agent.js';
-import { createWorkerAdapter, probeWorkerProfiles, registeredWorkerProfiles } from './adapters/registry.js';
+import {
+  createWorkerAdapter,
+  probeWorkerHealth,
+  registeredWorkerProfiles,
+  resolveWorkerCapabilityFacts,
+} from './adapters/registry.js';
 import { isQwenResumeNotFoundError } from './adapters/qwen-code.js';
 import { PermissionBridge } from './permission-bridge.js';
 import {
@@ -105,6 +112,7 @@ import {
   selectedForContext,
 } from './work/ledger.js';
 import { projectRunEvidence } from './work/runs.js';
+import { projectWorkerDiagnostics } from './work/worker-health.js';
 import {
   RECOVERY_MAX_TRANSIENT_EVALUATOR_RETRIES,
   RecoveryConflictError,
@@ -444,6 +452,7 @@ class Thread {
   readonly #bridge: PermissionBridge;
   readonly #emit: (event: HarnessEvent) => void;
   readonly #onState: () => void;
+  readonly #checkWorkers: (profileIds: readonly WorkerProfileId[]) => Promise<WorkerDiagnostic[]>;
 
   readonly #adapters = new Map<AgentId, WorkerAdapter>();
   #permissionMode: PermissionMode = 'default';
@@ -480,6 +489,8 @@ class Thread {
       bridge: PermissionBridge;
       emit: (event: HarnessEvent) => void;
       onState: () => void;
+      /** Targeted capability/health check against the orchestrator's own health record. */
+      checkWorkers: (profileIds: readonly WorkerProfileId[]) => Promise<WorkerDiagnostic[]>;
     },
   ) {
     this.id = id;
@@ -490,6 +501,7 @@ class Thread {
     this.#bridge = deps.bridge;
     this.#emit = deps.emit;
     this.#onState = deps.onState;
+    this.#checkWorkers = deps.checkWorkers;
 
     // Rebuild derived state from history so a reopened thread shows its checklist and
     // the diff from the last turn that produced one.
@@ -543,6 +555,11 @@ class Thread {
 
   get busyWith(): AgentId | null {
     return this.#busy[0] ?? null;
+  }
+
+  /** The agents with a turn in flight, for callers that need only that much of the state. */
+  get busyAgents(): AgentId[] {
+    return this.#busy;
   }
 
   isRunActive(runId: string): boolean {
@@ -2386,12 +2403,13 @@ class Thread {
     ) {
       return Promise.resolve({ detail: `Worker profile ${agent} is not authorized for transition target ${evaluation.targetStepId}.` });
     }
-    return probeWorkerProfiles(this.#config, [agent]).then((availability) => {
-      const result = availability[0];
-      return result?.available === true ? null : {
-        detail: result?.detail ?? `Worker profile ${agent} is unavailable.`,
-      };
-    });
+    // The refusal carries the projected reason rather than the probe's own words: this
+    // detail is written into the recovery record, and probe output is vendor text.
+    return this.#checkWorkers([agent]).then(([diagnostic]) => (
+      diagnostic?.dispatchable === true ? null : {
+        detail: diagnostic?.reason ?? `Worker profile ${agent} is unavailable.`,
+      }
+    ));
   }
 
   #waitForRecovery(
@@ -2867,6 +2885,14 @@ export class Orchestrator extends EventEmitter {
   readonly #bridge = new PermissionBridge();
   readonly #threads = new Map<string, Thread>();
   readonly #issueLocks = new Map<string, Promise<void>>();
+  /**
+   * The last probe per worker profile, held in memory and never written to disk.
+   *
+   * A recorded `reachable` describes a process that answered when the probe ran. After a
+   * restart no such process exists, so reloading that record would be the harness asserting
+   * liveness it never observed. Losing it is the correct behaviour, not a gap.
+   */
+  readonly #workerHealth = new Map<WorkerProfileId, WorkerProbeObservation>();
 
   constructor(config: HarnessConfig) {
     super();
@@ -2990,6 +3016,62 @@ export class Orchestrator extends EventEmitter {
 
   state(threadId: string): ThreadRuntimeState {
     return this.#thread(threadId).state();
+  }
+
+  /**
+   * Worker capability and health for the named profiles, or for every configured one.
+   *
+   * Reading contacts nothing: it reports the durable resolution facts plus whatever the last
+   * probe observed and when. `probe` is the explicit refresh, and it is targeted — asking
+   * about one worker never starts another one's binary.
+   */
+  async workerDiagnostics(options: {
+    profileIds?: readonly WorkerProfileId[];
+    probe?: boolean;
+  } = {}): Promise<WorkerDiagnostic[]> {
+    const profileIds = options.profileIds ?? registeredWorkerProfiles(this.#config).map((profile) => profile.id);
+    if (options.probe === true) await this.#recordWorkerProbe(profileIds);
+    return this.#projectWorkerDiagnostics(profileIds);
+  }
+
+  async #recordWorkerProbe(profileIds: readonly WorkerProfileId[]): Promise<void> {
+    for (const observation of await probeWorkerHealth(this.#config, profileIds)) {
+      this.#workerHealth.set(observation.profileId, observation);
+    }
+  }
+
+  #projectWorkerDiagnostics(profileIds: readonly WorkerProfileId[]): WorkerDiagnostic[] {
+    const requested = [...new Set(profileIds)];
+    return projectWorkerDiagnostics({
+      capabilities: requested.map((profileId) => resolveWorkerCapabilityFacts(profileId, this.#config)),
+      observations: requested.flatMap((profileId) => {
+        const observation = this.#workerHealth.get(profileId);
+        return observation === undefined ? [] : [observation];
+      }),
+      busyProfileIds: [...new Set([...this.#threads.values()].flatMap((thread) => thread.busyAgents))],
+      now: Date.now(),
+    });
+  }
+
+  /**
+   * Probe the workers a workspace's steps may allow, then project all of them.
+   *
+   * A probe that throws is reported as a retryable source error and leaves the projection
+   * calling those workers unchecked, which is what they are. Dropping them from the list
+   * instead would recreate the guess this projection exists to remove.
+   */
+  async #workspaceWorkerDiagnostics(
+    resolution: Extract<WorkspaceResolution, { status: 'ok' }>,
+  ): Promise<{ diagnostics: WorkerDiagnostic[]; error: WorkSourceError | null }> {
+    const profileIds = [...new Set(resolution.workspace.steps.flatMap((step) => step.workers))];
+    let error: WorkSourceError | null = null;
+    try {
+      await this.#recordWorkerProbe(profileIds);
+    } catch (cause) {
+      const detail = cause instanceof Error && cause.message !== '' ? ` ${cause.message}` : '';
+      error = { kind: 'unknown', message: `Could not check worker availability.${detail}`, retryable: true };
+    }
+    return { diagnostics: this.#projectWorkerDiagnostics(profileIds), error };
   }
 
   async send(threadId: string, agent: AgentId, text: string, asRun = false): Promise<void> {
@@ -3152,34 +3234,16 @@ export class Orchestrator extends EventEmitter {
     }
 
     const source = this.catalog.read({ workspaceRoot: resolution.workspace.root, repository });
-    let workerAvailability: AgentAvailability[];
-    let workerError: WorkSourceError | null = null;
-    const profileIds = [...new Set(resolution.workspace.steps.flatMap((step) => step.workers))];
-    try {
-      workerAvailability = await probeWorkerProfiles(this.#config, profileIds);
-    } catch (error) {
-      const detail = error instanceof Error && error.message !== '' ? ` ${error.message}` : '';
-      workerAvailability = [];
-      workerError = {
-        kind: 'unknown',
-        message: `Could not check worker availability.${detail}`,
-        retryable: true,
-      };
-    }
-
-    const workerLabels = Object.fromEntries(
-      registeredWorkerProfiles(this.#config).map((profile) => [profile.id, profile.label]),
-    );
+    const workers = await this.#workspaceWorkerDiagnostics(resolution);
     const overview = projectProjectOverview({
       cwd,
       workspace: resolution,
       source,
       roleSelection: this.workspaceRoleSelection(cwd),
-      availability: workerAvailability,
-      workerLabels,
+      workerDiagnostics: workers.diagnostics,
       entries: this.#projectOverviewEntries(source),
     });
-    return { overview, error: workerError ?? source.error };
+    return { overview, error: workers.error ?? source.error };
   }
 
   /**
@@ -3309,22 +3373,7 @@ export class Orchestrator extends EventEmitter {
       error: detailError,
     };
 
-    const profileIds = [...new Set(resolution.workspace.steps.flatMap((step) => step.workers))];
-    let availability: AgentAvailability[] = [];
-    let workerError: WorkSourceError | null = null;
-    try {
-      availability = await probeWorkerProfiles(this.#config, profileIds);
-    } catch (error) {
-      workerError = {
-        kind: 'unknown',
-        message: error instanceof Error ? `Could not check worker availability. ${error.message}` : 'Could not check worker availability.',
-        retryable: true,
-      };
-    }
-
-    const workerLabels = Object.fromEntries(
-      registeredWorkerProfiles(this.#config).map((profile) => [profile.id, profile.label]),
-    );
+    const workers = await this.#workspaceWorkerDiagnostics(resolution);
     const detail = projectProjectIssueDetail({
       cwd,
       workspace: resolution,
@@ -3334,11 +3383,10 @@ export class Orchestrator extends EventEmitter {
       source: detailSource,
       routeSource,
       roleSelection: this.workspaceRoleSelection(cwd),
-      availability,
-      workerLabels,
+      workerDiagnostics: workers.diagnostics,
       linkedThreads: workItem === undefined ? [] : this.#projectIssueThreadHistory(workItem.id),
     });
-    return { detail, error: workerError ?? detailError };
+    return { detail, error: workers.error ?? detailError };
   }
 
   // -------------------------------------------------------------------------
@@ -3634,7 +3682,7 @@ export class Orchestrator extends EventEmitter {
       },
       // Continuation is local and does not require the saved role to remain selectable.
       roleSelection: { status: 'unconfigured', roleId: null, role: null },
-      availability: [],
+      workerDiagnostics: [],
     });
 
     return {
@@ -3689,7 +3737,7 @@ export class Orchestrator extends EventEmitter {
             issue: catalogIssue,
             source,
             roleSelection: { status: 'unconfigured', roleId: null, role: null },
-            availability: [],
+            workerDiagnostics: [],
           })
         : undefined;
       return issueRefusal(
@@ -3715,16 +3763,19 @@ export class Orchestrator extends EventEmitter {
       issue: catalogIssue,
       source,
       roleSelection,
-      availability: [],
+      workerDiagnostics: [],
     });
     if (initialProjection.action.reason !== 'worker-unavailable') {
       const refusal = this.#projectionRefusal(initialProjection);
       if (refusal !== null) return refusal;
     }
 
-    let availability;
+    let checkedWorkers: WorkerDiagnostic[];
     try {
-      availability = await probeWorkerProfiles(this.#config, initialProjection.action.allowedWorkerProfileIds);
+      checkedWorkers = await this.workerDiagnostics({
+        profileIds: initialProjection.action.allowedWorkerProfileIds,
+        probe: true,
+      });
     } catch (error) {
       const detail = error instanceof Error && error.message !== '' ? ` ${error.message}` : '';
       return issueRefusal('workers-unavailable', `Could not check the allowed worker profiles.${detail}`);
@@ -3735,7 +3786,7 @@ export class Orchestrator extends EventEmitter {
       issue: catalogIssue,
       source,
       roleSelection,
-      availability,
+      workerDiagnostics: checkedWorkers,
     });
     if (availableProjection.action.status !== 'available') {
       return this.#projectionRefusal(availableProjection) ?? issueRefusal(
@@ -3808,7 +3859,7 @@ export class Orchestrator extends EventEmitter {
       issue: fullIssue,
       source: { ...source, issues: [fullIssue], error: null },
       roleSelection: currentRoleSelection,
-      availability: [],
+      workerDiagnostics: [],
     });
     if (sourceProjection.route.status !== 'routed') {
       return this.#projectionRefusal(sourceProjection) ?? issueRefusal(
@@ -3836,7 +3887,7 @@ export class Orchestrator extends EventEmitter {
       issue: fullIssue,
       source: { ...source, issues: [fullIssue], error: null },
       roleSelection: currentRoleSelection,
-      availability: [],
+      workerDiagnostics: [],
     });
     if (
       currentProjection.route.status !== 'routed' ||
@@ -3853,7 +3904,7 @@ export class Orchestrator extends EventEmitter {
       issue: fullIssue,
       source: { ...source, issues: [fullIssue], error: null },
       roleSelection: currentRoleSelection,
-      availability,
+      workerDiagnostics: checkedWorkers,
     });
     if (authorizedProjection.action.status !== 'available') {
       return this.#projectionRefusal(authorizedProjection) ?? issueRefusal(
@@ -4114,6 +4165,7 @@ export class Orchestrator extends EventEmitter {
       bridge: this.#bridge,
       emit: (event) => this.emit('event', event),
       onState: () => this.emit('state', thread.state()),
+      checkWorkers: (profileIds) => this.workerDiagnostics({ profileIds, probe: true }),
     });
     this.#threads.set(threadId, thread);
     return thread;

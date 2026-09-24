@@ -1,27 +1,18 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type {
-  AgentAvailability,
   CatalogIssue,
   EvidenceItem,
   IssueCatalogSource,
   IssueSnapshot,
   ProjectIssueDetailSource,
   ProjectIssueThreadHistory,
+  WorkerDiagnostic,
   WorkspaceResolution,
   WorkspaceRoleSelection,
 } from '@awos/protocol';
+import { testWorkerDiagnostic } from '../testing/worker-diagnostics.js';
 import { projectProjectIssueDetail, PROJECT_ISSUE_DETAIL_BODY_MAX_CHARS } from './project-issue.js';
-
-const capabilities = {
-  streamingToolOutput: false,
-  streamingText: false,
-  reasoning: false,
-  plans: false,
-  turnDiff: false,
-  approvals: false,
-  resumableSessions: false,
-};
 
 const workspace: Extract<WorkspaceResolution, { status: 'ok' }> = {
   status: 'ok',
@@ -90,17 +81,8 @@ function roleSelection(): WorkspaceRoleSelection {
   return { status: 'selected', roleId: 'implementer', role: { id: 'implementer', label: 'Implementer' } };
 }
 
-function availability(available: boolean): AgentAvailability {
-  return {
-    agent: 'claude',
-    profileId: 'claude',
-    label: 'Claude',
-    adapterId: 'claude-adapter',
-    available,
-    detail: available ? 'ready' : 'not installed',
-    capabilities,
-    model: 'test-model',
-  };
+function availability(available: boolean): WorkerDiagnostic {
+  return testWorkerDiagnostic('claude', { reachable: available, label: 'Claude' });
 }
 
 function snapshot(body: string): IssueSnapshot {
@@ -142,8 +124,7 @@ function project(overrides: Partial<Parameters<typeof projectProjectIssueDetail>
     source: detailSource(),
     routeSource: currentSource,
     roleSelection: roleSelection(),
-    availability: [availability(true)],
-    workerLabels: { claude: 'Claude' },
+    workerDiagnostics: [availability(true)],
     linkedThreads: [],
     ...overrides,
   });
@@ -215,10 +196,11 @@ describe('project issue detail projection', () => {
     assert.equal(conflict.action.reasonCode, 'conflicted-route');
     assert.equal(conflict.action.refusal?.code, 'route-conflict');
 
-    const unavailable = project({ availability: [availability(false)] });
+    const unavailable = project({ workerDiagnostics: [availability(false)] });
     assert.equal(unavailable.action.reasonCode, 'worker-unavailable');
     assert.equal(unavailable.action.refusal?.code, 'workers-unavailable');
-    assert.equal(unavailable.action.workers[0]?.available, false);
+    assert.equal(unavailable.action.workers[0]?.dispatchable, false);
+    assert.equal(unavailable.action.workers[0]?.reasonCode, 'unavailable');
 
     const invalidWorkspace = { status: 'invalid', problems: [{ path: 'routes', message: 'Route is invalid.' }] } as WorkspaceResolution;
     const invalid = project({ workspace: invalidWorkspace });

@@ -1,5 +1,4 @@
 import type {
-  AgentAvailability,
   CatalogIssue,
   CatalogLinkedThread,
   CatalogRunEvidence,
@@ -8,10 +7,9 @@ import type {
   ProjectOverviewItem,
   ProjectOverviewLinkedWork,
   ProjectOverviewReasonCode,
-  ProjectOverviewWorker,
+  WorkerDiagnostic,
   WorkspaceResolution,
   WorkspaceRoleSelection,
-  WorkerProfileId,
 } from '@awos/protocol';
 import { projectIssueRoute } from './issue-route.js';
 
@@ -26,8 +24,8 @@ export interface ProjectOverviewProjectionInput {
   workspace: Extract<WorkspaceResolution, { status: 'ok' }>;
   source: IssueCatalogSource;
   roleSelection: WorkspaceRoleSelection;
-  availability: readonly AgentAvailability[];
-  workerLabels: Readonly<Record<string, string>>;
+  /** One diagnostic per worker any step may allow, projected by the core. */
+  workerDiagnostics: readonly WorkerDiagnostic[];
   entries: readonly ProjectOverviewEntry[];
 }
 
@@ -65,7 +63,7 @@ function projectItem(
         issue: entry.issue,
         source: input.source,
         roleSelection: input.roleSelection,
-        availability: input.availability,
+        workerDiagnostics: input.workerDiagnostics,
       })
     : null;
   const linkedWork = canonicalLinkedWork(entry.linkedThreads, entry.runs);
@@ -80,9 +78,7 @@ function projectItem(
       statusLabel: interrupted ? 'Interrupted' : working ? 'Working' : 'Active',
       projectAction: projection?.action.projectAction ?? null,
       responsibleRole: projection?.action.responsibleRole ?? null,
-      workers: projection === null
-        ? []
-        : projectWorkers(projection.action.allowedWorkerProfileIds, projection.action.availability, input.workerLabels),
+      workers: projection === null ? [] : projectWorkers(projection.action.availability),
       action: 'continue',
       reasonCode: interrupted ? 'active-interrupted' : 'active',
       reason: interrupted
@@ -111,7 +107,7 @@ function projectItem(
 
   // The non-local branch always has an open issue and therefore a route projection above.
   if (projection === null) throw new Error('An open project overview issue needs a route projection.');
-  const workers = projectWorkers(projection.action.allowedWorkerProfileIds, projection.action.availability, input.workerLabels);
+  const workers = projectWorkers(projection.action.availability);
   const reasonCode = projectReasonCode(projection.action.reason);
   const roleLensRefusal = reasonCode === 'role-required' || reasonCode === 'role-mismatch';
   const isTakeable = reasonCode === 'available';
@@ -148,20 +144,16 @@ function canonicalLinkedWork(
   return { thread, latestRun };
 }
 
+/**
+ * The row's workers are the route's diagnostics, not a second opinion about them.
+ *
+ * A fact without a diagnostic is dropped rather than filled in: the row then shows fewer
+ * workers, which is honest, instead of one whose state was invented here.
+ */
 function projectWorkers(
-  allowed: readonly WorkerProfileId[],
-  availability: readonly {
-    profileId: WorkerProfileId;
-    entries: readonly AgentAvailability[];
-    available: boolean;
-  }[],
-  labels: Readonly<Record<string, string>>,
-): readonly ProjectOverviewWorker[] {
-  return allowed.map((profileId) => {
-    const fact = availability.find((candidate) => candidate.profileId === profileId);
-    const label = fact?.entries[0]?.label ?? labels[profileId] ?? profileId;
-    return { profileId, label, available: fact?.available === true };
-  });
+  availability: ReturnType<typeof projectIssueRoute>['action']['availability'],
+): readonly WorkerDiagnostic[] {
+  return availability.flatMap((fact) => (fact.diagnostic === null ? [] : [fact.diagnostic]));
 }
 
 function projectReasonCode(reason: string): ProjectOverviewReasonCode {

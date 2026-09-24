@@ -47,6 +47,9 @@ export { WorkItemStore } from './work/store.js';
 export { fetchIssue, parseIssueRef, type GitHubOptions } from './work/github.js';
 export { projectIssueRoute } from './work/issue-route.js';
 export { explainIssueRoute } from './work/issue-route-presentation.js';
+export { projectWorkerDiagnostics } from './work/worker-health.js';
+export type { WorkerDiagnosticProjectionInput } from './work/worker-health.js';
+export { explainWorkerReason } from './work/worker-health-presentation.js';
 export { projectProjectOverview } from './work/project-overview.js';
 export type { ProjectOverviewEntry, ProjectOverviewProjectionInput } from './work/project-overview.js';
 export { projectProjectIssueDetail, PROJECT_ISSUE_DETAIL_BODY_MAX_CHARS } from './work/project-issue.js';
@@ -142,6 +145,10 @@ export {
   workerProfile,
   registeredWorkerProfiles,
   probeWorkerProfiles,
+  probeWorkerHealth,
+  resolveWorkerCapabilityFacts,
+  boundedWorkerDetail,
+  DEFAULT_WORKER_REGISTRIES,
 } from './adapters/registry.js';
 export type {
   AdapterFactory,

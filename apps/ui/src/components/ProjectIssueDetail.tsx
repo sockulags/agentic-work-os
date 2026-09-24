@@ -1,9 +1,10 @@
 import { useEffect } from 'react';
 import { AlertTriangle, CircleDot, ExternalLink, RefreshCw, X, XCircle, CheckCircle2 } from 'lucide-react';
-import type { ProjectIssueDetail as ProjectIssueDetailModel, ProjectIssueTimelineEntry, ProjectOverviewItem, WorkSourceError } from '@awos/protocol';
+import type { ProjectIssueDetail as ProjectIssueDetailModel, ProjectIssueTimelineEntry, ProjectOverviewItem, WorkerDiagnostic, WorkSourceError } from '@awos/protocol';
 import { Button } from '@/components/ui/button';
 import { EvidenceItem, ReviewState, type ReviewStateName } from '@/components/review/ReviewPatterns';
 import { Markdown } from '@/components/Markdown';
+import { workerStatusLabel } from '@/lib/capabilities';
 import { cn, formatRelative } from '@/lib/utils';
 
 interface ProjectIssueDetailProps {
@@ -123,8 +124,14 @@ export function ProjectIssueDetail({
                 <ul>
                   {detail.action.workers.map((worker) => (
                     <li key={worker.profileId}>
-                      <span className="min-w-0 break-words">{worker.label} <code>{worker.profileId}</code></span>
-                      <ReviewState state={worker.available ? 'passed' : 'blocked'} label={worker.available ? 'Available' : 'Unavailable'} />
+                      <span className="project-issue-detail-worker">
+                        <span className="min-w-0 break-words">{worker.label} <code>{worker.profileId}</code></span>
+                        <small>{workerReason(worker)}</small>
+                      </span>
+                      <ReviewState
+                        state={worker.dispatchable ? 'passed' : 'blocked'}
+                        label={workerStatusLabel(worker.reasonCode)}
+                      />
                     </li>
                   ))}
                 </ul>
@@ -325,6 +332,19 @@ function assigneeSourceLabel(source: ProjectIssueDetailModel['source']['assignee
   if (source === 'catalog') return 'Current catalog metadata';
   if (source === 'work-item-snapshot') return 'WorkItem snapshot (assignees not retained)';
   return 'Unavailable';
+}
+
+/**
+ * The core's sentence for one worker, plus when the observation behind it was made.
+ *
+ * The time is shown separately rather than written into the sentence: a reason with no
+ * check time is an unchecked worker, and that difference is the point of the panel.
+ */
+function workerReason(worker: WorkerDiagnostic): string {
+  const checked = worker.health.checkedAt === null
+    ? 'Never checked.'
+    : `Checked ${formatDate(worker.health.checkedAt)}.`;
+  return `${worker.reason} ${checked}`;
 }
 
 function formatDate(value: number): string {

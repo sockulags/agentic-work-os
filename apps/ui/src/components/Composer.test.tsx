@@ -43,7 +43,7 @@ describe('Composer — who can be sent to', () => {
   test('renders the server-provided profile list, including Qwen', () => {
     const profile: AgentAvailability = {
       agent: 'qwen-local', profileId: 'qwen-local', label: 'Qwen Code · Qwen3.8 local',
-      adapterId: 'qwen-code-sdk', model: 'qwen3.8-27b-local', available: true, detail: 'reachable',
+      adapterId: 'qwen-code-sdk', model: 'qwen3.8-27b-local', available: true, detail: 'reachable', checkedAt: 1_700_000_000_000,
       capabilities: { streamingToolOutput: false, streamingText: true, reasoning: true, plans: false, turnDiff: false, approvals: true, resumableSessions: true },
     };
     renderWithHarness(<Composer />, { activeThread: thread({ activeAgent: 'qwen-local' }), availability: [profile] });
@@ -54,11 +54,11 @@ describe('Composer — who can be sent to', () => {
   test('only offers profiles allowed by the resolved workspace', () => {
     const availability: AgentAvailability[] = [
       {
-        agent: 'claude', profileId: 'claude', label: 'Claude', adapterId: 'claude-code-cli', model: 'default', available: true, detail: 'ok',
+        agent: 'claude', profileId: 'claude', label: 'Claude', adapterId: 'claude-code-cli', model: 'default', available: true, detail: 'ok', checkedAt: 1_700_000_000_000,
         capabilities: { streamingToolOutput: true, streamingText: true, reasoning: true, plans: true, turnDiff: true, approvals: true, resumableSessions: true },
       },
       {
-        agent: 'qwen-local', profileId: 'qwen-local', label: 'Qwen Code · Qwen3.8 local', adapterId: 'qwen-code-sdk', model: 'local', available: true, detail: 'ok',
+        agent: 'qwen-local', profileId: 'qwen-local', label: 'Qwen Code · Qwen3.8 local', adapterId: 'qwen-code-sdk', model: 'local', available: true, detail: 'ok', checkedAt: 1_700_000_000_000,
         capabilities: { streamingToolOutput: false, streamingText: true, reasoning: true, plans: false, turnDiff: false, approvals: true, resumableSessions: true },
       },
     ];
@@ -74,7 +74,7 @@ describe('Composer — who can be sent to', () => {
   test('uses the server label and a safe fallback for an unknown profile style', () => {
     const profile = {
       agent: 'claude', profileId: 'future-profile', label: 'Future Worker', adapterId: 'future', model: 'future',
-      available: true, detail: 'ok', capabilities: { streamingToolOutput: false, streamingText: true, reasoning: false, plans: false, turnDiff: false, approvals: false, resumableSessions: false },
+      available: true, detail: 'ok', checkedAt: 1_700_000_000_000, capabilities: { streamingToolOutput: false, streamingText: true, reasoning: false, plans: false, turnDiff: false, approvals: false, resumableSessions: false },
     } as unknown as AgentAvailability;
     renderWithHarness(<Composer />, { activeThread: thread(), availability: [profile] });
     expect(screen.getByRole('button', { name: 'Future Worker' })).toBeTruthy();
