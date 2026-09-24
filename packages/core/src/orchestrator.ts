@@ -701,7 +701,6 @@ class Thread {
       // foreign event (its agent is null), so recording first would fold the prompt into
       // its own preamble and the agent would receive it twice.
       const watermark = summary.watermarks[agent] ?? 0;
-      const replayCutoff = this.#store.head(this.id);
       const unseen = this.#store.eventsSince(this.id, watermark);
       const replay = buildReplay(unseen, agent, {
         maxChars: this.#config.replayMaxChars,
@@ -716,7 +715,7 @@ class Thread {
         hadReplay: replay.preamble !== null,
       });
       const userMessageSeq = this.#store.head(this.id);
-      watermarkCutoff = replayCutoff;
+      watermarkCutoff = userMessageSeq;
 
       if (replay.preamble) {
         log.info('replaying context', {

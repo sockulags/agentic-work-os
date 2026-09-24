@@ -445,19 +445,22 @@ describe('cross-agent handoff', () => {
     const thread = orch.createThread({ cwd: workDir });
 
     await orch.send(thread.id, 'claude', 'first');
-    await orch.send(thread.id, 'codex', 'second');
+    await orch.send(thread.id, 'codex', 'second prompt must not replay');
 
     const afterSwitch = orch.store.get(thread.id);
     const codexWatermark = afterSwitch?.watermarks.codex ?? 0;
     assert.ok(codexWatermark > 0, 'codex watermark advanced after it took a turn');
 
-    await orch.send(thread.id, 'codex', 'third');
+    await orch.send(thread.id, 'codex', 'third prompt');
 
     const afterRepeat = orch.store.get(thread.id);
     assert.ok(
       (afterRepeat?.watermarks.codex ?? 0) > codexWatermark,
       'watermark keeps advancing',
     );
+    const codexMessages = receivedBy(orch, thread.id, 'codex');
+    assert.match(codexMessages.at(-1) ?? '', /third prompt/);
+    assert.doesNotMatch(codexMessages.at(-1) ?? '', /second prompt must not replay/);
   });
 
   test('replays another lane\'s completed turn after it overlaps this turn', async () => {
