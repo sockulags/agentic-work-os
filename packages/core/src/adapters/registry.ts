@@ -116,6 +116,36 @@ export const DEFAULT_WORKER_REGISTRIES: WorkerRegistries = {
 /** How much probe or resolution text may reach a display surface. */
 const WORKER_DETAIL_MAX_CHARS = 200;
 
+/**
+ * Credential-ish field names, as a suffix vocabulary rather than a list of vendor spellings.
+ *
+ * Every spelling seen in the wild is one of a few secret words with some number of `word_` or
+ * `word-` hops in front of it: `client_secret`, `refresh_token`, `x-api-key`. Matching the
+ * prefix generically covers the next spelling without another edit here, which an enumeration
+ * of names does not — the previous `\b(secret|token)\b` form silently let `client_secret`
+ * through, because `_` is a word character and no boundary exists after it.
+ *
+ * A bare `key` and a bare `id` are deliberately left out, and only their credential pairings
+ * (`access_key`, `client_id`) are matched: `sort key=name` and `request_id=42` are exactly the
+ * diagnostic detail this text exists to carry.
+ */
+const CREDENTIAL_FIELD_NAME = String.raw`(?:[a-z0-9]+[-_])*(?:authorization|secret|password|passwd|token|credentials?|(?:api|access)[-_]?key|client[-_]?id|(?<=[-_])key)`;
+
+/**
+ * One `name<separator>value` pair inside a line of free text.
+ *
+ * Both guards are about not mangling harmless text: the value is whatever runs to the next
+ * space, and the trailing guard keeps `tokens: 42` and `/usr/lib/tokenizer` intact by refusing
+ * a name that continues into another word.
+ */
+const CREDENTIAL_ASSIGNMENT = new RegExp(
+  String.raw`(?<![a-z0-9])(${CREDENTIAL_FIELD_NAME})(?![a-z0-9])([\s:=]+)(?:bearer\s+)?\S+`,
+  'gi',
+);
+
+/** A whole field name, for query parameters whose value the URL delimits rather than a space. */
+const CREDENTIAL_PARAMETER = new RegExp(String.raw`^(?:${CREDENTIAL_FIELD_NAME})$`, 'i');
+
 type ResolvedProfileParts =
   | { ok: true; definition: WorkerProfileDefinition; target: ModelTarget; factory: AdapterFactory }
   | {
@@ -195,9 +225,56 @@ export function boundedWorkerDetail(raw: string): string {
   const line = (raw.split('\n').find((candidate) => candidate.trim() !== '') ?? '').replace(/\s+/g, ' ').trim();
   const redacted = line
     .replace(/(:\/\/)[^/\s@]+@/g, '$1***@')
-    .replace(/\b(authorization|api[-_]?key|access[-_]?key|secret|password|passwd|token)\b([\s:=]+)(?:bearer\s+)?\S+/gi, '$1$2***')
+    .replace(CREDENTIAL_ASSIGNMENT, '$1$2***')
     .replace(/\b(bearer)\s+\S+/gi, '$1 ***');
   return redacted.length <= WORKER_DETAIL_MAX_CHARS ? redacted : `${redacted.slice(0, WORKER_DETAIL_MAX_CHARS - 1)}\u2026`;
+}
+
+/**
+ * Cut one endpoint down to what a display surface may see.
+ *
+ * `ModelTarget.endpoint` is operator config (`AWOS_QWEN_BASE_URL`), and a base URL is the one
+ * place a credential is routinely written into a location that looks like plain addressing:
+ * `http://user:pass@host/v1`, or `?api_key=…` on the end. Only those two positions are
+ * rewritten, because the rest of the URL is the whole diagnostic value — which host, which
+ * port, which path a worker was pointed at is usually the answer to why it will not connect.
+ *
+ * An endpoint with nothing credential-shaped in it is returned as written, so a reader
+ * comparing the reported endpoint against the configured one sees the same string.
+ */
+export function safeWorkerEndpoint(endpoint: string): string {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    // Not a URL, so there is no userinfo or query to isolate. The text rules still apply:
+    // whatever the operator set is about to be shown to someone.
+    return boundedWorkerDetail(endpoint);
+  }
+  const credentialParameters = [...url.searchParams.keys()].filter((name) => CREDENTIAL_PARAMETER.test(name));
+  if (url.username === '' && url.password === '' && credentialParameters.length === 0) return endpoint;
+  if (url.username !== '' || url.password !== '') {
+    url.username = '***';
+    url.password = '';
+  }
+  for (const name of credentialParameters) url.searchParams.set(name, '***');
+  return url.toString();
+}
+
+/**
+ * The resolved target as a display surface may see it.
+ *
+ * The sanitized endpoint lives on the capability fact rather than in a narrower parallel view,
+ * because this function is the only thing that builds `WorkerCapabilityFacts`, and the facts
+ * are read for display alone: adapter construction and probing take their target straight from
+ * `tryResolveParts`, so they keep the raw endpoint they need to connect. Sanitizing here means
+ * no caller of the projection can reconstruct the secret, and no protocol type has to grow a
+ * second shape for the same target.
+ */
+function displayTarget(target: ModelTarget | null): ModelTarget | null {
+  if (target === null || target.endpoint === null) return target;
+  const endpoint = safeWorkerEndpoint(target.endpoint);
+  return endpoint === target.endpoint ? target : { ...target, endpoint };
 }
 
 /**
@@ -216,7 +293,7 @@ export function resolveWorkerCapabilityFacts(
       profileId: id,
       label: parts.definition?.label ?? id,
       adapterId: parts.definition?.adapterId ?? null,
-      target: parts.target,
+      target: displayTarget(parts.target),
       capabilities: null,
       policy: parts.definition?.policy ?? null,
       configured: parts.configured,
@@ -229,7 +306,7 @@ export function resolveWorkerCapabilityFacts(
     profileId: parts.definition.id,
     label: parts.definition.label,
     adapterId: parts.factory.id,
-    target: parts.target,
+    target: displayTarget(parts.target),
     capabilities: parts.factory.capabilities,
     policy: parts.definition.policy,
     configured: true,

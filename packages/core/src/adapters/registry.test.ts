@@ -6,6 +6,7 @@ import {
   probeWorkerHealth,
   registeredWorkerProfiles,
   resolveWorkerCapabilityFacts,
+  safeWorkerEndpoint,
   workerProfile,
   WORKER_PROFILE_REGISTRY,
   type AdapterFactory,
@@ -128,6 +129,47 @@ describe('worker capability facts', () => {
     assert.equal(unconfigured.adapterId, null);
     assert.match(unconfigured.detail ?? '', /No worker profile is registered for codex\./);
   });
+
+  test('projects the resolved endpoint without the credential the operator configured in it', () => {
+    // `AWOS_QWEN_BASE_URL` is operator config and these facts are serialized to the UI, so the
+    // endpoint is sanitized here while the adapter and the probe keep the raw one to connect with.
+    const leaky = {
+      ...config,
+      qwenBaseUrl: 'http://operator:hunter2@gateway.internal:8443/v1?api_key=sk-live-1&model=qwen',
+    } as HarnessConfig;
+    const facts = resolveWorkerCapabilityFacts('qwen-local', leaky);
+    assert.equal(
+      facts.target?.endpoint,
+      'http://***@gateway.internal:8443/v1?api_key=***&model=qwen',
+    );
+    assert.equal(
+      workerProfile('qwen-local', leaky).target.endpoint,
+      'http://operator:hunter2@gateway.internal:8443/v1?api_key=sk-live-1&model=qwen',
+      'the connect path keeps the endpoint it was configured with',
+    );
+
+    // A refused resolution reports the target it refused, so that branch needs the same cut.
+    const target: ModelTarget = {
+      id: 'leaky-target', provider: 'openai-compatible', model: 'm',
+      endpoint: 'http://operator:hunter2@gateway.internal:8443/v1', authProfile: null,
+    };
+    const registries: WorkerRegistries = {
+      profiles: [{
+        id: 'qwen-local', label: 'Qwen', adapterId: 'claude-only', targetId: target.id,
+        policy: { permissionModes: ['default'], nativeTurnDiff: false },
+        probe: async () => ({ available: true, detail: 'never called' }),
+      }],
+      targets: [{ target, resolve: () => target }],
+      factories: [{
+        id: 'claude-only', capabilities: emptyCapabilities,
+        supports: (candidate) => candidate.provider === 'claude',
+        create: () => ({ id: 'claude-only' } as WorkerAdapter),
+      }],
+    };
+    const refused = resolveWorkerCapabilityFacts('qwen-local', config, registries);
+    assert.equal(refused.reasonCode, 'unsupported');
+    assert.equal(refused.target?.endpoint, 'http://***@gateway.internal:8443/v1');
+  });
 });
 
 describe('targeted worker probes', () => {
@@ -191,5 +233,48 @@ describe('boundedWorkerDetail', () => {
     const long = boundedWorkerDetail(`x${'y'.repeat(400)}`);
     assert.equal(long.length, 200);
     assert.ok(long.endsWith('\u2026'));
+  });
+
+  test('hides compound credential field names, whatever the vendor spelled them', () => {
+    // `_` is a word character, so a `\b`-anchored name list cannot see the second half of a
+    // compound name. These are the spellings an OAuth-style endpoint actually prints.
+    assert.equal(boundedWorkerDetail('rejected: client_secret=abc123'), 'rejected: client_secret=***');
+    assert.equal(boundedWorkerDetail('rejected: refresh_token=def456'), 'rejected: refresh_token=***');
+    assert.equal(boundedWorkerDetail('access_token=t1 id_token=t2'), 'access_token=*** id_token=***');
+    assert.equal(boundedWorkerDetail('session_token: s auth_token: a'), 'session_token: *** auth_token: ***');
+    assert.equal(boundedWorkerDetail('private-key=pem secret_key=sk'), 'private-key=*** secret_key=***');
+    assert.equal(boundedWorkerDetail('client-id=cid'), 'client-id=***');
+    assert.equal(boundedWorkerDetail('x-api-key: sk-live-1'), 'x-api-key: ***');
+    assert.equal(boundedWorkerDetail('CLIENT_SECRET=ABC'), 'CLIENT_SECRET=***');
+  });
+
+  test('leaves text that only reads like a credential name alone', () => {
+    // Redaction that eats diagnostic detail costs the same reader the answer twice: once
+    // because the worker failed, once because the reason came back mangled.
+    assert.equal(boundedWorkerDetail('spawn failed: /usr/lib/tokenizer'), 'spawn failed: /usr/lib/tokenizer');
+    assert.equal(boundedWorkerDetail('tokens: 42'), 'tokens: 42');
+    assert.equal(boundedWorkerDetail('token_count: 5'), 'token_count: 5');
+    assert.equal(boundedWorkerDetail('sort key=name'), 'sort key=name');
+    assert.equal(boundedWorkerDetail('request_id=42'), 'request_id=42');
+  });
+});
+
+describe('safeWorkerEndpoint', () => {
+  test('keeps the address readable and drops the credential positions', () => {
+    assert.equal(safeWorkerEndpoint('http://127.0.0.1:1234/v1'), 'http://127.0.0.1:1234/v1');
+    assert.equal(
+      safeWorkerEndpoint('http://operator:hunter2@gateway.internal:8443/v1'),
+      'http://***@gateway.internal:8443/v1',
+    );
+    assert.equal(
+      safeWorkerEndpoint('https://gateway.internal/v1?api_key=sk-live-1&model=qwen'),
+      'https://gateway.internal/v1?api_key=***&model=qwen',
+    );
+    assert.equal(
+      safeWorkerEndpoint('https://gateway.internal/v1?access_token=t&trace_id=9'),
+      'https://gateway.internal/v1?access_token=***&trace_id=9',
+    );
+    // Not a URL at all, so there is no userinfo or query to isolate \u2014 the text rules apply.
+    assert.equal(safeWorkerEndpoint('endpoint api_key=sk-live-1'), 'endpoint api_key=***');
   });
 });
