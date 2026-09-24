@@ -181,8 +181,28 @@ const CREDENTIAL_ASSIGNMENT = new RegExp(
   'gi',
 );
 
+/**
+ * The names only a query string may treat as secret, on top of the free-text vocabulary.
+ *
+ * The two vocabularies differ because their contexts do. Free text is prose: `sort key=name`
+ * and `request_id=42` are sentences a probe printed, so `CREDENTIAL_FIELD_NAME` has to leave a
+ * bare `key` alone or it mangles the detail it exists to carry. A query parameter name is not
+ * prose — it is one `name=value` pair the URL delimits, and nothing writes `?key=` except an
+ * API key: it is the Google APIs spelling. The same asymmetry covers `auth`, `sig`, a bare
+ * `signature`, and a session id: ambiguous in a sentence, unambiguous as a parameter name.
+ *
+ * `passwd` and `credentials?` already come from the free-text vocabulary; `pwd`, `session` and
+ * `sid` are added here for the same reason as `key`. Non-credential parameters stay readable:
+ * `model`, `temperature`, `api-version`, `project` and `region` match nothing here, and which
+ * model and host a worker was pointed at is the diagnostic value of a reported endpoint.
+ */
+const QUERY_ONLY_CREDENTIAL_NAME = String.raw`(?:[a-z0-9]+[-_])*(?:key|auth|sig|signature|pwd|session|sid)`;
+
 /** A whole field name, for query parameters whose value the URL delimits rather than a space. */
-const CREDENTIAL_PARAMETER = new RegExp(String.raw`^(?:${CREDENTIAL_FIELD_NAME})$`, 'i');
+const CREDENTIAL_QUERY_PARAMETER = new RegExp(
+  String.raw`^(?:${CREDENTIAL_FIELD_NAME}|${QUERY_ONLY_CREDENTIAL_NAME})$`,
+  'i',
+);
 
 type ResolvedProfileParts =
   | { ok: true; definition: WorkerProfileDefinition; target: ModelTarget; factory: AdapterFactory }
@@ -289,7 +309,7 @@ export function safeWorkerEndpoint(endpoint: string): string {
     // whatever the operator set is about to be shown to someone.
     return boundedWorkerDetail(endpoint);
   }
-  const credentialParameters = [...url.searchParams.keys()].filter((name) => CREDENTIAL_PARAMETER.test(name));
+  const credentialParameters = [...url.searchParams.keys()].filter((name) => CREDENTIAL_QUERY_PARAMETER.test(name));
   if (url.username === '' && url.password === '' && credentialParameters.length === 0) return endpoint;
   if (url.username !== '' || url.password !== '') {
     url.username = '***';

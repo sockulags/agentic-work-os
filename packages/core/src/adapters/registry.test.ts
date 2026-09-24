@@ -308,4 +308,43 @@ describe('safeWorkerEndpoint', () => {
     // Not a URL at all, so there is no userinfo or query to isolate \u2014 the text rules apply.
     assert.equal(safeWorkerEndpoint('endpoint api_key=sk-live-1'), 'endpoint api_key=***');
   });
+
+  test('hides parameter names that only a query string can read as a secret', () => {
+    // `?key=` is the Google APIs spelling of an API key, and a query parameter name carries
+    // none of the prose ambiguity that keeps a bare `key` out of the free-text vocabulary.
+    assert.equal(
+      safeWorkerEndpoint('https://gateway.example/v1?key=sk-live-secret'),
+      'https://gateway.example/v1?key=***',
+    );
+    assert.equal(safeWorkerEndpoint('https://gw/v1?sig=deadbeef'), 'https://gw/v1?sig=***');
+    assert.equal(safeWorkerEndpoint('https://gw/v1?auth=xyz'), 'https://gw/v1?auth=***');
+    assert.equal(safeWorkerEndpoint('https://gw/v1?signature=abc'), 'https://gw/v1?signature=***');
+    assert.equal(safeWorkerEndpoint('https://gw/v1?credential=c'), 'https://gw/v1?credential=***');
+    assert.equal(safeWorkerEndpoint('https://gw/v1?credentials=c'), 'https://gw/v1?credentials=***');
+    assert.equal(safeWorkerEndpoint('https://gw/v1?pwd=p'), 'https://gw/v1?pwd=***');
+    assert.equal(safeWorkerEndpoint('https://gw/v1?session=s'), 'https://gw/v1?session=***');
+    assert.equal(safeWorkerEndpoint('https://gw/v1?sid=s'), 'https://gw/v1?sid=***');
+
+    // The free-text vocabulary still applies in full here.
+    assert.equal(safeWorkerEndpoint('https://gw/v1?token=abc'), 'https://gw/v1?token=***');
+    assert.equal(safeWorkerEndpoint('https://gw/v1?password=p'), 'https://gw/v1?password=***');
+    assert.equal(
+      safeWorkerEndpoint('https://gw/v1?api_key=k&model=q'),
+      'https://gw/v1?api_key=***&model=q',
+    );
+
+    // The stricter query vocabulary must not start eating the addressing detail: which model
+    // and which host a worker was pointed at is why this field is reported at all.
+    assert.equal(
+      safeWorkerEndpoint('https://gw/v1?model=qwen&temperature=0.2&api-version=2024-06&region=eu'),
+      'https://gw/v1?model=qwen&temperature=0.2&api-version=2024-06&region=eu',
+    );
+    assert.equal(
+      safeWorkerEndpoint('https://gw/v1?key=sk-1&model=qwen&temperature=0.2'),
+      'https://gw/v1?key=***&model=qwen&temperature=0.2',
+    );
+
+    // The prose vocabulary is the one that must not gain a bare `key`, and it did not.
+    assert.equal(boundedWorkerDetail('sort key=name'), 'sort key=name');
+  });
 });
