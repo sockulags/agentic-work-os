@@ -2,8 +2,9 @@ import type { CatalogFreshness, CatalogIssue, CatalogLinkedThread, CatalogRunEvi
 import type { EvidenceItem, RunOutcome } from './evidence.js';
 import type { IssueOpenRefusalCode } from './issue-open.js';
 import type { IssueRouteProjection } from './issue-route.js';
-import type { ProjectOverviewAction, ProjectOverviewReasonCode, ProjectOverviewWorker } from './project-overview.js';
+import type { ProjectOverviewAction, ProjectOverviewReasonCode } from './project-overview.js';
 import type { IssueSnapshot, WorkSourceError } from './work.js';
+import type { WorkerDiagnostic } from './worker-health.js';
 
 /** Where the detail body and metadata came from. No value here implies an editable copy. */
 export type ProjectIssueDetailSourceKind = 'github' | 'work-item-snapshot' | 'catalog-metadata';
@@ -31,7 +32,7 @@ export interface ProjectIssueDetailAction {
   reason: string;
   projectAction: string | null;
   responsibleRole: { id: string; label: string } | null;
-  workers: readonly ProjectOverviewWorker[];
+  workers: readonly WorkerDiagnostic[];
   refusal: {
     code: IssueOpenRefusalCode;
     message: string;

@@ -1,5 +1,4 @@
 import type {
-  AgentAvailability,
   CatalogIssue,
   EvidenceItem,
   IssueOpenRefusalCode,
@@ -10,8 +9,8 @@ import type {
   ProjectIssueThreadHistory,
   ProjectIssueTimelineEntry,
   ProjectOverviewReasonCode,
-  ProjectOverviewWorker,
   RunOutcome,
+  WorkerDiagnostic,
   WorkspaceResolution,
   WorkspaceRoleSelection,
 } from '@awos/protocol';
@@ -33,8 +32,8 @@ export interface ProjectIssueDetailProjectionInput {
   source: ProjectIssueDetailSource;
   routeSource: IssueCatalogSource;
   roleSelection: WorkspaceRoleSelection;
-  availability: readonly AgentAvailability[];
-  workerLabels: Readonly<Record<string, string>>;
+  /** One diagnostic per worker any step may allow, projected by the core. */
+  workerDiagnostics: readonly WorkerDiagnostic[];
   linkedThreads: readonly ProjectIssueThreadHistory[];
 }
 
@@ -50,14 +49,14 @@ export function projectProjectIssueDetail(input: ProjectIssueDetailProjectionInp
     issue: input.issue,
     source: input.routeSource,
     roleSelection: input.roleSelection,
-    availability: input.availability,
+    workerDiagnostics: input.workerDiagnostics,
   });
   const sortedThreads = [...input.linkedThreads].sort(compareThreads);
   const visibleThreads = sortedThreads.slice(0, PROJECT_ISSUE_DETAIL_THREAD_LIMIT);
   const canonicalThread = visibleThreads[0] ?? null;
   const canonicalLatestRun = canonicalThread === null ? null : latestRun(canonicalThread);
   const interrupted = canonicalLatestRun?.run.interruptedByRestart === true || canonicalLatestRun?.run.state === 'interrupted';
-  const workers = projectWorkers(route, input.workerLabels);
+  const workers = projectWorkers(route);
   const routingChanged = fetchedRoutingIdentityChanged(input);
   const action = projectAction({
     issue: input.issue,
@@ -90,7 +89,7 @@ export function projectProjectIssueDetail(input: ProjectIssueDetailProjectionInp
 function projectAction(input: {
   issue: CatalogIssue;
   route: ReturnType<typeof projectIssueRoute>;
-  workers: readonly ProjectOverviewWorker[];
+  workers: readonly WorkerDiagnostic[];
   roleSelection: WorkspaceRoleSelection;
   canonicalThread: ProjectIssueThreadHistory | null;
   interrupted: boolean;
@@ -192,19 +191,9 @@ function sameLabels(left: readonly string[], right: readonly string[]): boolean 
   return [...new Set(left)].sort().join('\u0000') === [...new Set(right)].sort().join('\u0000');
 }
 
-function projectWorkers(
-  route: ReturnType<typeof projectIssueRoute>,
-  labels: Readonly<Record<string, string>>,
-): readonly ProjectOverviewWorker[] {
-  return route.action.allowedWorkerProfileIds.map((profileId) => {
-    const fact = route.action.availability.find((candidate) => candidate.profileId === profileId);
-    return {
-      profileId,
-      label: fact?.entries[0]?.label ?? labels[profileId] ?? profileId,
-      // This is a core-projected display fact, not a client-side routing authority.
-      available: fact?.available === true,
-    };
-  });
+/** The panel's workers are the route's diagnostics; the panel derives nothing of its own. */
+function projectWorkers(route: ReturnType<typeof projectIssueRoute>): readonly WorkerDiagnostic[] {
+  return route.action.availability.flatMap((fact) => (fact.diagnostic === null ? [] : [fact.diagnostic]));
 }
 
 function compareThreads(a: ProjectIssueThreadHistory, b: ProjectIssueThreadHistory): number {

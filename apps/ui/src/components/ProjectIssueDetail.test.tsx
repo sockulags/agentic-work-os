@@ -2,7 +2,14 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { createRef } from 'react';
 import { describe, expect, test, vi } from 'vitest';
 import type { ProjectIssueDetail, ProjectOverviewItem } from '@awos/protocol';
+import { workerDiagnostic } from '@/test-harness';
 import { ProjectIssueDetail as ProjectIssueDetailPanel } from './ProjectIssueDetail';
+
+const unavailableClaude = workerDiagnostic('claude', {
+  label: 'Claude',
+  dispatchable: false,
+  reason: 'Claude did not answer the last check.',
+});
 
 const item: ProjectOverviewItem = {
   issue: {
@@ -18,7 +25,7 @@ const item: ProjectOverviewItem = {
   statusLabel: 'Worker unavailable',
   projectAction: 'Implement issue',
   responsibleRole: { id: 'implementer', label: 'Implementer' },
-  workers: [{ profileId: 'claude', label: 'Claude', available: false }],
+  workers: [unavailableClaude],
   action: 'none',
   reasonCode: 'worker-unavailable',
   reason: 'No allowed worker is currently available.',
@@ -63,7 +70,7 @@ const detail: ProjectIssueDetail = {
       projectAction: 'Implement issue',
       responsibleRole: { id: 'implementer', label: 'Implementer' },
       allowedWorkerProfileIds: ['claude'],
-      availability: [{ profileId: 'claude', entries: [], available: false }],
+      availability: [{ profileId: 'claude', diagnostic: unavailableClaude, available: false }],
       unavailableWorkerProfileIds: ['claude'],
       roleSelection: { status: 'selected', roleId: 'implementer', role: { id: 'implementer', label: 'Implementer' } },
     },
@@ -74,7 +81,7 @@ const detail: ProjectIssueDetail = {
     reason: 'No allowed worker is currently available.',
     projectAction: 'Implement issue',
     responsibleRole: { id: 'implementer', label: 'Implementer' },
-    workers: [{ profileId: 'claude', label: 'Claude', available: false }],
+    workers: [unavailableClaude],
     refusal: { code: 'workers-unavailable', message: 'No allowed worker is currently available.' },
   },
   linkedThreads: [{
@@ -127,6 +134,35 @@ describe('ProjectIssueDetail', () => {
     expect(screen.getByText('The run stopped at the dependency gate.')).toBeTruthy();
     expect(screen.getByText('The check was recorded.')).toBeTruthy();
     expect(document.querySelector('.project-issue-detail-body')).toBeTruthy();
+  });
+
+  test('shows the core worker reason and when the check behind it was made', () => {
+    const unchecked = workerDiagnostic('codex', {
+      label: 'Codex',
+      dispatchable: false,
+      reasonCode: 'not-checked',
+      reason: 'Codex has not been checked yet.',
+      health: { state: 'not-checked', reasonCode: 'not-checked', checkedAt: null, stale: false, detail: null },
+    });
+    render(
+      <ProjectIssueDetailPanel
+        detail={{ ...detail, action: { ...detail.action, workers: [unavailableClaude, unchecked] } }}
+        selectedItem={item}
+        error={null}
+        loading={false}
+        actionBusy={false}
+        headingRef={createRef<HTMLHeadingElement>()}
+        onClose={vi.fn()}
+        onAction={vi.fn()}
+      />,
+    );
+
+    // The panel states the core's reason and the time of the observation behind it, and
+    // never derives either from whether the worker appeared in a list.
+    expect(screen.getByText(/Claude did not answer the last check\. Checked /)).toBeTruthy();
+    expect(screen.getByText('Codex has not been checked yet. Never checked.')).toBeTruthy();
+    expect(screen.getByText('Unavailable')).toBeTruthy();
+    expect(screen.getByText('Not checked')).toBeTruthy();
   });
 
   test('keeps Continue/Take actions owned by the overview item instead of recomputing them in the panel', () => {

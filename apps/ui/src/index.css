@@ -1108,6 +1108,16 @@
   font-size: 0.75rem;
 }
 
+.project-issue-detail-worker {
+  display: grid;
+  min-width: 0;
+  gap: 0.15rem;
+}
+
+.project-issue-detail-worker small {
+  color: hsl(var(--text-muted));
+}
+
 .project-issue-detail-workers code,
 .project-issue-detail-thread-meta code,
 .project-issue-detail-refusal code,

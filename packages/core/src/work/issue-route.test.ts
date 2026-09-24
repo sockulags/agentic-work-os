@@ -1,27 +1,19 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type {
-  AgentAvailability,
   CatalogIssue,
   EffectiveWorkspace,
   IssueCatalogSource,
+  WorkerDiagnostic,
+  WorkerProfileId,
   WorkspaceRole,
   WorkspaceRoleSelection,
   WorkspaceProblem,
   WorkspaceResolution,
 } from '@awos/protocol';
+import { testWorkerDiagnostic } from '../testing/worker-diagnostics.js';
 import { explainIssueRoute } from './issue-route-presentation.js';
 import { projectIssueRoute } from './issue-route.js';
-
-const capabilities = {
-  streamingToolOutput: false,
-  streamingText: false,
-  reasoning: false,
-  plans: false,
-  turnDiff: false,
-  approvals: false,
-  resumableSessions: false,
-};
 
 const roles: WorkspaceRole[] = [
   { id: 'maintainer', label: 'Maintainer' },
@@ -97,17 +89,8 @@ function selection(
   return { status, roleId, role };
 }
 
-function availability(profileId: AgentAvailability['profileId'], available: boolean): AgentAvailability {
-  return {
-    agent: profileId,
-    profileId,
-    label: profileId,
-    adapterId: `${profileId}-adapter`,
-    available,
-    detail: available ? 'ready' : 'not installed',
-    capabilities,
-    model: 'test-model',
-  };
+function availability(profileId: WorkerProfileId, available: boolean): WorkerDiagnostic {
+  return testWorkerDiagnostic(profileId, { reachable: available });
 }
 
 function project(
@@ -115,14 +98,14 @@ function project(
   labels = ['bug'],
   freshness: IssueCatalogSource['freshness'] = 'current',
   role = selection('selected', 'maintainer', roles[0]),
-  probes: readonly AgentAvailability[] = [availability('claude', true)],
+  probes: readonly WorkerDiagnostic[] = [availability('claude', true)],
 ): ReturnType<typeof projectIssueRoute> {
   return projectIssueRoute({
     workspace: workspace(routes),
     issue: issue(labels),
     source: source(freshness),
     roleSelection: role,
-    availability: probes,
+    workerDiagnostics: probes,
   });
 }
 
@@ -160,7 +143,7 @@ describe('projectIssueRoute', () => {
     const invalid = invalidWorkspace();
     const result = projectIssueRoute({
       workspace: invalid, issue: issue(['bug']), source: source('current'),
-      roleSelection: selection('needs-selection'), availability: [],
+      roleSelection: selection('needs-selection'), workerDiagnostics: [],
     });
 
     assert.equal(result.route.status, 'invalid-workspace');
@@ -201,9 +184,10 @@ describe('projectIssueRoute', () => {
     assert.equal(available.action.status, 'available');
     assert.deepEqual(available.action.allowedWorkerProfileIds, ['claude', 'codex']);
     assert.deepEqual(available.action.unavailableWorkerProfileIds, ['claude']);
-    assert.deepEqual(available.action.availability.map((fact) => [fact.profileId, fact.available, fact.entries.length]), [
-      ['claude', false, 0], ['codex', true, 1],
-    ]);
+    assert.deepEqual(
+      available.action.availability.map((fact) => [fact.profileId, fact.available, fact.diagnostic?.reasonCode ?? null]),
+      [['claude', false, null], ['codex', true, 'reachable']],
+    );
 
     const unavailable = project(route, ['bug'], 'current', undefined, [availability('claude', false)]);
     assert.equal(unavailable.action.status, 'worker-unavailable');
@@ -226,7 +210,7 @@ describe('projectIssueRoute', () => {
       issue: issueWithProse,
       source: source('current'),
       roleSelection: selection('selected', 'maintainer', roles[0]),
-      availability: [availability('claude', true)],
+      workerDiagnostics: [availability('claude', true)],
     });
     assert.equal(result.route.status, 'routed');
   });
@@ -236,7 +220,7 @@ describe('explainIssueRoute', () => {
   test('keeps every structured reason explainable in plain language', () => {
     const route = [{ id: 'bug', match: { anyLabels: ['bug'] }, step: 'implement' }];
     const projections = [
-      projectIssueRoute({ workspace: invalidWorkspace(), issue: issue(['bug']), source: source('current'), roleSelection: selection('needs-selection'), availability: [] }),
+      projectIssueRoute({ workspace: invalidWorkspace(), issue: issue(['bug']), source: source('current'), roleSelection: selection('needs-selection'), workerDiagnostics: [] }),
       project(route, ['other']),
       project([{ id: 'a', match: { anyLabels: ['bug'] }, step: 'implement' }, { id: 'b', match: { anyLabels: ['bug'] }, step: 'implement' }]),
       project(route, ['bug'], 'cached'),

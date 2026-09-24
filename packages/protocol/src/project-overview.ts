@@ -7,7 +7,7 @@ import type {
 import type { IssueRouteReasonCode } from './issue-route.js';
 import type { WorkspaceRole } from './workspace.js';
 import type { WorkspaceRoleSelection } from './role-selection.js';
-import type { WorkerProfileId } from './events.js';
+import type { WorkerDiagnostic } from './worker-health.js';
 
 /** The three user-facing lanes in the project overview. */
 export type ProjectOverviewGroup = 'available' | 'active' | 'blocked';
@@ -16,13 +16,6 @@ export type ProjectOverviewGroup = 'available' | 'active' | 'blocked';
 export type ProjectOverviewAction = 'take' | 'continue' | 'none';
 
 export type ProjectOverviewReasonCode = IssueRouteReasonCode | 'closed' | 'active' | 'active-interrupted';
-
-/** The worker facts needed for a compact row without exposing adapter/runtime details. */
-export interface ProjectOverviewWorker {
-  profileId: WorkerProfileId;
-  label: string;
-  available: boolean;
-}
 
 /** The local destination that makes Continue source-independent. */
 export interface ProjectOverviewLinkedWork {
@@ -37,7 +30,8 @@ export interface ProjectOverviewItem {
   statusLabel: string;
   projectAction: string | null;
   responsibleRole: { id: string; label: string } | null;
-  workers: readonly ProjectOverviewWorker[];
+  /** One diagnostic per allowed worker, projected by the core rather than the row. */
+  workers: readonly WorkerDiagnostic[];
   action: ProjectOverviewAction;
   reasonCode: ProjectOverviewReasonCode;
   reason: string;

@@ -4,7 +4,7 @@ import type {
   IssueRouteAvailabilityFact,
   IssueRouteProjection,
   IssueRouteProjectionInput,
-  AgentAvailability,
+  WorkerDiagnostic,
   WorkspaceRoleSelection,
   WorkspaceRouteMatch,
   WorkerProfileId,
@@ -64,7 +64,7 @@ export function projectIssueRoute(input: IssueRouteProjectionInput): IssueRouteP
     }, action: { ...baseAction, status: 'not-routed', reason: 'invalid-workspace' } };
   }
 
-  const availability = buildAvailabilityFacts(step.workers, input.availability);
+  const availability = buildAvailabilityFacts(step.workers, input.workerDiagnostics);
   const unavailableWorkerProfileIds = availability
     .filter((fact) => !fact.available)
     .map((fact) => fact.profileId);
@@ -159,17 +159,20 @@ function matches(match: WorkspaceRouteMatch, labels: readonly string[]): boolean
   );
 }
 
+/**
+ * One fact per allowed worker, in the step's declared order.
+ *
+ * Keyed by what the step allows rather than by what the caller supplied: a worker the
+ * projection did not receive a diagnostic for is still reported, as not dispatchable, so no
+ * reader has to interpret a shorter list than the step declared.
+ */
 function buildAvailabilityFacts(
   allowedWorkerProfileIds: readonly WorkerProfileId[],
-  entries: readonly AgentAvailability[],
+  diagnostics: readonly WorkerDiagnostic[],
 ): readonly IssueRouteAvailabilityFact[] {
   return allowedWorkerProfileIds.map((profileId) => {
-    const matchingEntries = entries.filter((entry) => entry.profileId === profileId);
-    return {
-      profileId,
-      entries: matchingEntries,
-      available: matchingEntries.some((entry) => entry.available),
-    };
+    const diagnostic = diagnostics.find((candidate) => candidate.profileId === profileId) ?? null;
+    return { profileId, diagnostic, available: diagnostic?.dispatchable === true };
   });
 }
 

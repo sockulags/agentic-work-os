@@ -491,6 +491,15 @@ export class HarnessServer {
       case 'agents.probe':
         return { type: 'agents.probe', agents: await this.#probeAgents() };
 
+      case 'workers.diagnostics':
+        return {
+          type: 'workers.diagnostics',
+          diagnostics: await orchestrator.workerDiagnostics({
+            ...(msg.profileIds === undefined ? {} : { profileIds: msg.profileIds }),
+            ...(msg.probe === undefined ? {} : { probe: msg.probe }),
+          }),
+        };
+
       default: {
         const exhaustive: never = msg;
         throw new Error(`Unhandled request: ${JSON.stringify(exhaustive)}`);

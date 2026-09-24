@@ -7,7 +7,7 @@ import type {
   ProjectOverviewItem,
   ProjectIssueDetail,
 } from '@awos/protocol';
-import { renderWithHarness } from '@/test-harness';
+import { renderWithHarness, workerDiagnostic } from '@/test-harness';
 import { ProjectOverview } from './ProjectOverview';
 
 const CWD = '/repo';
@@ -44,7 +44,7 @@ function item(overrides: Partial<ProjectOverviewItem> = {}): ProjectOverviewItem
     statusLabel: 'Ready',
     projectAction: 'Implement issue',
     responsibleRole: { id: 'implementer', label: 'Implementer' },
-    workers: [{ profileId: 'claude', label: 'Claude', available: true }],
+    workers: [workerDiagnostic('claude', { label: 'Claude' })],
     action: 'take',
     reasonCode: 'available',
     reason: 'Ready to take: Implement issue.',
@@ -121,8 +121,8 @@ function detailFor(
         projectAction: entry.projectAction,
         responsibleRole: entry.responsibleRole,
         allowedWorkerProfileIds: entry.workers.map((worker) => worker.profileId),
-        availability: entry.workers.map((worker) => ({ profileId: worker.profileId, entries: [], available: worker.available })),
-        unavailableWorkerProfileIds: entry.workers.filter((worker) => !worker.available).map((worker) => worker.profileId),
+        availability: entry.workers.map((worker) => ({ profileId: worker.profileId, diagnostic: worker, available: worker.dispatchable })),
+        unavailableWorkerProfileIds: entry.workers.filter((worker) => !worker.dispatchable).map((worker) => worker.profileId),
         roleSelection: model().roleSelection,
       },
     },
@@ -185,7 +185,7 @@ describe('ProjectOverview', () => {
       model([
         item(),
         item({ issue: issue(2, 'Continue local work'), group: 'active', action: 'continue', statusLabel: 'Interrupted', reasonCode: 'active-interrupted', reason: 'The last local run was interrupted by restart.', linkedWork: { thread: { threadId: 'thread-2', workItemId: 'work-2', title: 'Local', updatedAt: 2 }, latestRun: null } }),
-        item({ issue: issue(3, 'No worker'), group: 'blocked', action: 'none', statusLabel: 'Worker unavailable', reasonCode: 'worker-unavailable', reason: 'No allowed worker is available for the Implementer role.', workers: [{ profileId: 'claude', label: 'Claude', available: false }] }),
+        item({ issue: issue(3, 'No worker'), group: 'blocked', action: 'none', statusLabel: 'Worker unavailable', reasonCode: 'worker-unavailable', reason: 'No allowed worker is available for the Implementer role.', workers: [workerDiagnostic('claude', { label: 'Claude', dispatchable: false, reason: 'Claude did not answer the last check.' })] }),
       ]),
     );
 
@@ -199,6 +199,34 @@ describe('ProjectOverview', () => {
     expect(screen.getByRole('button', { name: 'Take issue' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Continue' })).toBeTruthy();
     expect(screen.getByText('No action available')).toBeTruthy();
+  });
+
+  test('names each unusable worker by the core reason code instead of one blanket refusal', () => {
+    renderOverview(
+      model([
+        item({
+          issue: issue(5, 'Nothing usable'),
+          group: 'blocked',
+          action: 'none',
+          statusLabel: 'Worker unavailable',
+          reasonCode: 'worker-unavailable',
+          reason: 'No allowed worker is available for the Implementer role.',
+          workers: [
+            workerDiagnostic('claude', { label: 'Claude', dispatchable: false, reasonCode: 'unavailable' }),
+            workerDiagnostic('codex', {
+              label: 'Codex',
+              dispatchable: false,
+              reasonCode: 'not-checked',
+              reason: 'Codex has not been checked yet.',
+              health: { state: 'not-checked', reasonCode: 'not-checked', checkedAt: null, stale: false, detail: null },
+            }),
+          ],
+        }),
+      ]),
+    );
+
+    // A worker nobody has checked used to render exactly like a missing binary.
+    expect(screen.getByText('Claude: Unavailable · Codex: Not checked')).toBeTruthy();
   });
 
   test('changes the local active role through the shared role RPC seam', () => {
@@ -274,8 +302,8 @@ describe('ProjectOverview', () => {
     const onOpenThread = vi.fn();
     renderOverview(
       model([item({ workers: [
-        { profileId: 'claude', label: 'Claude', available: true },
-        { profileId: 'codex', label: 'Codex', available: true },
+        workerDiagnostic('claude', { label: 'Claude' }),
+        workerDiagnostic('codex', { label: 'Codex' }),
       ] })]),
       { openIssue, setThreadAgent, startRun },
       onOpenThread,
@@ -297,8 +325,8 @@ describe('ProjectOverview', () => {
     const onOpenThread = vi.fn();
     renderOverview(
       model([item({ workers: [
-        { profileId: 'claude', label: 'Claude', available: true },
-        { profileId: 'codex', label: 'Codex', available: true },
+        workerDiagnostic('claude', { label: 'Claude' }),
+        workerDiagnostic('codex', { label: 'Codex' }),
       ] })]),
       { openIssue, setThreadAgent },
       onOpenThread,
@@ -321,7 +349,7 @@ describe('ProjectOverview', () => {
       reasonCode: 'worker-unavailable',
       statusLabel: 'Worker unavailable',
       reason: 'The overview has not observed the current worker state yet.',
-      workers: [{ profileId: 'claude', label: 'Claude', available: false }],
+      workers: [workerDiagnostic('claude', { label: 'Claude', dispatchable: false })],
     });
     const openProjectIssueDetail = vi.fn().mockResolvedValue({ detail: detailFor(blocked, 'Current detail body.', 'take'), error: null });
     const openIssue = vi.fn().mockResolvedValue({ ok: false, code: 'workers-unavailable', message: 'Core refusal' });
