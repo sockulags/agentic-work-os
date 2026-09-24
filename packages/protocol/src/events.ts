@@ -36,13 +36,11 @@ import type {
   WorkingState,
 } from './evidence.js';
 
-/**
- * Persisted worker/profile id. The historical name is retained because the canonical
- * transcript and RPC protocol deliberately still call this field `agent`.
- */
+/** Provider/attribution identity persisted in the historical `agent` field. */
 export type AgentId = 'claude' | 'codex' | 'qwen-local';
 
-export type WorkerProfileId = AgentId;
+/** Stable, user-selectable identity for one configured worker profile. */
+export type WorkerProfileId = string;
 
 export const AGENT_IDS: readonly AgentId[] = ['claude', 'codex', 'qwen-local'] as const;
 
@@ -59,10 +57,19 @@ export interface HarnessEventMeta {
   threadId: string;
   /** which agent produced this; `null` for harness-level events (e.g. user input) */
   agent: AgentId | null;
+  /** Exact configured profile that produced this record; absent only in legacy transcripts. */
+  profileId?: WorkerProfileId | null;
   /** harness turn id, `null` for events outside a turn (spawn, exit) */
   turnId: string | null;
   /** epoch ms */
   ts: number;
+}
+
+/** Resolve profile identity without rewriting a legacy event's historical provider field. */
+export function eventWorkerProfileId(
+  event: Pick<HarnessEventMeta, 'agent' | 'profileId'>,
+): WorkerProfileId | null {
+  return event.profileId ?? event.agent;
 }
 
 // ---------------------------------------------------------------------------
@@ -426,7 +433,7 @@ export interface RecoveryCorrectionStartedBody {
   refusalAttempt: number;
   correctionIndex: number;
   runId: string;
-  workerProfileId: AgentId;
+  workerProfileId: WorkerProfileId;
   fingerprint: TransitionFingerprint;
   context: RecoveryWorkerContext;
 }
@@ -441,7 +448,7 @@ export interface RecoveryCycleWaitingBody {
   required: TransitionRefusal['required'];
   authority: 'user';
   detail: string;
-  workerProfileId?: AgentId | null;
+  workerProfileId?: WorkerProfileId | null;
 }
 
 /** An append-only escalation when no safe correction may be started. */

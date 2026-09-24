@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import {
   createTransitionEvaluation,
-  type AgentId,
+  type WorkerProfileId,
   type CandidateIdentity,
   type EvidenceItem,
   type RecoveryActionRequest,
@@ -574,7 +574,7 @@ function makeHarness(state: FixtureState, recordAction: (message: string) => voi
     recordEvidence: async () => undefined,
     retainContext: async () => undefined,
     amendRetained: async () => undefined,
-    startRecovery: async (input: { agent: AgentId }) => {
+    startRecovery: async (input: { agent: WorkerProfileId }) => {
       recordAction(`Start correction with ${input.agent}`);
     },
     applyRecoveryAction: async (action: RecoveryActionRequest) => {

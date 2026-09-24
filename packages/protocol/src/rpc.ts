@@ -6,10 +6,9 @@
  * the core, where it can be tested without a browser.
  */
 
-import type { AgentId, ApprovalRequestedBody, HarnessEvent, PlanItem } from './events.js';
+import type { AgentId, ApprovalRequestedBody, HarnessEvent, PlanItem, WorkerProfileId } from './events.js';
 import type { AgentCapabilities } from './capabilities.js';
 import type { CatalogRunEvidence } from './catalog.js';
-import type { WorkerProfileId } from './events.js';
 import type { WorkspaceResolution } from './workspace.js';
 import type { WorkspaceRoleSelection } from './role-selection.js';
 import type { WorkItem, WorkSourceError } from './work.js';
@@ -47,11 +46,11 @@ export interface ThreadSummary {
   createdAt: number;
   updatedAt: number;
   /** Agent that will take the next turn unless the UI overrides it. */
-  activeAgent: AgentId;
-  /** Native session ids, present once each agent has run at least once. */
-  nativeSessions: Partial<Record<AgentId, string>>;
-  /** Highest `seq` each agent has been shown. Drives replay. */
-  watermarks: Record<AgentId, number>;
+  activeAgent: WorkerProfileId;
+  /** Native session ids, present once each configured profile has run at least once. */
+  nativeSessions: Partial<Record<WorkerProfileId, string>>;
+  /** Highest `seq` each configured profile has been shown. Drives replay. */
+  watermarks: Record<WorkerProfileId, number>;
   eventCount: number;
   /**
    * The work item this thread is answering, or null for a free-form thread.
@@ -78,23 +77,23 @@ export interface ThreadRuntimeState {
    * Kept for the single-lane case, which is still the default. `busy` is the authority:
    * with lanes, more than one agent can be working.
    */
-  busyWith: AgentId | null;
-  /** Every agent with a turn in flight right now. */
-  busy: AgentId[];
+  busyWith: WorkerProfileId | null;
+  /** Every configured profile with a turn in flight right now. */
+  busy: WorkerProfileId[];
   /** Run history projected from the ledger with the exact live-runtime overlay. */
   runStates: CatalogRunEvidence[];
   /** Durable refused-transition recovery projections, folded from the same event log. */
   recovery: RecoveryCycle[];
   /** Where each agent's working copy is, for the agents that have a lane. */
-  lanes: Partial<Record<AgentId, string>>;
+  lanes: Partial<Record<WorkerProfileId, string>>;
   currentTurnId: string | null;
   /** Agent that owns the most recently started turn, reconstructed from the event log. */
-  lastTurnAgent: AgentId | null;
+  lastTurnAgent: WorkerProfileId | null;
   plan: PlanItem[];
   /** Latest cumulative diff for the current turn, or null when the agent reports none. */
   diff: string | null;
   pendingApprovals: ApprovalRequestedBody[];
-  agents: Record<AgentId, { status: string; model: string | null }>;
+  agents: Record<WorkerProfileId, { status: string; model: string | null }>;
 }
 
 /**
@@ -133,10 +132,10 @@ export interface AgentAvailability {
 export type ClientRequest =
   | { type: 'hello'; token: string }
   | { type: 'thread.list' }
-  | { type: 'thread.create'; cwd: string; title?: string; agent?: AgentId }
+  | { type: 'thread.create'; cwd: string; title?: string; agent?: WorkerProfileId }
   | { type: 'thread.open'; threadId: string }
   | { type: 'thread.delete'; threadId: string }
-  | { type: 'thread.setAgent'; threadId: string; agent: AgentId }
+  | { type: 'thread.setAgent'; threadId: string; agent: WorkerProfileId }
   | { type: 'thread.setPermissionMode'; threadId: string; mode: PermissionMode }
   | { type: 'thread.setParallel'; threadId: string; parallel: boolean }
   /**
@@ -145,9 +144,9 @@ export type ClientRequest =
    * `override` is only accepted where the workspace permits one, and a reason is required
    * because it goes into the record next to what it bypassed.
    */
-  | { type: 'lane.integrate'; threadId: string; agent: AgentId; override?: { reason: string } }
+  | { type: 'lane.integrate'; threadId: string; agent: WorkerProfileId; override?: { reason: string } }
   /** What the integration gate would decide about a lane right now. */
-  | { type: 'gate.get'; threadId: string; agent: AgentId }
+  | { type: 'gate.get'; threadId: string; agent: WorkerProfileId }
   /** Core-owned planning attempt; the result is recorded before any future state change. */
   | {
       type: 'transition.plan';
@@ -168,14 +167,14 @@ export type ClientRequest =
       transitionId: string;
       expectedAttempt: number;
       expectedHead?: number;
-      agent: AgentId;
+      agent: WorkerProfileId;
       cycleId?: string;
     }
   /** Run a check the workspace names, where the agent's work is. */
-  | { type: 'verify.run'; threadId: string; agent: AgentId; name: string }
-  | { type: 'turn.send'; threadId: string; agent: AgentId; text: string }
+  | { type: 'verify.run'; threadId: string; agent: WorkerProfileId; name: string }
+  | { type: 'turn.send'; threadId: string; agent: WorkerProfileId; text: string }
   /** Interrupt one agent, or every working agent when none is named. */
-  | { type: 'turn.interrupt'; threadId: string; agent?: AgentId }
+  | { type: 'turn.interrupt'; threadId: string; agent?: WorkerProfileId }
   | { type: 'approval.resolve'; threadId: string; approvalId: string; optionId: string }
   | { type: 'context.get'; threadId: string }
   | { type: 'context.set'; threadId: string; text: string }
@@ -202,7 +201,7 @@ export type ClientRequest =
    * work the issue asked for, and its context and outcome are recorded as such. A
    * message that is merely conversation should not have to pretend otherwise.
    */
-  | { type: 'work.start'; threadId: string; agent: AgentId; text: string }
+  | { type: 'work.start'; threadId: string; agent: WorkerProfileId; text: string }
   /** Read the persisted workspace issue catalog without contacting GitHub. */
   | { type: 'catalog.get'; threadId?: string; cwd?: string }
   /** Explicitly refresh the workspace issue catalog through the user's `gh` CLI. */
@@ -409,7 +408,7 @@ export type ServerResponseBody =
   | {
       type: 'gate';
       threadId: string;
-      agent: AgentId;
+      agent: WorkerProfileId;
       allowed: boolean;
       requirements: RequirementResult[];
       candidate: WorkingState;

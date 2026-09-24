@@ -34,7 +34,7 @@ const target: ModelTarget = {
 
 function context(events: AdapterEvent[], permissionMode: PermissionMode = 'default', resumeSessionId: string | null = null): AdapterContext {
   return {
-    threadId: 't1', cwd: process.cwd(), config: config(), permissionMode,
+    threadId: 't1', workerProfileId: 'qwen-local', agentId: 'qwen-local', cwd: process.cwd(), config: config(), permissionMode,
     permissionBridge: {} as AdapterContext['permissionBridge'], resumeSessionId,
     emit: (event) => events.push(event), onSessionId: () => {},
   };

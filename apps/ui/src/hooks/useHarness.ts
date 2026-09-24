@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AgentAvailability,
-  AgentId,
   HarnessEvent,
   PermissionMode,
   ThreadRuntimeState,
@@ -21,6 +20,7 @@ import type {
   ProjectOverview,
   ProjectIssueDetail,
   RecoveryActionRequest,
+  WorkerProfileId,
 } from '@awos/protocol';
 import type { ClientRequest, ServerResponseBody } from '@awos/protocol';
 import { HarnessClient, resolveClientOptions, type ConnectionStatus } from '@/lib/client';
@@ -111,7 +111,7 @@ export interface WorkView {
  * right now, which is a fact about the filesystem and not about the event log.
  */
 export interface GateView {
-  agent: AgentId;
+  agent: WorkerProfileId;
   allowed: boolean;
   requirements: RequirementResult[];
   candidate: WorkingState;
@@ -144,7 +144,7 @@ export function useHarness() {
   const [roleSelectionSave, setRoleSelectionSave] = useState<WorkspaceRoleSave>('saved');
   const [roleSelectionError, setRoleSelectionError] = useState<string | null>(null);
   const [work, setWork] = useState<WorkView | null>(null);
-  const [gates, setGates] = useState<Partial<Record<AgentId, GateView>>>({});
+  const [gates, setGates] = useState<Partial<Record<WorkerProfileId, GateView>>>({});
   const [projectOverview, setProjectOverview] = useState<ProjectOverviewView | null>(null);
 
   // Read inside the push handler without making it a dependency, which would tear down
@@ -516,7 +516,7 @@ export function useHarness() {
 
   /** Start a run: the same dispatch as a message, recorded as the work the issue asked for. */
   const startRun = useCallback(
-    async (text: string, agent: AgentId) => {
+    async (text: string, agent: WorkerProfileId) => {
       const threadId = activeThreadRef.current;
       if (threadId === null) return;
       await client.request({ type: 'work.start', threadId, agent, text });
@@ -601,7 +601,7 @@ export function useHarness() {
       transitionId: string;
       expectedAttempt: number;
       expectedHead: number;
-      agent: AgentId;
+      agent: WorkerProfileId;
       cycleId?: string;
     }) => {
       const threadId = activeThreadRef.current;
@@ -645,7 +645,7 @@ export function useHarness() {
    * it can change without the user doing anything visible.
    */
   const readGate = useCallback(
-    async (agent: AgentId) => {
+    async (agent: WorkerProfileId) => {
       const threadId = activeThreadRef.current;
       if (threadId === null) return;
       const res = await client.request({ type: 'gate.get', threadId, agent }).catch(() => null);
@@ -665,7 +665,7 @@ export function useHarness() {
 
   /** Run a named check where the agent's work is. Its result arrives as an event. */
   const runCheck = useCallback(
-    async (agent: AgentId, name: string) => {
+    async (agent: WorkerProfileId, name: string) => {
       const threadId = activeThreadRef.current;
       if (threadId === null) return;
       await client.request({ type: 'verify.run', threadId, agent, name });
@@ -791,7 +791,7 @@ export function useHarness() {
   }, [status, refreshThreads, probeAgents, openThread]);
 
   const createThread = useCallback(
-    async (cwd: string, agent: AgentId) => {
+    async (cwd: string, agent: WorkerProfileId) => {
       const res = await client.request({ type: 'thread.create', cwd, agent });
       if (res.type !== 'thread.created') return;
       setThreads((prev) => normalizeThreads([...prev, res.thread]));
@@ -808,7 +808,7 @@ export function useHarness() {
   );
 
   const send = useCallback(
-    async (text: string, agent: AgentId) => {
+    async (text: string, agent: WorkerProfileId) => {
       const threadId = activeThreadRef.current;
       if (threadId === null) return;
       await client.request({ type: 'turn.send', threadId, agent, text });
@@ -817,7 +817,7 @@ export function useHarness() {
   );
 
   const interrupt = useCallback(
-    async (agent?: AgentId) => {
+    async (agent?: WorkerProfileId) => {
       const threadId = activeThreadRef.current;
       if (threadId === null) return;
       await client.request({ type: 'turn.interrupt', threadId, agent });
@@ -835,7 +835,7 @@ export function useHarness() {
   );
 
   const integrateLane = useCallback(
-    async (agent: AgentId, override?: { reason: string }) => {
+    async (agent: WorkerProfileId, override?: { reason: string }) => {
       const threadId = activeThreadRef.current;
       if (threadId === null) return;
       await client.request({
@@ -858,7 +858,7 @@ export function useHarness() {
   );
 
   const setThreadAgent = useCallback(
-    async (threadId: string, agent: AgentId) => {
+    async (threadId: string, agent: WorkerProfileId) => {
       const response = await client.request({ type: 'thread.setAgent', threadId, agent });
       if (response.type !== 'ok') throw new Error('The harness returned an unexpected worker-selection response.');
     },
@@ -866,7 +866,7 @@ export function useHarness() {
   );
 
   const setAgent = useCallback(
-    async (agent: AgentId) => {
+    async (agent: WorkerProfileId) => {
       const threadId = activeThreadRef.current;
       if (threadId === null) return;
       await setThreadAgent(threadId, agent);

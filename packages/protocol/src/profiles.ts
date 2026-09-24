@@ -1,5 +1,5 @@
 import type { PermissionMode } from './rpc.js';
-import type { AgentId } from './events.js';
+import type { AgentId, WorkerProfileId } from './events.js';
 import type { WorkerCapabilities } from './capabilities.js';
 
 export type ModelProvider = 'claude' | 'codex' | 'openai-compatible';
@@ -19,7 +19,9 @@ export interface WorkerProfilePolicy {
 
 /** Static identity and effective target metadata for one selectable worker. */
 export interface WorkerProfile {
-  id: AgentId;
+  id: WorkerProfileId;
+  /** Closed provider/attribution identity kept in persisted event.agent. */
+  agent: AgentId;
   label: string;
   adapterId: string;
   target: ModelTarget;

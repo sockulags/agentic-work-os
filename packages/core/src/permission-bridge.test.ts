@@ -57,7 +57,7 @@ class McpHarness {
   }
 }
 
-function launchMcp(threadId: string, token: string, port: number): McpHarness {
+function launchMcp(threadId: string, token: string, port: number, workerProfileId = 'claude'): McpHarness {
   child = spawn(process.execPath, [MCP_ENTRY], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: {
@@ -65,6 +65,7 @@ function launchMcp(threadId: string, token: string, port: number): McpHarness {
       AWOS_BRIDGE_PORT: String(port),
       AWOS_BRIDGE_TOKEN: token,
       AWOS_THREAD_ID: threadId,
+      AWOS_WORKER_PROFILE_ID: workerProfileId,
       AWOS_LOG_LEVEL: 'error',
     },
   });
@@ -232,6 +233,43 @@ describe('permission bridge round trip', () => {
 
     assert.equal(readDecision(await first)['behavior'], 'allow');
     assert.equal(readDecision(await second)['behavior'], 'deny');
+  });
+
+  test('the same thread keeps separate profile bridge registrations', async () => {
+    const threadId = randomUUID();
+    const seen: string[] = [];
+    bridge.registerThread(threadId, 'claude-build', async (req) => {
+      seen.push(`build:${req.workerProfileId}`);
+      return { behavior: 'allow' };
+    });
+    bridge.registerThread(threadId, 'claude-review', async (req) => {
+      seen.push(`review:${req.workerProfileId}`);
+      return { behavior: 'allow' };
+    });
+
+    const build = launchMcp(threadId, bridge.token, bridge.port, 'claude-build');
+    await build.request('initialize', {});
+    assert.equal(
+      readDecision(await build.request('tools/call', {
+        name: CLAUDE_PERMISSION_TOOL_NAME,
+        arguments: { tool_name: 'Bash', input: { profile: 'build' } },
+      }))['behavior'],
+      'allow',
+    );
+    child?.kill();
+    child = null;
+
+    const review = launchMcp(threadId, bridge.token, bridge.port, 'claude-review');
+    await review.request('initialize', {});
+    assert.equal(
+      readDecision(await review.request('tools/call', {
+        name: CLAUDE_PERMISSION_TOOL_NAME,
+        arguments: { tool_name: 'Bash', input: { profile: 'review' } },
+      }))['behavior'],
+      'allow',
+    );
+
+    assert.deepEqual(seen, ['build:claude-build', 'review:claude-review']);
   });
 });
 

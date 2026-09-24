@@ -25,7 +25,8 @@ export interface AdapterFactory {
 }
 
 export interface WorkerProfileDefinition {
-  readonly id: AgentId;
+  readonly id: WorkerProfileId;
+  readonly agent: AgentId;
   readonly label: string;
   readonly adapterId: string;
   readonly targetId: string;
@@ -90,17 +91,17 @@ export const ADAPTER_FACTORY_REGISTRY: readonly AdapterFactory[] = [
 /** Static selectable profiles. Entries reference factories and targets by stable id. */
 export const WORKER_PROFILE_REGISTRY: readonly WorkerProfileDefinition[] = [
   {
-    id: 'claude', label: 'Claude', adapterId: 'claude-code-cli', targetId: 'claude-cli',
+    id: 'claude', agent: 'claude', label: 'Claude', adapterId: 'claude-code-cli', targetId: 'claude-cli',
     policy: { permissionModes: PERMISSION_MODES, nativeTurnDiff: CLAUDE_CAPABILITIES.turnDiff },
     probe: cliProbe((config) => config.claudeBin, (config) => [...config.claudeBinArgs, '--version']),
   },
   {
-    id: 'codex', label: 'Codex', adapterId: 'codex-app-server', targetId: 'codex-cli',
+    id: 'codex', agent: 'codex', label: 'Codex', adapterId: 'codex-app-server', targetId: 'codex-cli',
     policy: { permissionModes: PERMISSION_MODES, nativeTurnDiff: CODEX_CAPABILITIES.turnDiff },
     probe: cliProbe((config) => config.codexBin, (config) => [...config.codexBinArgs, '--version']),
   },
   {
-    id: 'qwen-local', label: 'Qwen Code · Qwen3.8 local', adapterId: 'qwen-code-sdk', targetId: 'qwen38-local',
+    id: 'qwen-local', agent: 'qwen-local', label: 'Qwen Code · Qwen3.8 local', adapterId: 'qwen-code-sdk', targetId: 'qwen38-local',
     policy: { permissionModes: PERMISSION_MODES, nativeTurnDiff: false },
     probe: async (_config, target) => probeQwenEndpoint(target.endpoint ?? 'http://127.0.0.1:1234/v1'),
   },
@@ -222,7 +223,7 @@ type ResolvedProfileParts =
  * an answer it has to report, not an exception it should convert back into one.
  * `resolveParts` keeps the throwing contract for the call paths that cannot continue.
  */
-function tryResolveParts(id: AgentId, config: HarnessConfig, registries: WorkerRegistries): ResolvedProfileParts {
+function tryResolveParts(id: WorkerProfileId, config: HarnessConfig, registries: WorkerRegistries): ResolvedProfileParts {
   const definition = registries.profiles.find((candidate) => candidate.id === id) ?? null;
   if (definition === null) {
     return { ok: false, configured: false, message: `No worker profile is registered for ${id}.`, definition: null, target: null };
@@ -251,7 +252,7 @@ function tryResolveParts(id: AgentId, config: HarnessConfig, registries: WorkerR
   return { ok: true, definition, target, factory };
 }
 
-function resolveParts(id: AgentId, config: HarnessConfig, registries: WorkerRegistries): {
+function resolveParts(id: WorkerProfileId, config: HarnessConfig, registries: WorkerRegistries): {
   definition: WorkerProfileDefinition;
   target: ModelTarget;
   factory: AdapterFactory;
@@ -261,12 +262,12 @@ function resolveParts(id: AgentId, config: HarnessConfig, registries: WorkerRegi
   return { definition: parts.definition, target: parts.target, factory: parts.factory };
 }
 
-export function workerProfile(id: AgentId, config: HarnessConfig, registries: WorkerRegistries = DEFAULT_WORKER_REGISTRIES): WorkerProfile {
+export function workerProfile(id: WorkerProfileId, config: HarnessConfig, registries: WorkerRegistries = DEFAULT_WORKER_REGISTRIES): WorkerProfile {
   const { definition, target, factory } = resolveParts(id, config, registries);
-  return { id: definition.id, label: definition.label, adapterId: factory.id, target, capabilities: factory.capabilities, policy: definition.policy };
+  return { id: definition.id, agent: definition.agent, label: definition.label, adapterId: factory.id, target, capabilities: factory.capabilities, policy: definition.policy };
 }
 
-export function createWorkerAdapter(id: AgentId, context: AdapterContext, registries: WorkerRegistries = DEFAULT_WORKER_REGISTRIES): WorkerAdapter {
+export function createWorkerAdapter(id: WorkerProfileId, context: AdapterContext, registries: WorkerRegistries = DEFAULT_WORKER_REGISTRIES): WorkerAdapter {
   const { target, factory } = resolveParts(id, context.config, registries);
   return factory.create(context, target);
 }
@@ -410,8 +411,9 @@ export async function probeWorkerProfiles(
   return observations.flatMap((observation) => {
     const facts = resolveWorkerCapabilityFacts(observation.profileId, config, registries);
     if (facts.adapterId === null || facts.capabilities === null || facts.target === null) return [];
+    const profile = workerProfile(observation.profileId, config, registries);
     return [{
-      agent: facts.profileId, profileId: facts.profileId, label: facts.label, adapterId: facts.adapterId,
+      agent: profile.agent, profileId: facts.profileId, label: facts.label, adapterId: facts.adapterId,
       available: observation.reachable, detail: observation.detail, capabilities: facts.capabilities,
       model: facts.target.model, checkedAt: observation.checkedAt,
     }];

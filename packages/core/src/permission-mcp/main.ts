@@ -30,6 +30,7 @@ const MCP_PROTOCOL_VERSION = '2024-11-05';
 const BRIDGE_PORT = Number.parseInt(process.env['AWOS_BRIDGE_PORT'] ?? '', 10);
 const BRIDGE_TOKEN = process.env['AWOS_BRIDGE_TOKEN'] ?? '';
 const THREAD_ID = process.env['AWOS_THREAD_ID'] ?? '';
+const WORKER_PROFILE_ID = process.env['AWOS_WORKER_PROFILE_ID'] || 'claude';
 
 interface PendingRequest {
   resolve: (decision: BridgeResponse) => void;
@@ -110,7 +111,12 @@ class BridgeClient {
 
       socket.on('connect', () => {
         socket.write(
-          encodeJsonLine({ type: 'hello', token: BRIDGE_TOKEN, threadId: THREAD_ID }),
+          encodeJsonLine({
+            type: 'hello',
+            token: BRIDGE_TOKEN,
+            threadId: THREAD_ID,
+            workerProfileId: WORKER_PROFILE_ID,
+          }),
         );
       });
     });
@@ -216,8 +222,8 @@ async function handleToolCall(id: unknown, params: unknown): Promise<void> {
 }
 
 function main(): void {
-  if (!Number.isFinite(BRIDGE_PORT) || BRIDGE_TOKEN === '' || THREAD_ID === '') {
-    log.error('missing AWOS_BRIDGE_PORT / AWOS_BRIDGE_TOKEN / AWOS_THREAD_ID');
+  if (!Number.isFinite(BRIDGE_PORT) || BRIDGE_TOKEN === '' || THREAD_ID === '' || WORKER_PROFILE_ID === '') {
+    log.error('missing AWOS_BRIDGE_PORT / AWOS_BRIDGE_TOKEN / AWOS_THREAD_ID / AWOS_WORKER_PROFILE_ID');
     process.exit(2);
   }
 

@@ -17,7 +17,7 @@
  */
 
 import type { EvidenceKind, Enforcement, PixelCaptureContract } from './evidence.js';
-import type { AgentId, WorkerProfileId } from './events.js';
+import type { WorkerProfileId } from './events.js';
 
 /**
  * The version this build understands.
@@ -246,7 +246,7 @@ export interface EffectiveWorkspace {
   name: string;
   repository: WorkspaceRepository;
   /** Adapters this project allows. A turn to any other agent is refused. */
-  agents: AgentId[];
+  agents: WorkerProfileId[];
   setup: WorkspaceSetup;
   verify: VerifyCommand[];
   integration: WorkspaceIntegration;

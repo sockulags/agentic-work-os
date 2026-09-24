@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, CircleDot, ExternalLink, Grid2X2, RefreshCw, XCircle } from 'lucide-react';
 import type {
-  AgentId,
+  WorkerProfileId,
   IssuePreparation,
   ProjectOverview as ProjectOverviewModel,
   ProjectOverviewGroup,
@@ -50,7 +50,7 @@ interface DetailSelection {
 export function ProjectOverview({ cwd, onOpenThread }: ProjectOverviewProps): React.JSX.Element {
   const h = useHarnessContext();
   const [pending, setPending] = useState<PendingPreparation | null>(null);
-  const [selectedWorker, setSelectedWorker] = useState<AgentId | null>(null);
+  const [selectedWorker, setSelectedWorker] = useState<WorkerProfileId | null>(null);
   const [actionBusy, setActionBusy] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [preparationError, setPreparationError] = useState<string | null>(null);
@@ -531,13 +531,13 @@ function PreparationDialog({
   workerLabels,
 }: {
   pending: PendingPreparation | null;
-  selectedWorker: AgentId | null;
-  onSelectWorker: (profileId: AgentId) => void;
+  selectedWorker: WorkerProfileId | null;
+  onSelectWorker: (profileId: WorkerProfileId) => void;
   onClose: () => void;
   onConfirm: () => void;
   preparationError: string | null;
   confirmBusy: boolean;
-  workerLabels: Map<AgentId, string>;
+  workerLabels: Map<WorkerProfileId, string>;
 }): React.JSX.Element {
   const preparation = pending?.preparation ?? null;
   const isTake = preparation?.mode === 'taken';

@@ -2,6 +2,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { LineDecoder, encodeJsonLine } from './util/jsonl.js';
 import { createLogger } from './util/logger.js';
+import type { WorkerProfileId } from '@awos/protocol';
 
 const log = createLogger('permission-bridge');
 
@@ -19,6 +20,8 @@ const log = createLogger('permission-bridge');
 
 export interface BridgeRequest {
   threadId: string;
+  /** Exact configured profile whose Claude process opened the bridge connection. */
+  workerProfileId?: WorkerProfileId;
   toolName: string;
   input: Record<string, unknown>;
   toolUseId: string | null;
@@ -40,6 +43,7 @@ interface HelloFrame {
    */
   token: unknown;
   threadId: string;
+  workerProfileId?: unknown;
 }
 
 interface RequestFrame {
@@ -69,7 +73,8 @@ function asInboundFrame(value: unknown): InboundFrame | null {
 
   if (value['type'] === 'hello') {
     if (typeof value['threadId'] !== 'string') return null;
-    return { type: 'hello', token: value['token'], threadId: value['threadId'] };
+    if (value['workerProfileId'] !== undefined && typeof value['workerProfileId'] !== 'string') return null;
+    return { type: 'hello', token: value['token'], threadId: value['threadId'], workerProfileId: value['workerProfileId'] };
   }
 
   if (value['type'] === 'request') {
@@ -95,7 +100,7 @@ export class PermissionBridge {
   readonly token: string;
   #server: Server | null = null;
   #port = 0;
-  /** One handler per thread; the Claude adapter registers on start. */
+  /** One handler per thread/profile; multiple profiles may share one adapter implementation. */
   readonly #handlers = new Map<string, BridgeHandler>();
   readonly #sockets = new Set<Socket>();
 
@@ -131,12 +136,27 @@ export class PermissionBridge {
     return this.#port;
   }
 
-  registerThread(threadId: string, handler: BridgeHandler): void {
-    this.#handlers.set(threadId, handler);
+  registerThread(threadId: string, handler: BridgeHandler): void;
+  registerThread(threadId: string, workerProfileId: WorkerProfileId, handler: BridgeHandler): void;
+  registerThread(
+    threadId: string,
+    workerProfileIdOrHandler: WorkerProfileId | BridgeHandler,
+    maybeHandler?: BridgeHandler,
+  ): void {
+    const workerProfileId = typeof workerProfileIdOrHandler === 'function' ? 'claude' : workerProfileIdOrHandler;
+    const handler = typeof workerProfileIdOrHandler === 'function' ? workerProfileIdOrHandler : maybeHandler;
+    if (!handler) throw new Error('A permission bridge handler is required.');
+    this.#handlers.set(this.#key(threadId, workerProfileId), handler);
   }
 
-  unregisterThread(threadId: string): void {
-    this.#handlers.delete(threadId);
+  unregisterThread(threadId: string, workerProfileId?: WorkerProfileId): void {
+    if (workerProfileId !== undefined) {
+      this.#handlers.delete(this.#key(threadId, workerProfileId));
+      return;
+    }
+    for (const key of this.#handlers.keys()) {
+      if (key.startsWith(`${threadId}\u0000`)) this.#handlers.delete(key);
+    }
   }
 
   async close(): Promise<void> {
@@ -155,6 +175,7 @@ export class PermissionBridge {
     const decoder = new LineDecoder();
     let authenticated = false;
     let threadId: string | null = null;
+    let workerProfileId: WorkerProfileId | null = null;
     const connectionId = randomUUID().slice(0, 8);
 
     const send = (payload: unknown): void => {
@@ -193,13 +214,16 @@ export class PermissionBridge {
           }
           authenticated = true;
           threadId = frame.threadId;
-          log.debug('mcp client attached', { connectionId, threadId });
+          workerProfileId = typeof frame.workerProfileId === 'string' && frame.workerProfileId !== ''
+            ? frame.workerProfileId
+            : 'claude';
+          log.debug('mcp client attached', { connectionId, threadId, workerProfileId });
           send({ type: 'ready' });
           continue;
         }
 
         if (frame.type !== 'request') return fail('unexpected frame after hello');
-        void this.#dispatch(frame, threadId, send);
+        void this.#dispatch(frame, threadId, workerProfileId, send);
       }
     });
 
@@ -215,13 +239,16 @@ export class PermissionBridge {
   async #dispatch(
     frame: RequestFrame,
     threadId: string | null,
+    workerProfileId: WorkerProfileId | null,
     send: (payload: unknown) => void,
   ): Promise<void> {
     const respond = (decision: BridgeDecision): void => {
       send({ type: 'response', requestId: frame.requestId, ...decision });
     };
 
-    const handler = threadId === null ? undefined : this.#handlers.get(threadId);
+    const handler = threadId === null || workerProfileId === null
+      ? undefined
+      : this.#handlers.get(this.#key(threadId, workerProfileId));
     if (!handler) {
       // No handler means the thread was torn down while Claude was still running.
       // Denying is the only safe answer: we cannot ask anyone.
@@ -230,16 +257,22 @@ export class PermissionBridge {
     }
 
     try {
-      const decision = await handler({
+      const request: BridgeRequest = {
         threadId: threadId as string,
         toolName: frame.toolName,
         input: frame.input ?? {},
         toolUseId: frame.toolUseId ?? null,
-      });
+      };
+      if (workerProfileId !== null && workerProfileId !== 'claude') request.workerProfileId = workerProfileId;
+      const decision = await handler(request);
       respond(decision);
     } catch (err) {
       log.error('handler threw', { message: (err as Error).message });
       respond({ behavior: 'deny', message: `Harness error: ${(err as Error).message}` });
     }
+  }
+
+  #key(threadId: string, workerProfileId: WorkerProfileId): string {
+    return `${threadId}\u0000${workerProfileId}`;
   }
 }

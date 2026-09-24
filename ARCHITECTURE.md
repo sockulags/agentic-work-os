@@ -18,7 +18,7 @@ These came out of the protocol research and shaped everything below.
 | Claude CLI speaks a **flat event stream** (`system`/`assistant`/`user`/`stream_event`/`result`) | Adapter is a pure event translator; no id correlation except for control requests. |
 | Claude CLI has **no callback channel for approvals** — the documented path is `--permission-prompt-tool <mcp tool>` | The harness ships its own MCP server whose only job is to relay approval requests back to the UI. |
 | Codex delivers approvals as a **server→client JSON-RPC request** (`item/permissions/requestApproval`) | Adapter must be able to *respond* to inbound requests, not just send them. |
-| Agents are **stateful per process** | One process per (thread × agent). Processes are lazy — spawned on first turn for that agent. |
+| Worker profiles are **stateful per process** | One process per (thread × WorkerProfileId). Processes are lazy — spawned on first turn for that profile. |
 
 The asymmetry in approvals is the single largest source of complexity. It is fully
 contained in the adapters; everything above them sees one `approval.requested` event.
@@ -66,7 +66,8 @@ type HarnessEvent = {
   id: string;          // uuid
   seq: number;         // monotonic per thread — the canonical ordering
   threadId: string;
-  agent: AgentId;      // 'claude' | 'codex' | 'qwen-local'
+  agent: AgentId | null; // closed provider/attribution union; never a state owner
+  profileId?: WorkerProfileId | null; // exact configured profile; absent only in legacy logs
   turnId: string | null;
   ts: number;
 } & HarnessEventBody;
@@ -100,6 +101,23 @@ Two rules keep this honest:
 2. **`seq` is assigned by the store, not the adapter.** It is the single ordering
    authority across two concurrent processes.
 
+### Identity ownership
+
+`WorkerProfileId` is the stable, user-selectable identity of one configured worker. It is
+separate from `AgentId`, which remains the closed provider/attribution union persisted in
+the historical `agent` field. Provider connection ids, model-target ids, and adapter-factory
+ids are metadata used to construct a profile; they never own state.
+
+| Concern | State owner | Compatibility rule |
+| --- | --- | --- |
+| Events | `profileId` | New worker events carry the exact profile; a legacy event with no `profileId` resolves its `agent` value in memory. `agent` is never renamed or rewritten. |
+| Native sessions | `ThreadSummary.nativeSessions[WorkerProfileId]` | A session belongs to one configured profile even when profiles share a provider, target, or adapter. |
+| Replay watermarks | `ThreadSummary.watermarks[WorkerProfileId]` and replay filtering by `profileId` | Each profile advances its own watermark and receives the other profiles' unseen history. |
+| Approvals | `(threadId, WorkerProfileId)` in the permission bridge and pending approval state | Resolution is dispatched only to the owning profile's adapter, never broadcast to the thread. |
+| Runtime busy state and turn locks | `WorkerProfileId` | Parallel lanes may hold one independent turn per profile. |
+| Lanes | `lanes/<WorkerProfileId>` and the in-memory lane map | A shared adapter or model target does not merge working copies. |
+| Work routing | Workspace `agents`, step `workers`, route availability, and dispatch arguments | Routing selects configured profile ids; `AgentId` is only the provider attribution carried by events. |
+
 ---
 
 ## 4. Cross-agent handoff — full replay
@@ -107,23 +125,23 @@ Two rules keep this honest:
 The chosen model: **the harness owns the canonical log; each agent's native session is a
 cache that may be stale.**
 
-Every thread tracks a high-water mark per agent:
+Every thread tracks a high-water mark per worker profile:
 
 ```
-thread.watermark = { claude: 47, codex: 12 }
+thread.watermark = { "claude-build": 47, "claude-review": 12 }
 ```
 
-When agent *A* is asked to take a turn, `ReplayBuilder` collects every event with
-`seq > watermark[A]` that agent *A* did not itself produce, and renders it into a
+When profile *A* is asked to take a turn, `ReplayBuilder` collects every event with
+`seq > watermark[A]` that profile *A* did not itself produce, and renders it into a
 transcript block prepended to the user's message:
 
 ```
 <harness-replay>
-While you were away, the user worked with **codex** (3 turns).
+While you were away, the user worked with **claude-build** (3 turns).
 
-### codex · turn 11
+### claude-build · turn 11
 user: refactor the auth middleware
-codex: I split `authenticate()` into `verifyToken()` and `loadSession()`.
+claude-build: I split `authenticate()` into `verifyToken()` and `loadSession()`.
   ⎿ ran: cargo test --package auth        → exit 0
   ⎿ edited: src/auth/mod.rs (+42 −17)
 
@@ -134,7 +152,8 @@ codex: I split `authenticate()` into `verifyToken()` and `loadSession()`.
 Now: add rate limiting to the same middleware.
 ```
 
-Then `watermark[A]` advances to the current head.
+Then `watermark[A]` advances to the current head. A profile that shares the same
+`AgentId`, target, or adapter still has a separate watermark and replay view.
 
 **Why prepend to the user message rather than use native injection.** Codex exposes
 `thread/inject` for exactly this; Claude CLI has no equivalent. Using one mechanism for
