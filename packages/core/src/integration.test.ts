@@ -98,7 +98,9 @@ beforeEach(() => {
 afterEach(async () => {
   await orchestrator?.stop();
   orchestrator = null;
-  while (abandoned.length > 0) await abandoned.pop()?.stop();
+  // Only to release what they hold. Their lane maps are stale by now — the test has since
+  // swept, reused or deleted those paths — so what their shutdown makes of them is moot.
+  while (abandoned.length > 0) await abandoned.pop()?.stop().catch(() => undefined);
   rmSync(dataDir, { recursive: true, force: true });
   rmSync(workDir, { recursive: true, force: true });
   while (repos.length > 0) rmSync(repos.pop() as string, { recursive: true, force: true });
@@ -787,6 +789,19 @@ describe('cross-agent handoff', () => {
     again.state(threadId);
     await again.setParallel(threadId, true);
     assert.equal(kept(again).length, 1, 'a later load does not record it again');
+  });
+
+  test('deleting a thread this process never loaded discards the lane an earlier one left', async () => {
+    const repo = makeRepo();
+    const { threadId, lane } = await leaveLaneBehind(repo);
+    writeFileSync(join(lane, 'unsaved.txt'), 'discarded with the thread\n');
+
+    const { orch } = await boot(makeConfig());
+    await orch.deleteThread(threadId);
+
+    assert.equal(orch.store.get(threadId), undefined, 'the thread is gone');
+    assert.equal(existsSync(lane), false, 'the lane directory is gone');
+    assert.equal(registeredWorktrees(repo).length, 1, 'and so is its registration');
   });
 
   test('a thread survives a restart with its transcript and sessions intact', async () => {

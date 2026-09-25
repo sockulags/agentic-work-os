@@ -2996,8 +2996,8 @@ export class Orchestrator extends EventEmitter {
   readonly #registries: WorkerRegistries;
   readonly #bridge = new PermissionBridge();
   readonly #threads = new Map<string, Thread>();
-  /** Threads whose deletion is waiting on their shutdown. */
-  readonly #deleting = new Set<string>();
+  /** Threads whose deletion is waiting on their shutdown, each with that deletion. */
+  readonly #deleting = new Map<string, Promise<void>>();
   readonly #issueLocks = new Map<string, Promise<void>>();
   /**
    * The last probe per worker profile, held in memory and never written to disk.
@@ -3130,22 +3130,29 @@ export class Orchestrator extends EventEmitter {
    * user's repository. A thread that is not loaded is loaded for this, so lanes an earlier
    * process left are disposed of too.
    */
-  async deleteThread(threadId: string): Promise<void> {
+  deleteThread(threadId: string): Promise<void> {
+    // A repeated delete waits on the one already under way rather than starting another.
+    const inFlight = this.#deleting.get(threadId);
+    if (inFlight) return inFlight;
+
     const thread = this.#threads.get(threadId) ?? (this.store.get(threadId) ? this.#thread(threadId) : undefined);
-    this.#deleting.add(threadId);
     this.#threads.delete(threadId);
-    try {
-      await thread?.stop({ discardLanes: true });
-    } catch (err) {
-      // The user asked for the thread to go; a shutdown that went wrong does not keep it.
-      log.warn('thread shutdown failed during delete', {
-        threadId,
-        message: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      this.store.delete(threadId);
-      this.#deleting.delete(threadId);
-    }
+    const deletion = (async () => {
+      try {
+        await thread?.stop({ discardLanes: true });
+      } catch (err) {
+        // The user asked for the thread to go; a shutdown that went wrong does not keep it.
+        log.warn('thread shutdown failed during delete', {
+          threadId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        this.store.delete(threadId);
+        this.#deleting.delete(threadId);
+      }
+    })();
+    this.#deleting.set(threadId, deletion);
+    return deletion;
   }
 
   state(threadId: string): ThreadRuntimeState {
