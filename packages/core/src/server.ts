@@ -215,7 +215,7 @@ export class HarnessServer {
       }
 
       case 'thread.delete':
-        orchestrator.deleteThread(msg.threadId);
+        await orchestrator.deleteThread(msg.threadId);
         this.broadcast({ type: 'thread.removed', threadId: msg.threadId });
         return { type: 'ok' };
 

@@ -353,7 +353,7 @@ test('detached or deleted threads are not continuation targets', async () => {
   const afterDetach = preparation(await orchestrator.prepareIssue({ cwd: root, number: 14 }));
   assert.notEqual(afterDetach.threadId, first.threadId);
 
-  orchestrator.deleteThread(afterDetach.threadId);
+  await orchestrator.deleteThread(afterDetach.threadId);
   const afterDelete = preparation(await orchestrator.prepareIssue({ cwd: root, number: 14 }));
   assert.notEqual(afterDelete.threadId, afterDetach.threadId);
   assert.equal(orchestrator.store.list().filter((thread) => thread.workItemId !== null).length, 1);
@@ -376,7 +376,7 @@ test('new Take refuses a missing or cached catalog while Continue succeeds local
   const continued = await continueFromCachedStore.prepareIssue({ cwd: root, number: 14 });
   assert.equal(continued.ok, true);
   assert.equal(preparation(continued).threadId, taken.threadId);
-  notFetched.deleteThread(taken.threadId);
+  await notFetched.deleteThread(taken.threadId);
   const cachedTake = openOrchestrator(cfg);
   const cachedResult = await cachedTake.prepareIssue({ cwd: root, number: 14 });
   assert.equal(cachedResult.ok, false);

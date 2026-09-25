@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { exec } from 'node:child_process';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
 import { promisify } from 'node:util';
 import type {
@@ -153,12 +153,15 @@ import { ArtifactWatcher } from './artifact-watcher.js';
 import { contentHash } from './store/artifact-store.js';
 import { snapshotWorkingTree, diffTrees, headTree, headCommit } from './util/git.js';
 import type { Lane } from './util/worktree.js';
-import { provisionLane, laneDiff, integrateLane, removeLane } from './util/worktree.js';
+import { provisionLane, laneDiff, integrateLane, leftoverLaneWork, removeLane } from './util/worktree.js';
 import { createLogger } from './util/logger.js';
 import { workerEnvironment } from './util/spawn.js';
 
 const log = createLogger('orchestrator');
 const execAsync = promisify(exec);
+
+/** Why a lane was kept on disk rather than removed, shared by every path that keeps one. */
+const UNINTEGRATED_LANE = 'it still holds changes that were never integrated';
 
 /** A planning or integration evaluation lost its canonical log reservation. */
 export class TransitionEvaluationConflictError extends Error {
@@ -481,6 +484,13 @@ class Thread {
   #diff: string | null = null;
   #parallel = false;
   readonly #lanes = new Map<WorkerProfileId, Lane>();
+  /**
+   * The project directory lane worktrees are registered in, captured at load. Deleting a
+   * thread removes its summary before shutdown can finish, and disposal still needs this.
+   */
+  readonly #projectDir: string | undefined;
+  /** The one sweep of lanes an earlier process left on disk. It settles; it never rejects. */
+  #leftoverSweep: Promise<void> | null = null;
   /** One provisioning per agent: concurrent first turns wait on it rather than repeat it. */
   readonly #laneProvisioning = new Map<WorkerProfileId, Promise<string>>();
   /** True from the first line of `setParallel` until the mode change has finished. */
@@ -535,6 +545,7 @@ class Thread {
     }
 
     const cwd = this.#store.get(id)?.cwd;
+    this.#projectDir = cwd;
     if (cwd) this.#watch(cwd, null, publishedArtifacts);
   }
 
@@ -874,6 +885,8 @@ class Thread {
     // follows suspends long enough for a turn to arrive and invalidate all of them.
     this.#switchingLanes = true;
     try {
+      // Lane mode is about to depend on the lane paths, so let the load sweep finish first.
+      await this.sweepLeftoverLanes();
       if (on) {
         // Fail here rather than at the first turn: a repo-less directory cannot have
         // lanes, and the user should learn that from the switch they just flipped.
@@ -1174,13 +1187,41 @@ class Thread {
     this.#adapters.get(profileId)?.resolveApproval(approvalId, optionId);
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Shut the thread down and dispose of its lanes.
+   *
+   * `discardLanes` is the delete path: the thread directory is about to go, so every lane
+   * is removed, including leftovers from an earlier process, without the unintegrated-work
+   * check that keeps one on an ordinary shutdown.
+   */
+  async stop(options: { discardLanes?: boolean } = {}): Promise<void> {
+    const discard = options.discardLanes ?? false;
     for (const watcher of this.#watchers.values()) watcher.stop();
     this.#watchers.clear();
     await Promise.all([...this.#adapters.values()].map((adapter) => adapter.stop()));
     this.#adapters.clear();
-    await this.#dropLanes();
+    await this.sweepLeftoverLanes();
+    await this.#dropLanes(discard);
+    if (discard) await this.#disposeLeftoverLanes(true);
     this.#bridge.unregisterThread(this.id);
+  }
+
+  /**
+   * Dispose of the lanes an earlier process left on disk, once per load.
+   *
+   * The lane map lives in memory, so after a restart nothing else knows these lanes exist,
+   * and re-entering lane mode would collide with them. Started when the thread is loaded
+   * and awaited by every path that provisions or drops lanes, so it never races them. Its
+   * failures are logged and swallowed: debris is not worth failing a thread over.
+   */
+  sweepLeftoverLanes(): Promise<void> {
+    this.#leftoverSweep ??= this.#disposeLeftoverLanes(false).catch((err: unknown) => {
+      log.warn('could not sweep leftover lanes', {
+        threadId: this.id,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    });
+    return this.#leftoverSweep;
   }
 
   // -------------------------------------------------------------------------
@@ -2637,7 +2678,9 @@ class Thread {
     if (existing) return existing.path;
 
     const provisioning = (async (): Promise<string> => {
-      const path = join(this.#config.dataDir, 'threads', this.id, 'lanes', agent);
+      // A lane an earlier process left at this path would make `git worktree add` fail.
+      await this.sweepLeftoverLanes();
+      const path = join(this.#lanesRoot, agent);
       const result = await provisionLane(baseCwd, path);
       if (!result.ok) throw new Error(`Could not give ${agent} a lane: ${result.reason}`);
 
@@ -2699,45 +2742,77 @@ class Thread {
     }
   }
 
-  /** Remove every lane, keeping any that still holds work the user has not seen. */
-  async #dropLanes(): Promise<void> {
-    const summary = this.#store.get(this.id);
-    for (const [agent, lane] of [...this.#lanes]) {
-      if (!summary) {
-        this.#lanes.delete(agent);
-        continue;
-      }
+  /** Where this thread's lanes live: derivable, so a restart does not lose it. */
+  get #lanesRoot(): string {
+    return join(this.#config.dataDir, 'threads', this.id, 'lanes');
+  }
 
-      const diff = await laneDiff(lane);
-      if (!diff.ok) {
-        // Deleting this would destroy the only copy of work whose state was never
-        // established. Leave it on disk and name the uncertainty in the log.
-        log.warn('keeping an unreadable lane', { agent, path: lane.path });
-        this.#record(agent, {
-          kind: 'lane.updated',
-          status: 'removed',
-          path: lane.path,
-          detail: `kept on disk: ${diff.reason}`,
-        });
-        this.#lanes.delete(agent);
-        continue;
+  /**
+   * Remove every lane, keeping any that still holds work the user has not seen — unless
+   * `discard`, which removes them all.
+   */
+  async #dropLanes(discard = false): Promise<void> {
+    const projectDir = this.#projectDir;
+    for (const [agent, lane] of [...this.#lanes]) {
+      if (!discard) {
+        const diff = await laneDiff(lane);
+        if (!diff.ok) {
+          // Deleting this would destroy the only copy of work whose state was never
+          // established. Leave it on disk and name the uncertainty in the log.
+          log.warn('keeping an unreadable lane', { agent, path: lane.path });
+          this.#recordKeptLane(agent, lane.path, diff.reason);
+          this.#lanes.delete(agent);
+          continue;
+        }
+        if (diff.patch !== null) {
+          // Deleting this would destroy the only copy of that work. Leave it on disk and
+          // name it, so the path is in the log rather than only in the user's memory.
+          log.warn('keeping a lane with unintegrated work', { agent, path: lane.path });
+          this.#recordKeptLane(agent, lane.path, UNINTEGRATED_LANE);
+          this.#lanes.delete(agent);
+          continue;
+        }
       }
-      if (diff.patch !== null) {
-        // Deleting this would destroy the only copy of that work. Leave it on disk and
-        // name it, so the path is in the log rather than only in the user's memory.
-        log.warn('keeping a lane with unintegrated work', { agent, path: lane.path });
-        this.#record(agent, {
-          kind: 'lane.updated',
-          status: 'removed',
-          path: lane.path,
-          detail: 'kept on disk: it still holds changes that were never integrated',
-        });
-        this.#lanes.delete(agent);
-        continue;
-      }
-      if (summary) await removeLane(summary.cwd, lane.path);
+      if (projectDir) await removeLane(projectDir, lane.path);
       this.#lanes.delete(agent);
     }
+  }
+
+  /**
+   * Dispose of lane directories no live lane accounts for — what an earlier process left.
+   *
+   * Without `discard`, the rule `#dropLanes` applies holds: a lane with work the thread
+   * directory lacks, or whose state cannot be read, is kept and recorded. Its seed
+   * baseline died with that process, so "work" is judged against the thread directory.
+   */
+  async #disposeLeftoverLanes(discard: boolean): Promise<void> {
+    const projectDir = this.#projectDir;
+    const root = this.#lanesRoot;
+    if (!projectDir || !existsSync(root)) return;
+
+    for (const agent of readdirSync(root)) {
+      if (this.#lanes.has(agent)) continue;
+      const path = join(root, agent);
+      if (!discard) {
+        const work = await leftoverLaneWork(projectDir, path);
+        if (!work.ok || work.unintegrated) {
+          log.warn('keeping a leftover lane', { agent, path });
+          // Recorded once, not on every load that finds it still there.
+          const last = this.#store.events(this.id).findLast(
+            (event) => event.kind === 'lane.updated' && event.path === path,
+          );
+          if (last?.kind !== 'lane.updated' || last.status !== 'removed') {
+            this.#recordKeptLane(agent, path, work.ok ? UNINTEGRATED_LANE : work.reason);
+          }
+          continue;
+        }
+      }
+      await removeLane(projectDir, path);
+    }
+  }
+
+  #recordKeptLane(agent: WorkerProfileId, path: string, reason: string): void {
+    this.#record(agent, { kind: 'lane.updated', status: 'removed', path, detail: `kept on disk: ${reason}` });
   }
 
   #adapter(agent: WorkerProfileId, cwd: string): WorkerAdapter {
@@ -2921,6 +2996,8 @@ export class Orchestrator extends EventEmitter {
   readonly #registries: WorkerRegistries;
   readonly #bridge = new PermissionBridge();
   readonly #threads = new Map<string, Thread>();
+  /** Threads whose deletion is waiting on their shutdown, each with that deletion. */
+  readonly #deleting = new Map<string, Promise<void>>();
   readonly #issueLocks = new Map<string, Promise<void>>();
   /**
    * The last probe per worker profile, held in memory and never written to disk.
@@ -3045,11 +3122,37 @@ export class Orchestrator extends EventEmitter {
     }));
   }
 
-  deleteThread(threadId: string): void {
-    const thread = this.#threads.get(threadId);
+  /**
+   * Shut a thread down, lanes included, and only then remove it from the store.
+   *
+   * The order matters: lanes live inside the thread's store directory, and removing that
+   * first deletes the lanes' files while leaving their worktree registrations behind in the
+   * user's repository. A thread that is not loaded is loaded for this, so lanes an earlier
+   * process left are disposed of too.
+   */
+  deleteThread(threadId: string): Promise<void> {
+    // A repeated delete waits on the one already under way rather than starting another.
+    const inFlight = this.#deleting.get(threadId);
+    if (inFlight) return inFlight;
+
+    const thread = this.#threads.get(threadId) ?? (this.store.get(threadId) ? this.#thread(threadId) : undefined);
     this.#threads.delete(threadId);
-    void thread?.stop();
-    this.store.delete(threadId);
+    const deletion = (async () => {
+      try {
+        await thread?.stop({ discardLanes: true });
+      } catch (err) {
+        // The user asked for the thread to go; a shutdown that went wrong does not keep it.
+        log.warn('thread shutdown failed during delete', {
+          threadId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        this.store.delete(threadId);
+        this.#deleting.delete(threadId);
+      }
+    })();
+    this.#deleting.set(threadId, deletion);
+    return deletion;
   }
 
   state(threadId: string): ThreadRuntimeState {
@@ -4203,6 +4306,9 @@ export class Orchestrator extends EventEmitter {
     const existing = this.#threads.get(threadId);
     if (existing) return existing;
 
+    // A thread being deleted is still in the store until its shutdown finishes. Loading
+    // it again then would start a second one on a directory that is about to go.
+    if (this.#deleting.has(threadId)) throw new Error(`Thread ${threadId} is being deleted`);
     this.#requireThread(threadId);
 
     const thread = new Thread(threadId, {
@@ -4217,6 +4323,9 @@ export class Orchestrator extends EventEmitter {
       checkWorkers: (profileIds) => this.workerDiagnostics({ profileIds, probe: true }),
     });
     this.#threads.set(threadId, thread);
+    // Held by the thread and awaited by every path that touches its lanes; it cannot
+    // reject, so starting it here cannot become an unhandled rejection.
+    void thread.sweepLeftoverLanes();
     return thread;
   }
 }

@@ -37,6 +37,8 @@ let dataDir: string;
  */
 let workDir: string;
 let orchestrator: Orchestrator | null = null;
+/** Orchestrators a test abandoned mid-flight to stand in for a crash, stopped after it. */
+const abandoned: Orchestrator[] = [];
 const repos: string[] = [];
 
 function makeConfig(overrides: Partial<HarnessConfig> = {}): HarnessConfig {
@@ -96,6 +98,9 @@ beforeEach(() => {
 afterEach(async () => {
   await orchestrator?.stop();
   orchestrator = null;
+  // Only to release what they hold. Their lane maps are stale by now — the test has since
+  // swept, reused or deleted those paths — so what their shutdown makes of them is moot.
+  while (abandoned.length > 0) await abandoned.pop()?.stop().catch(() => undefined);
   rmSync(dataDir, { recursive: true, force: true });
   rmSync(workDir, { recursive: true, force: true });
   while (repos.length > 0) rmSync(repos.pop() as string, { recursive: true, force: true });
@@ -695,6 +700,108 @@ describe('cross-agent handoff', () => {
     assert.equal(orch.store.get(thread.id)?.parallel, false, 'parallel mode is disabled');
     assert.equal(existsSync(lane), false, 'an unchanged lane is removed');
     assert.equal(orch.state(thread.id).lanes.claude, undefined, 'the lane is dropped');
+  });
+
+  /** The worktrees git has registered for a repository, the repository itself included. */
+  function registeredWorktrees(repo: string): string[] {
+    return execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: repo, encoding: 'utf8' })
+      .split('\n')
+      .filter((line) => line.startsWith('worktree '));
+  }
+
+  /**
+   * Provision a lane the way a turn does, then abandon the orchestrator without stopping
+   * it: what a crash leaves behind. The worker dies on the turn, so no process still has
+   * the lane as its working directory — Windows refuses to delete a directory in that state.
+   */
+  async function leaveLaneBehind(repo: string): Promise<{ threadId: string; lane: string }> {
+    const crashed = new Orchestrator(makeConfig({ claudeBinArgs: [FAKE_CLAUDE, '--crash-on-turn'] }));
+    abandoned.push(crashed);
+    const thread = crashed.createThread({ cwd: repo });
+    await crashed.setParallel(thread.id, true);
+    await crashed.send(thread.id, 'claude', 'provision the lane').catch(() => undefined);
+    const lane = crashed.state(thread.id).lanes.claude;
+    assert.ok(lane && existsSync(lane), 'the lane was provisioned');
+    return { threadId: thread.id, lane };
+  }
+
+  test('deleting a thread removes its lane and the lane registration', async () => {
+    const { orch } = await boot(makeConfig());
+    const repo = makeRepo();
+    const thread = orch.createThread({ cwd: repo });
+    await orch.setParallel(thread.id, true);
+    await orch.send(thread.id, 'claude', 'provision the lane');
+
+    const lane = orch.state(thread.id).lanes.claude;
+    assert.ok(lane);
+    // Unintegrated work does not stop an explicit delete: the lane is discarded as before.
+    writeFileSync(join(lane, 'unsaved.txt'), 'discarded with the thread\n');
+    assert.equal(registeredWorktrees(repo).length, 2, 'the lane is registered while it exists');
+
+    await orch.deleteThread(thread.id);
+
+    assert.equal(orch.store.get(thread.id), undefined, 'the thread is gone');
+    assert.equal(existsSync(lane), false, 'the lane directory is gone');
+    assert.equal(registeredWorktrees(repo).length, 1, 'and so is its registration');
+  });
+
+  test('a lane left behind by a crash is removed when the thread loads again', async () => {
+    const repo = makeRepo();
+    // Uncommitted work seeds the lane. It is still in the thread directory, so it is not
+    // work only the lane holds, and must not pin the lane on disk.
+    writeFileSync(join(repo, 'pending.txt'), 'uncommitted\n');
+    const { threadId, lane } = await leaveLaneBehind(repo);
+    assert.equal(registeredWorktrees(repo).length, 2);
+
+    const { orch } = await boot(makeConfig());
+    orch.state(threadId);
+    await orch.setParallel(threadId, true);
+
+    assert.equal(existsSync(lane), false, 'the leftover lane directory is gone');
+    assert.equal(registeredWorktrees(repo).length, 1, 'and so is its registration');
+
+    await orch.send(threadId, 'claude', 'provision a fresh lane');
+    assert.equal(orch.state(threadId).lanes.claude, lane, 'a fresh lane took the same path');
+    assert.equal(readFileSync(join(lane, 'pending.txt'), 'utf8'), 'uncommitted\n');
+  });
+
+  test('a leftover lane holding unintegrated work survives the reload, recorded once', async () => {
+    const repo = makeRepo();
+    const { threadId, lane } = await leaveLaneBehind(repo);
+    writeFileSync(join(lane, 'unsaved.txt'), 'only the lane has this\n');
+    const kept = (orch: Orchestrator) =>
+      orch.store.events(threadId).filter(
+        (event) => event.kind === 'lane.updated' && event.status === 'removed' && event.path === lane,
+      );
+
+    const { orch } = await boot(makeConfig());
+    orch.state(threadId);
+    await orch.setParallel(threadId, true);
+
+    assert.equal(existsSync(join(lane, 'unsaved.txt')), true, 'the work is still there');
+    assert.equal(registeredWorktrees(repo).length, 2, 'the lane is still registered');
+    const recorded = kept(orch);
+    assert.equal(recorded.length, 1, 'keeping it is recorded');
+    assert.match(recorded[0]?.kind === 'lane.updated' ? (recorded[0].detail ?? '') : '', /never integrated/);
+
+    await orch.stop();
+    const { orch: again } = await boot(makeConfig());
+    again.state(threadId);
+    await again.setParallel(threadId, true);
+    assert.equal(kept(again).length, 1, 'a later load does not record it again');
+  });
+
+  test('deleting a thread this process never loaded discards the lane an earlier one left', async () => {
+    const repo = makeRepo();
+    const { threadId, lane } = await leaveLaneBehind(repo);
+    writeFileSync(join(lane, 'unsaved.txt'), 'discarded with the thread\n');
+
+    const { orch } = await boot(makeConfig());
+    await orch.deleteThread(threadId);
+
+    assert.equal(orch.store.get(threadId), undefined, 'the thread is gone');
+    assert.equal(existsSync(lane), false, 'the lane directory is gone');
+    assert.equal(registeredWorktrees(repo).length, 1, 'and so is its registration');
   });
 
   test('a thread survives a restart with its transcript and sessions intact', async () => {
