@@ -711,11 +711,11 @@ describe('cross-agent handoff', () => {
 
   /**
    * Provision a lane the way a turn does, then abandon the orchestrator without stopping
-   * it: what a crash leaves behind. The worker exits at once, so no process still has the
-   * lane as its working directory — Windows refuses to delete a directory in that state.
+   * it: what a crash leaves behind. The worker dies on the turn, so no process still has
+   * the lane as its working directory — Windows refuses to delete a directory in that state.
    */
   async function leaveLaneBehind(repo: string): Promise<{ threadId: string; lane: string }> {
-    const crashed = new Orchestrator(makeConfig({ claudeBinArgs: ['-e', ''] }));
+    const crashed = new Orchestrator(makeConfig({ claudeBinArgs: [FAKE_CLAUDE, '--crash-on-turn'] }));
     abandoned.push(crashed);
     const thread = crashed.createThread({ cwd: repo });
     await crashed.setParallel(thread.id, true);
