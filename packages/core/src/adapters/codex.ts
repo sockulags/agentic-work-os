@@ -161,11 +161,6 @@ export class CodexAdapter implements WorkerAdapter {
     const child = spawnCli(config.codexBin, [...config.codexBinArgs, 'app-server'], { cwd });
     this.#child = child;
 
-    const detachStdout = readJsonLines<CodexWire.JsonRpcMessage>(child.stdout, {
-      onMessage: (msg) => this.#onMessage(msg),
-      onUnparseable: (line) => log.debug('non-json stdout', { line: line.slice(0, 200) }),
-    });
-
     child.stderr.setEncoding('utf8');
     const onStderr = (chunk: string): void => {
       const text = chunk.trim();
@@ -203,6 +198,66 @@ export class CodexAdapter implements WorkerAdapter {
     child.on('close', onClose);
 
     /**
+     * The stdout pipe failed, which is not the same thing as the process exiting.
+     *
+     * A `ChildProcess` `error` and its stdout's `error` are different events, and only the
+     * first one was ever heard — the second was thrown by Node as an uncaught exception and
+     * took the daemon with it. What is left after it is a server that may well still be
+     * running and can no longer be heard from: every request in `#pending` is waiting for a
+     * response line and the turn is waiting for `turn/completed`, and neither can arrive.
+     *
+     * So this gives up on that child entirely, as `abandon` below does, and for the same
+     * reason it is scoped to *this* child: a start that replaces it must not have its
+     * references cleared, its requests rejected, or its turn failed by the process it
+     * replaced.
+     */
+    const onStdoutError = (err: Error): void => {
+      log.error('stdout failed', { message: err.message });
+      const failure = new Error(`Codex app-server stdout failed: ${err.message}`);
+
+      child.off('error', onSpawnError);
+      child.off('close', onClose);
+      // Nobody reads either pipe now, and an unread pipe never reaches EOF. Drain both, and
+      // hear what a process on its way out can still raise: an unheard 'error' is the same
+      // uncaught exception this path exists to stop.
+      child.stdout.resume();
+      child.stderr.resume();
+      child.on('error', (e) => log.debug('failed child error', { message: e.message }));
+      child.stdin.on('error', (e) => log.debug('failed child stdin error', { message: e.message }));
+
+      if (this.#child === child) {
+        this.#child = null;
+        this.#threadId = null;
+        this.#abandonedTurns.clear();
+        this.#abandonedUnnamedTurn = false;
+        this.#emitStatus('failed', err.message);
+        this.#ctx.emit({
+          kind: 'error',
+          severity: 'fatal',
+          message: `Lost the connection to Codex: ${err.message}. The next turn starts a new app-server.`,
+        });
+        // Nothing is left to carry a decision back to the server blocking on one.
+        for (const [approvalId] of this.#approvals) {
+          this.#settleApproval(approvalId, 'denied', true);
+        }
+        this.#rejectAllPending(failure);
+        this.#failTurn(failure);
+      }
+
+      // Closing stdin is what a healthy app-server exits on; the signal is for one that
+      // does not. Leaving it running would put a second server in the thread's directory
+      // the moment the next turn spawns one.
+      child.stdin.end();
+      child.kill('SIGTERM');
+    };
+
+    const detachStdout = readJsonLines<CodexWire.JsonRpcMessage>(child.stdout, {
+      onMessage: (msg) => this.#onMessage(msg),
+      onUnparseable: (line) => log.debug('non-json stdout', { line: line.slice(0, 200) }),
+      onError: onStdoutError,
+    });
+
+    /**
      * Give up on this attempt's process, completely.
      *
      * A handshake step can fail at any point after the spawn — `thread/resume` does it
@@ -232,6 +287,9 @@ export class CodexAdapter implements WorkerAdapter {
       // 'error' on a child would take the harness down rather than this attempt.
       child.on('error', (err) => log.debug('abandoned child error', { message: err.message }));
       child.stdin.on('error', (err) => log.debug('abandoned stdin error', { message: err.message }));
+      // Detaching the reader took its stdout error listener with it, and a drained pipe on
+      // a dying process is exactly where one arrives.
+      child.stdout.on('error', (err) => log.debug('abandoned stdout error', { message: err.message }));
 
       // Only if it is still ours. A concurrent start owns the reference by then, and
       // clearing it would strand a healthy process exactly as this attempt stranded one.
@@ -455,6 +513,18 @@ export class CodexAdapter implements WorkerAdapter {
     } catch (err) {
       log.warn('interrupt failed', { message: (err as Error).message });
     }
+  }
+
+  /**
+   * Raise a pipe failure on the worker's stdout, the way the OS would.
+   *
+   * Tests only. A broken pipe cannot be provoked portably from a healthy child, and what
+   * needs covering is the listener wiring on the real stream of a really spawned process —
+   * which is also why this emits the event rather than calling the handler: without the
+   * listener, `emit('error')` is exactly the uncaught exception being guarded against.
+   */
+  failStdoutForTests(err: Error): void {
+    this.#child?.stdout.emit('error', err);
   }
 
   /** Names the turn when Codex has told us its id, so the server stops that one and no other. */
