@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { provisionLane, laneDiff, integrateLane, removeLane } from './worktree.js';
+import { provisionLane, laneDiff, integrateLane, leftoverLaneWork, removeLane } from './worktree.js';
 import { headCommit, snapshotWorkingTree } from './git.js';
 
 /**
@@ -254,6 +254,48 @@ describe('lanes', () => {
     await removeLane(base, result.lane.path);
     const list = execFileSync('git', ['worktree', 'list'], { cwd: base, encoding: 'utf8' });
     assert.doesNotMatch(list.replace(/\\/g, '/'), new RegExp(result.lane.path.replace(/\\/g, '/')));
+  });
+
+  describe('a lane left behind by an earlier process', () => {
+    test('holds nothing of its own when its changes are all in the thread directory', async () => {
+      const base = makeRepo();
+      writeFileSync(join(base, 'pending.txt'), 'seeded\n');
+      const result = await provisionLane(base, lanePath());
+      assert.ok(result.ok);
+      // The user moves on elsewhere in the thread directory; that must not pin the lane.
+      writeFileSync(join(base, 'a.txt'), 'edited by the user\n');
+
+      assert.deepEqual(await leftoverLaneWork(base, result.lane.path), { ok: true, unintegrated: false });
+    });
+
+    test('holds work when it changed a file the thread directory does not match', async () => {
+      const base = makeRepo();
+      const result = await provisionLane(base, lanePath());
+      assert.ok(result.ok);
+      writeFileSync(join(result.lane.path, 'a.txt'), 'only in the lane\n');
+
+      assert.deepEqual(await leftoverLaneWork(base, result.lane.path), { ok: true, unintegrated: true });
+    });
+
+    test('holds work an agent committed inside the lane', async () => {
+      const base = makeRepo();
+      const result = await provisionLane(base, lanePath());
+      assert.ok(result.ok);
+      writeFileSync(join(result.lane.path, 'committed.txt'), 'committed in the lane\n');
+      execFileSync('git', ['add', '-A'], { cwd: result.lane.path });
+      execFileSync('git', ['commit', '-qm', 'lane work'], { cwd: result.lane.path });
+
+      assert.deepEqual(await leftoverLaneWork(base, result.lane.path), { ok: true, unintegrated: true });
+    });
+
+    test('cannot be judged without its git link', async () => {
+      const base = makeRepo();
+      const result = await provisionLane(base, lanePath());
+      assert.ok(result.ok);
+      rmSync(join(result.lane.path, '.git'), { force: true });
+
+      assert.equal((await leftoverLaneWork(base, result.lane.path)).ok, false);
+    });
   });
 
   test('a lane leaves no branch behind in the user repo', async () => {

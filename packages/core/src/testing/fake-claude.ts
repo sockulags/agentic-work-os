@@ -8,7 +8,11 @@
  * mock. Behaviour is scripted through argv so one binary covers several scenarios.
  *
  * Usage: fake-claude.js [--tool] [--tools] [--permission] [--slow] [--markdown] [--think]
- *   [--think-omit-final]
+ *   [--think-omit-final] [--crash-on-turn]
+ *
+ * `--crash-on-turn` exits as soon as the first turn arrives, without answering it: a CLI
+ * that dies mid-turn. It reads the turn first, so the harness's write never meets a
+ * closed pipe.
  */
 
 import { LineDecoder } from '../util/jsonl.js';
@@ -374,6 +378,7 @@ function main(): void {
         continue;
       }
       if (msg.type !== 'user') continue;
+      if (args.has('--crash-on-turn')) process.exit(1);
       const text = msg.message?.content?.[0]?.text ?? '';
       queue.push(text);
       void drain();

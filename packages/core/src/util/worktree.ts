@@ -1,4 +1,5 @@
-import { rmSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { applyPatch, diffTrees, headCommit, headTree, snapshotWorkingTree, tryGit } from './git.js';
 import { createLogger } from './logger.js';
 
@@ -188,6 +189,50 @@ export async function integrateLane(
 
   log.info('lane integrated', { lane: lane.path, chars: patch.length });
   return { ok: true, patch };
+}
+
+export type LeftoverLaneResult =
+  | { ok: true; unintegrated: boolean }
+  | { ok: false; reason: string };
+
+/**
+ * Whether a lane an earlier process left on disk holds work the thread directory lacks.
+ *
+ * The seed baseline `laneDiff` compares against lived in memory and died with that
+ * process. What survives is where the lane forked from the project: the merge base of its
+ * `HEAD` and the project's, which also covers commits an agent made inside the lane. So
+ * the question is asked per path: every path the lane changed since that fork must read
+ * the same in the thread directory. Seeded uncommitted work that is still in the thread
+ * directory is then not mistaken for the lane's own, and edits the user made elsewhere
+ * since do not pin it.
+ */
+export async function leftoverLaneWork(baseCwd: string, path: string): Promise<LeftoverLaneResult> {
+  const undetermined = { ok: false, reason: "the lane's state could not be determined" } as const;
+  // Without its own `.git` file git would resolve whatever repository encloses the path
+  // and answer about that one instead.
+  if (!existsSync(join(path, '.git'))) return undetermined;
+
+  const [laneHead, projectHead, now, base] = await Promise.all([
+    headCommit(path),
+    headCommit(baseCwd),
+    snapshotWorkingTree(path),
+    snapshotWorkingTree(baseCwd),
+  ]);
+  if (laneHead === null || projectHead === null || now === null || base === null) return undetermined;
+  if (now === base) return { ok: true, unintegrated: false };
+
+  const forked = (await tryGit(path, ['merge-base', laneHead, projectHead])).stdout?.trim();
+  if (!forked) return undetermined;
+
+  const [changed, differing] = await Promise.all([
+    tryGit(path, ['diff', '--name-only', '--no-renames', '-z', forked, now]),
+    tryGit(path, ['diff', '--name-only', '--no-renames', '-z', base, now]),
+  ]);
+  if (changed.stdout === null || differing.stdout === null) return undetermined;
+
+  const notInBase = new Set(differing.stdout.split('\0').filter(Boolean));
+  const unintegrated = changed.stdout.split('\0').some((file) => notInBase.has(file));
+  return { ok: true, unintegrated };
 }
 
 /** Remove a lane's worktree and its registration. Best-effort: a leftover directory is not worth failing a thread over. */
