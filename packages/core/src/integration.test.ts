@@ -779,6 +779,30 @@ describe('cross-agent handoff', () => {
     return { threadId: thread.id, lane };
   }
 
+  test('deleting immediately after a first send waits for lane provisioning to settle', async () => {
+    const { orch } = await boot(makeConfig());
+    const repo = makeRepo();
+    const thread = orch.createThread({ cwd: repo });
+    await orch.setParallel(thread.id, true);
+
+    const lane = join(dataDir, 'threads', thread.id, 'lanes', 'claude');
+    const sending = orch.send(thread.id, 'claude', 'provision immediately');
+    const sendOutcome = sending.then(
+      () => ({ status: 'resolved' as const, error: null }),
+      (error: unknown) => ({ status: 'rejected' as const, error }),
+    );
+    const deletion = orch.deleteThread(thread.id);
+
+    await deletion;
+    const outcome = await sendOutcome;
+    assert.equal(outcome.status, 'rejected', 'the admitted send settles during deletion');
+    assert.match(String(outcome.error), /shutting down/);
+
+    assert.equal(orch.store.get(thread.id), undefined, 'the thread is gone');
+    assert.equal(existsSync(lane), false, 'the lane directory is gone');
+    assert.equal(registeredWorktrees(repo).length, 1, 'only the main worktree remains');
+  });
+
   test('deleting a thread removes its lane and the lane registration', async () => {
     const { orch } = await boot(makeConfig());
     const repo = makeRepo();
@@ -851,18 +875,30 @@ describe('cross-agent handoff', () => {
 
     const { orch } = await boot(makeConfig());
     orch.state(threadId);
-    await orch.setParallel(threadId, true);
+    await assert.rejects(
+      () => orch.setParallel(threadId, true),
+      (error: unknown) => {
+        assert.match(String(error), /retained lane blocks re-entry/);
+        assert.match(String(error), new RegExp(lane.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        return true;
+      },
+    );
 
     assert.equal(existsSync(join(lane, 'unsaved.txt')), true, 'the work is still there');
     assert.equal(registeredWorktrees(repo).length, 2, 'the lane is still registered');
+    assert.equal(orch.store.get(threadId)?.parallel, false, 'parallel mode remains disabled');
     const recorded = kept(orch);
     assert.equal(recorded.length, 1, 'keeping it is recorded');
     assert.match(recorded[0]?.kind === 'lane.updated' ? (recorded[0].detail ?? '') : '', /never integrated/);
 
     await orch.stop();
+    orchestrator = null;
     const { orch: again } = await boot(makeConfig());
     again.state(threadId);
-    await again.setParallel(threadId, true);
+    await assert.rejects(() => again.setParallel(threadId, true), /retained lane blocks re-entry/);
+    assert.equal(again.store.get(threadId)?.parallel, false, 'parallel mode remains disabled after restart');
+    assert.equal(existsSync(join(lane, 'unsaved.txt')), true, 'the retained work remains recoverable');
+    assert.equal(registeredWorktrees(repo).length, 2, 'the retained worktree remains registered');
     assert.equal(kept(again).length, 1, 'a later load does not record it again');
   });
 

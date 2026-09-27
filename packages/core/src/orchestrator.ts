@@ -493,6 +493,10 @@ class Thread {
   #leftoverSweep: Promise<void> | null = null;
   /** One provisioning per agent: concurrent first turns wait on it rather than repeat it. */
   readonly #laneProvisioning = new Map<WorkerProfileId, Promise<string>>();
+  /** Settles after every admitted turn has finished its final cleanup. */
+  readonly #turnSettlements = new Set<Promise<void>>();
+  /** Once set, no new work may be admitted to this thread. */
+  #stopping = false;
   /** True from the first line of `setParallel` until the mode change has finished. */
   #switchingLanes = false;
   readonly #pendingApprovals = new Map<string, HarnessEvent & ApprovalRequestedBody>();
@@ -558,7 +562,7 @@ class Thread {
    * replace the other in the dock.
    */
   #watch(cwd: string, agent: WorkerProfileId | null, known?: Map<string, string>): void {
-    if (this.#watchers.has(cwd)) return;
+    if (this.#stopping || this.#watchers.has(cwd)) return;
     const watcher = new ArtifactWatcher({
       cwd,
       known: known ?? new Map(),
@@ -651,6 +655,7 @@ class Thread {
     asRun = false,
     options: { runId?: string; recoveryContext?: RecoveryWorkerContext; keepRunActive?: boolean } = {},
   ): Promise<void> {
+    if (this.#stopping) throw new Error(`Thread ${this.id} is shutting down.`);
     const reservedRun = this.#activeRuns.get(agent);
     if (reservedRun !== undefined && reservedRun !== options.runId) {
       throw new Error(`${agent} already has an active correction run.`);
@@ -689,7 +694,9 @@ class Thread {
     // In lane mode that preparation checks out a worktree and runs the project's setup
     // command, and a second send arriving in that window has to find the agent busy.
     this.#turns.set(agent, null);
-    this.#onState();
+    let settleTurn!: () => void;
+    const turnSettled = new Promise<void>((resolve) => { settleTurn = resolve; });
+    this.#turnSettlements.add(turnSettled);
 
     // Everything the dispatch needs is prepared under the claim, so a preparation that
     // throws releases the turn in the same `finally` a dispatch failure does.
@@ -704,9 +711,11 @@ class Thread {
     let diffBaseline: Awaited<ReturnType<typeof snapshotWorkingTree>> = null;
     let failure: string | null = null;
     try {
+      this.#onState();
       // Provisioning is lazy for the same reason adapters are: a thread that only ever
       // talks to Claude should not pay for a Codex checkout.
       cwd = this.#parallel ? await this.#lane(agent, summary.cwd) : summary.cwd;
+      if (this.#stopping) throw new Error(`Thread ${this.id} is shutting down.`);
 
       // Build the replay *before* recording the new message. The user message counts as a
       // foreign event (its agent is null), so recording first would fold the prompt into
@@ -829,27 +838,36 @@ class Thread {
       failure = (err as Error).message;
       throw err;
     } finally {
-      // Emit the synthesized diff before clearing the turn id, so it's attributed to the
-      // turn that produced it. A no-op when nothing changed or the cwd isn't a git repo.
-      const turnId = this.#turns.get(agent) ?? null;
-      if (diffBaseline !== null) {
-        const after = await snapshotWorkingTree(cwd);
-        const patch = after ? await diffTrees(cwd, diffBaseline, after) : null;
-        if (patch) this.#record(agent, { kind: 'diff.updated', turnId, patch });
+      try {
+        // Emit the synthesized diff before clearing the turn id, so it's attributed to the
+        // turn that produced it. A no-op when nothing changed or the cwd isn't a git repo.
+        const turnId = this.#turns.get(agent) ?? null;
+        if (diffBaseline !== null) {
+          const after = await snapshotWorkingTree(cwd);
+          const patch = after ? await diffTrees(cwd, diffBaseline, after) : null;
+          if (patch) this.#record(agent, { kind: 'diff.updated', turnId, patch });
+        }
+        this.#turns.delete(agent);
+        if (runId && options.keepRunActive !== true) this.#activeRuns.delete(agent);
+        // Read after the turn rather than watched during it: nothing needs these the moment
+        // they are written, and a file read on a boundary we already have beats another
+        // watcher with its own debounce and restart story.
+        if (item) this.#ingestRetained(agent, cwd, item.id, runId);
+        if (runId) this.#closeRun(agent, runId, runFrom, failure);
+        // Advance the watermark whether or not the turn succeeded: the agent received the
+        // context either way, and re-sending it would duplicate history in its session. A
+        // turn that failed before its message was recorded received nothing, so it leaves
+        // the mark where it was rather than skipping history nobody replayed.
+        if (recorded) this.#store.setWatermark(this.id, agent, this.#store.head(this.id));
+        this.#onState();
+      } finally {
+        // The normal path clears the lock above, but keep shutdown from waiting forever if
+        // final turn accounting itself fails before reaching that point.
+        this.#turns.delete(agent);
+        if (runId && options.keepRunActive !== true) this.#activeRuns.delete(agent);
+        this.#turnSettlements.delete(turnSettled);
+        settleTurn();
       }
-      this.#turns.delete(agent);
-      if (runId && options.keepRunActive !== true) this.#activeRuns.delete(agent);
-      // Read after the turn rather than watched during it: nothing needs these the moment
-      // they are written, and a file read on a boundary we already have beats another
-      // watcher with its own debounce and restart story.
-      if (item) this.#ingestRetained(agent, cwd, item.id, runId);
-      if (runId) this.#closeRun(agent, runId, runFrom, failure);
-      // Advance the watermark whether or not the turn succeeded: the agent received the
-      // context either way, and re-sending it would duplicate history in its session. A
-      // turn that failed before its message was recorded received nothing, so it leaves
-      // the mark where it was rather than skipping history nobody replayed.
-      if (recorded) this.#store.setWatermark(this.id, agent, this.#store.head(this.id));
-      this.#onState();
     }
   }
 
@@ -888,6 +906,17 @@ class Thread {
       // Lane mode is about to depend on the lane paths, so let the load sweep finish first.
       await this.sweepLeftoverLanes();
       if (on) {
+        const retained = this.#retainedLeftoverLanes();
+        if (retained.length > 0) {
+          // The sweep may have recorded a kept-lane event through a store reload, which
+          // restores the on-disk summary's old parallel value. The refused transition must
+          // leave the current mode explicitly disabled without changing the reload rule.
+          this.#store.update(this.id, { parallel: false });
+          throw new Error(
+            `Parallel mode was not enabled because a retained lane blocks re-entry: ${retained.join(', ')}. ` +
+              'Integrate its work or manually recover/discard it and remove its Git worktree registration before retrying.',
+          );
+        }
         // Fail here rather than at the first turn: a repo-less directory cannot have
         // lanes, and the user should learn that from the switch they just flipped.
         if ((await headTree(summary.cwd)) === null) {
@@ -1196,6 +1225,7 @@ class Thread {
    */
   async stop(options: { discardLanes?: boolean } = {}): Promise<void> {
     const discard = options.discardLanes ?? false;
+    this.#stopping = true;
     const failures: unknown[] = [];
     for (const watcher of this.#watchers.values()) {
       try {
@@ -1212,6 +1242,13 @@ class Thread {
       if (result.status === 'rejected') failures.push(result.reason);
     }
     this.#adapters.clear();
+    // Adapter shutdown settles dispatched turns; waiting here then also covers a turn that
+    // was still provisioning its lane and had not created an adapter yet. No new turn can
+    // enter after #stopping is set, so this snapshot cannot grow underneath the wait.
+    await Promise.allSettled([
+      ...this.#turnSettlements,
+      ...this.#laneProvisioning.values(),
+    ]);
     try {
       await this.sweepLeftoverLanes();
     } catch (err) {
@@ -2703,6 +2740,7 @@ class Thread {
   async #lane(agent: WorkerProfileId, baseCwd: string): Promise<string> {
     const inFlight = this.#laneProvisioning.get(agent);
     if (inFlight) return inFlight;
+    if (this.#stopping) throw new Error(`Thread ${this.id} is shutting down.`);
 
     const existing = this.#lanes.get(agent);
     if (existing) return existing.path;
@@ -2775,6 +2813,15 @@ class Thread {
   /** Where this thread's lanes live: derivable, so a restart does not lose it. */
   get #lanesRoot(): string {
     return join(this.#config.dataDir, 'threads', this.id, 'lanes');
+  }
+
+  /** Paths the restart sweep deliberately retained and that would block a fresh lane. */
+  #retainedLeftoverLanes(): string[] {
+    const root = this.#lanesRoot;
+    if (!existsSync(root)) return [];
+    return readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !this.#lanes.has(entry.name))
+      .map((entry) => join(root, entry.name));
   }
 
   /**
