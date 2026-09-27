@@ -1196,14 +1196,44 @@ class Thread {
    */
   async stop(options: { discardLanes?: boolean } = {}): Promise<void> {
     const discard = options.discardLanes ?? false;
-    for (const watcher of this.#watchers.values()) watcher.stop();
+    const failures: unknown[] = [];
+    for (const watcher of this.#watchers.values()) {
+      try {
+        watcher.stop();
+      } catch (err) {
+        failures.push(err);
+      }
+    }
     this.#watchers.clear();
-    await Promise.all([...this.#adapters.values()].map((adapter) => adapter.stop()));
+    const adapterStops = await Promise.allSettled(
+      [...this.#adapters.values()].map((adapter) => adapter.stop()),
+    );
+    for (const result of adapterStops) {
+      if (result.status === 'rejected') failures.push(result.reason);
+    }
     this.#adapters.clear();
-    await this.sweepLeftoverLanes();
-    await this.#dropLanes(discard);
-    if (discard) await this.#disposeLeftoverLanes(true);
+    try {
+      await this.sweepLeftoverLanes();
+    } catch (err) {
+      failures.push(err);
+    }
+    try {
+      await this.#dropLanes(discard);
+    } catch (err) {
+      failures.push(err);
+    }
+    if (discard) {
+      try {
+        await this.#disposeLeftoverLanes(true);
+      } catch (err) {
+        failures.push(err);
+      }
+    }
     this.#bridge.unregisterThread(this.id);
+    if (failures.length > 0) {
+      const detail = failures.map((err) => err instanceof Error ? err.message : String(err)).join('; ');
+      throw new AggregateError(failures, `Thread ${this.id} shutdown failed: ${detail}`);
+    }
   }
 
   /**

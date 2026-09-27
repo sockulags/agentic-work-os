@@ -5,11 +5,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { HarnessEvent, ThreadRuntimeState } from '@awos/protocol';
+import type { AgentCapabilities, HarnessEvent, ModelTarget, ThreadRuntimeState } from '@awos/protocol';
 import { RETAINED_FILE, WORKSPACE_FILE, WORKSPACE_LOCAL_FILE, WORKSPACE_SCHEMA_VERSION } from '@awos/protocol';
 import { foldEvidence, foldOutcomes, foldRetained, foldTransitionEvaluations } from './work/ledger.js';
 import { Orchestrator } from './orchestrator.js';
 import type { HarnessConfig } from './config.js';
+import type { WorkerAdapter } from './adapters/agent.js';
+import type { AdapterFactory, WorkerProfileDefinition, WorkerRegistries } from './adapters/registry.js';
 
 /**
  * End-to-end tests against fake CLIs that speak the real wire protocols.
@@ -81,13 +83,65 @@ function makeRepo(): string {
   return dir;
 }
 
-async function boot(config: HarnessConfig): Promise<{ orch: Orchestrator; events: HarnessEvent[] }> {
-  const orch = new Orchestrator(config);
+async function boot(config: HarnessConfig, registries?: WorkerRegistries): Promise<{ orch: Orchestrator; events: HarnessEvent[] }> {
+  const orch = new Orchestrator(config, registries);
   await orch.start();
   orchestrator = orch;
   const events: HarnessEvent[] = [];
   orch.on('event', (event: HarnessEvent) => events.push(event));
   return { orch, events };
+}
+
+function shutdownFailingRegistry(): WorkerRegistries {
+  const capabilities: AgentCapabilities = {
+    streamingToolOutput: false,
+    streamingText: false,
+    reasoning: false,
+    plans: false,
+    turnDiff: false,
+    approvals: false,
+    resumableSessions: false,
+  };
+  const target: ModelTarget = {
+    id: 'shutdown-failure-target',
+    provider: 'claude',
+    model: 'test',
+    endpoint: null,
+    authProfile: null,
+  };
+  const profile: WorkerProfileDefinition = {
+    id: 'claude',
+    agent: 'claude',
+    label: 'Claude',
+    adapterId: 'shutdown-failure-adapter',
+    targetId: target.id,
+    policy: { permissionModes: ['default'], nativeTurnDiff: false },
+    probe: async () => ({ available: true, detail: 'test' }),
+  };
+  const adapter: WorkerAdapter = {
+    id: 'shutdown-failure-adapter',
+    capabilities,
+    nativeSessionId: null,
+    busy: false,
+    async start() {},
+    async sendTurn() {},
+    async interrupt() {},
+    resolveApproval() {},
+    async stop() {
+      throw new Error('injected adapter shutdown failure');
+    },
+  };
+  const factory: AdapterFactory = {
+    id: adapter.id,
+    capabilities,
+    supports: (candidate) => candidate.id === target.id,
+    create: () => adapter,
+  };
+  return {
+    profiles: [profile],
+    targets: [{ target, resolve: () => target }],
+    factories: [factory],
+  };
 }
 
 beforeEach(() => {
@@ -739,6 +793,27 @@ describe('cross-agent handoff', () => {
     assert.equal(registeredWorktrees(repo).length, 2, 'the lane is registered while it exists');
 
     await orch.deleteThread(thread.id);
+
+    assert.equal(orch.store.get(thread.id), undefined, 'the thread is gone');
+    assert.equal(existsSync(lane), false, 'the lane directory is gone');
+    assert.equal(registeredWorktrees(repo).length, 1, 'and so is its registration');
+  });
+
+  test('deleting a thread disposes its lane when adapter shutdown fails', async () => {
+    const { orch } = await boot(makeConfig(), shutdownFailingRegistry());
+    const repo = makeRepo();
+    const thread = orch.createThread({ cwd: repo });
+    await orch.setParallel(thread.id, true);
+    await orch.send(thread.id, 'claude', 'provision the lane');
+
+    const lane = orch.state(thread.id).lanes.claude;
+    assert.ok(lane);
+    assert.equal(registeredWorktrees(repo).length, 2, 'the lane is registered while it exists');
+
+    await assert.doesNotReject(
+      () => orch.deleteThread(thread.id),
+      'delete completes even when adapter shutdown reports a failure',
+    );
 
     assert.equal(orch.store.get(thread.id), undefined, 'the thread is gone');
     assert.equal(existsSync(lane), false, 'the lane directory is gone');
