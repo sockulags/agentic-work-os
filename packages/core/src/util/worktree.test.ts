@@ -376,6 +376,30 @@ describe('lanes', () => {
     });
   });
 
+  test('seeds and integrates binary files byte for byte', async () => {
+    const base = makeRepo();
+    // NUL, CR, LF and high bytes: a patch that only names the file, or a line-ending
+    // conversion anywhere on the way, changes or loses these.
+    const seeded = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0x00, 0x0d]);
+    writeFileSync(join(base, 'uncommitted.bin'), seeded);
+
+    const result = await provisionLane(base, lanePath());
+    assert.ok(result.ok, result.ok === false ? result.reason : '');
+    const lane = result.lane;
+    assert.deepEqual(readFileSync(join(lane.path, 'uncommitted.bin')), seeded);
+
+    const edited = Buffer.concat([seeded, Buffer.from([0x00, 0x01, 0xfe, 0x0a])]);
+    const added = Buffer.from(Array.from({ length: 256 }, (_, i) => i));
+    writeFileSync(join(lane.path, 'uncommitted.bin'), edited);
+    writeFileSync(join(lane.path, 'added.bin'), added);
+
+    const integrated = await integrateLane(lane, base);
+    assert.ok(integrated.ok, integrated.ok === false ? integrated.reason : '');
+    assert.deepEqual(readFileSync(join(base, 'uncommitted.bin')), edited);
+    assert.deepEqual(readFileSync(join(base, 'added.bin')), added);
+    assert.equal(await snapshotWorkingTree(base), await snapshotWorkingTree(lane.path));
+  });
+
   test('a lane leaves no branch behind in the user repo', async () => {
     const base = makeRepo();
     const result = await provisionLane(base, lanePath());

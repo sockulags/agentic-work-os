@@ -59,6 +59,12 @@ export type LaneDiffResult =
 const UNDETERMINED_LANE =
   "the lane's state could not be determined; integration was refused";
 
+/**
+ * Lane patches are applied, not read, so binary changes must carry their bytes: a seed or
+ * integration that only names a changed binary file is one `git apply` refuses.
+ */
+const LANE_PATCH = { binary: true } as const;
+
 export interface IntegrateOptions {
   /**
    * The exact lane tree that was evaluated. `undefined` keeps the legacy unbound utility
@@ -97,7 +103,7 @@ export async function provisionLane(baseCwd: string, path: string): Promise<Lane
 
   // Carry the uncommitted work across. A lane that silently starts from the last commit
   // would have the agent redo work the user can see in their editor.
-  const pending = await diffTrees(baseCwd, head, snapshot);
+  const pending = await diffTrees(baseCwd, head, snapshot, LANE_PATCH);
   if (pending) {
     const applied = await applyPatch(path, pending);
     if (!applied.applied) {
@@ -115,7 +121,7 @@ export async function laneDiff(lane: Lane): Promise<LaneDiffResult> {
   const now = await snapshotWorkingTree(lane.path);
   if (now === null) return { ok: false, reason: "the lane's state could not be determined" };
 
-  const patch = await diffTrees(lane.path, lane.baseTree, now);
+  const patch = await diffTrees(lane.path, lane.baseTree, now, LANE_PATCH);
   if (patch !== null) return { ok: true, patch };
   // A matching tree proves that the lane is unchanged. A different tree with no diff is
   // a git failure, not an empty lane, because diffTrees uses null for both outcomes.
@@ -154,7 +160,7 @@ export async function integrateLane(
     return { ok: false, reason: 'the lane changed after evaluation; integration was refused' };
   }
 
-  const patch = await diffTrees(lane.path, lane.baseTree, now);
+  const patch = await diffTrees(lane.path, lane.baseTree, now, LANE_PATCH);
   if (patch === null) {
     // `diffTrees` answers null for identical trees and for a git failure alike — an
     // unreadable baseline object, a diff too large for the buffer. Both SHAs are known
