@@ -58,7 +58,11 @@ export function spawnCli(
 
   const env = workerEnvironment(options.env);
 
-  if (!isWindows) {
+  // Native executables do not need cmd.exe. Keeping them direct is important for tests and
+  // wrappers that must observe the native pipe closing; command shims still use the shell.
+  const isNativeWindowsExecutable =
+    command === process.execPath || command.toLowerCase().endsWith('.exe');
+  if (!isWindows || isNativeWindowsExecutable) {
     return spawn(command, args, {
       cwd: options.cwd,
       env,

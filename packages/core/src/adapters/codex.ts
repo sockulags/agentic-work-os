@@ -162,10 +162,7 @@ export class CodexAdapter implements WorkerAdapter {
     this.#child = child;
 
     const onStdinError = (err: Error): void => {
-      const failure = workerStdinError('Codex', err);
-      log.error('stdin failed', { message: failure.message });
-      this.#rejectAllPending(failure);
-      this.#failTurn(failure);
+      this.#handleStdinError(err);
     };
     child.stdin.on('error', onStdinError);
 
@@ -517,10 +514,19 @@ export class CodexAdapter implements WorkerAdapter {
     const child = this.#child;
     if (!child) throw new Error('Codex is not running.');
     try {
-      child.stdin.write(encodeJsonLine(payload));
+      child.stdin.write(encodeJsonLine(payload), (err) => {
+        if (err) this.#handleStdinError(err);
+      });
     } catch (err) {
       throw workerStdinError('Codex', err);
     }
+  }
+
+  #handleStdinError(err: Error): void {
+    const failure = workerStdinError('Codex', err);
+    log.error('stdin failed', { message: failure.message });
+    this.#rejectAllPending(failure);
+    this.#failTurn(failure);
   }
 
   /**

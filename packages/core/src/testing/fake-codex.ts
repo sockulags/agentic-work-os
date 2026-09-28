@@ -12,27 +12,33 @@
 
 import { LineDecoder } from '../util/jsonl.js';
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
 
 const args = new Set(process.argv.slice(2));
 const exitMarkerIndex = process.argv.indexOf('--exit-marker');
 const exitMarker = exitMarkerIndex >= 0 ? process.argv[exitMarkerIndex + 1] : undefined;
+const exitReleaseIndex = process.argv.indexOf('--exit-release');
+const exitRelease = exitReleaseIndex >= 0 ? process.argv[exitReleaseIndex + 1] : undefined;
 let exitScheduled = false;
 
-if (exitMarker) {
-  process.on('exit', () => writeFileSync(exitMarker, 'exited\n', 'utf8'));
-}
-
-/** Exit after the handshake while a helper holds stdout/stderr open so the parent observes
- * exit before its child `close` event on every supported platform. */
+/** Exit after the handshake while a detached helper holds stdout/stderr until the test
+ * releases it. The parent therefore sees stdin's error before its child `close` on Windows/Linux. */
 function exitAfterReady(): void {
   if (!args.has('--exit-after-ready') || exitScheduled) return;
   exitScheduled = true;
-  const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 500)'], {
-    stdio: ['ignore', 'inherit', 'inherit'],
-    windowsHide: true,
-  });
-  holder.unref();
+  if (exitRelease && exitMarker) {
+    const holder = spawn(
+      process.execPath,
+      [
+        '-e',
+        "const fs=require('node:fs');const p=Number(process.argv[1]);const m=process.argv[2];const r=process.argv[3];const wait=setInterval(()=>{try{process.kill(p,0)}catch{clearInterval(wait);fs.writeFileSync(m,'exited\\n');setInterval(()=>{if(fs.existsSync(r))process.exit(0)},10)}},10)",
+        String(process.pid),
+        exitMarker,
+        exitRelease,
+      ],
+      { detached: true, stdio: ['ignore', 'inherit', 'inherit'], windowsHide: true },
+    );
+    holder.unref();
+  }
   setImmediate(() => process.exit(0));
 }
 

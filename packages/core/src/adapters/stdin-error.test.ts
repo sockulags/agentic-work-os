@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dirname, join } from 'node:path';
@@ -81,6 +81,7 @@ function completed(events: AdapterEvent[]): Extract<AdapterEvent, { kind: 'turn.
 test('Claude survives a write after its exited CLI and closes one error turn', { concurrency: false }, async () => {
   const dir = mkdtempSync(join(process.env.TEMP ?? process.cwd(), 'awos-stdin-claude-'));
   const marker = join(dir, 'exited');
+  const release = join(dir, 'release');
   const events: AdapterEvent[] = [];
   const adapter = new ClaudeAdapter({
     threadId: 'thread-1',
@@ -89,7 +90,14 @@ test('Claude survives a write after its exited CLI and closes one error turn', {
     agentId: 'claude',
     cwd: dir,
     config: testConfig(dir, {
-      claudeBinArgs: [FAKE_CLAUDE, '--exit-after-ready', '--exit-marker', marker],
+      claudeBinArgs: [
+        FAKE_CLAUDE,
+        '--exit-after-ready',
+        '--exit-marker',
+        marker,
+        '--exit-release',
+        release,
+      ],
     }),
     permissionMode: 'default',
     permissionBridge: permissionBridge(),
@@ -100,23 +108,22 @@ test('Claude survives a write after its exited CLI and closes one error turn', {
 
   try {
     await adapter.start();
-    // The fake writes this marker from its exit handler. Its helper child keeps the pipes
-    // open, so this is deterministically before the parent's `close` event on Windows/Linux.
+    // The fake has exited; its detached holder keeps close pending until the write assertion
+    // releases it, so this ordering is deterministic on Windows/Linux.
     await waitForFile(marker);
 
     const loose = await unheldRejections(async () => {
-      // Depending on which pipe closes first, Node reports either the handled stdin error
-      // or the child's close. Both are the worker-scoped terminal failure for this turn.
-      await assert.rejects(adapter.sendTurn('write after exit'), /Claude Code (worker stdin error|exited)/);
+      await assert.rejects(adapter.sendTurn('write after exit'), /Claude Code worker stdin error/);
     });
 
     assert.deepEqual(loose, []);
     const terminal = completed(events);
     assert.equal(terminal.length, 1);
     assert.equal(terminal[0]?.reason, 'error');
-    assert.match(terminal[0]?.error ?? '', /Claude Code/);
+    assert.match(terminal[0]?.error ?? '', /Claude Code worker stdin error/);
     assert.equal(adapter.busy, false);
   } finally {
+    writeFileSync(release, 'release\n', 'utf8');
     await adapter.stop();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -125,6 +132,7 @@ test('Claude survives a write after its exited CLI and closes one error turn', {
 test('Codex survives a write after its exited CLI and closes one error turn', { concurrency: false }, async () => {
   const dir = mkdtempSync(join(process.env.TEMP ?? process.cwd(), 'awos-stdin-codex-'));
   const marker = join(dir, 'exited');
+  const release = join(dir, 'release');
   const events: AdapterEvent[] = [];
   const adapter = new CodexAdapter({
     threadId: 'thread-1',
@@ -133,7 +141,14 @@ test('Codex survives a write after its exited CLI and closes one error turn', { 
     agentId: 'codex',
     cwd: dir,
     config: testConfig(dir, {
-      codexBinArgs: [FAKE_CODEX, '--exit-after-ready', '--exit-marker', marker],
+      codexBinArgs: [
+        FAKE_CODEX,
+        '--exit-after-ready',
+        '--exit-marker',
+        marker,
+        '--exit-release',
+        release,
+      ],
     }),
     permissionMode: 'default',
     permissionBridge: permissionBridge(),
@@ -144,21 +159,22 @@ test('Codex survives a write after its exited CLI and closes one error turn', { 
 
   try {
     await adapter.start();
-    // The fake writes this marker from its exit handler. Its helper child keeps the pipes
-    // open, so this is deterministically before the parent's `close` event on Windows/Linux.
+    // The fake has exited; its detached holder keeps close pending until the write assertion
+    // releases it, so this ordering is deterministic on Windows/Linux.
     await waitForFile(marker);
 
     const loose = await unheldRejections(async () => {
-      await assert.rejects(adapter.sendTurn('write after exit'), /Codex (worker stdin error|app-server exited)/);
+      await assert.rejects(adapter.sendTurn('write after exit'), /Codex worker stdin error/);
     });
 
     assert.deepEqual(loose, []);
     const terminal = completed(events);
     assert.equal(terminal.length, 1);
     assert.equal(terminal[0]?.reason, 'error');
-    assert.match(terminal[0]?.error ?? '', /Codex/);
+    assert.match(terminal[0]?.error ?? '', /Codex worker stdin error/);
     assert.equal(adapter.busy, false);
   } finally {
+    writeFileSync(release, 'release\n', 'utf8');
     await adapter.stop();
     rmSync(dir, { recursive: true, force: true });
   }
