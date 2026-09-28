@@ -487,7 +487,7 @@ export class ClaudeAdapter implements WorkerAdapter {
 
   #onStreamEvent(msg: ClaudeWire.ClaudeStreamEvent): void {
     // Subagent streams would interleave with the main one and garble the transcript.
-    if (msg.parent_tool_use_id !== null) return;
+    if (typeof msg.parent_tool_use_id === 'string' && msg.parent_tool_use_id.length > 0) return;
 
     const event = msg.event;
 
@@ -542,7 +542,8 @@ export class ClaudeAdapter implements WorkerAdapter {
   }
 
   #onAssistant(msg: ClaudeWire.ClaudeAssistantEvent): void {
-    const fromSubagent = msg.parent_tool_use_id !== null;
+    const fromSubagent =
+      typeof msg.parent_tool_use_id === 'string' && msg.parent_tool_use_id.length > 0;
     const messageId = msg.message.id ?? this.#streamMessageId ?? randomUUID();
     if (msg.message.model) this.#model = msg.message.model;
 

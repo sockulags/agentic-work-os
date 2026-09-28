@@ -96,8 +96,8 @@ export interface ClaudeAssistantEvent {
     stop_reason?: string | null;
     usage?: ClaudeUsage;
   };
-  /** Non-null when the message came from a subagent. */
-  parent_tool_use_id: string | null;
+  /** A non-empty string when the message came from a subagent. */
+  parent_tool_use_id?: string | null;
   session_id: string;
   uuid?: string;
 }
@@ -108,7 +108,7 @@ export interface ClaudeUserEvent {
     role: 'user';
     content: string | ClaudeContentBlock[];
   };
-  parent_tool_use_id: string | null;
+  parent_tool_use_id?: string | null;
   session_id: string;
   uuid?: string;
 }
@@ -128,7 +128,7 @@ export interface ClaudeStreamEvent {
     content_block?: { type: string; id?: string; name?: string };
     message?: { id?: string };
   };
-  parent_tool_use_id: string | null;
+  parent_tool_use_id?: string | null;
   session_id: string;
   uuid?: string;
 }

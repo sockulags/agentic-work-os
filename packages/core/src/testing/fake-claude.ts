@@ -8,7 +8,7 @@
  * mock. Behaviour is scripted through argv so one binary covers several scenarios.
  *
  * Usage: fake-claude.js [--tool] [--tools] [--permission] [--slow] [--markdown] [--think]
- *   [--think-omit-final] [--crash-on-turn]
+ *   [--think-omit-final] [--subagent] [--crash-on-turn]
  *
  * `--crash-on-turn` exits as soon as the first turn arrives, without answering it: a CLI
  * that dies mid-turn. It reads the turn first, so the harness's write never meets a
@@ -20,6 +20,7 @@ import { writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 
 const args = new Set(process.argv.slice(2));
+const parentToolUseId = args.has('--subagent') ? 'parent-tool-use-id' : undefined;
 const exitMarkerIndex = process.argv.indexOf('--exit-marker');
 const exitMarker = exitMarkerIndex >= 0 ? process.argv[exitMarkerIndex + 1] : undefined;
 const exitReleaseIndex = process.argv.indexOf('--exit-release');
@@ -183,7 +184,7 @@ async function runTurn(text: string): Promise<void> {
   emit({
     type: 'stream_event',
     event: { type: 'message_start', message: { id: messageId } },
-    parent_tool_use_id: null,
+    parent_tool_use_id: parentToolUseId,
     session_id: SESSION_ID,
   });
 
@@ -199,7 +200,7 @@ async function runTurn(text: string): Promise<void> {
     emit({
       type: 'stream_event',
       event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } },
-      parent_tool_use_id: null,
+      parent_tool_use_id: parentToolUseId,
       session_id: SESSION_ID,
     });
 
@@ -219,7 +220,7 @@ async function runTurn(text: string): Promise<void> {
           index: 0,
           delta: { type: 'thinking_delta', thinking: chunk },
         },
-        parent_tool_use_id: null,
+        parent_tool_use_id: parentToolUseId,
         session_id: SESSION_ID,
       });
       // Longer than the text pause on purpose: the UI times the block from its first
@@ -230,7 +231,7 @@ async function runTurn(text: string): Promise<void> {
     emit({
       type: 'stream_event',
       event: { type: 'content_block_stop', index: 0 },
-      parent_tool_use_id: null,
+      parent_tool_use_id: parentToolUseId,
       session_id: SESSION_ID,
     });
   }
@@ -238,7 +239,7 @@ async function runTurn(text: string): Promise<void> {
   emit({
     type: 'stream_event',
     event: { type: 'content_block_start', index: textIndex, content_block: { type: 'text' } },
-    parent_tool_use_id: null,
+    parent_tool_use_id: parentToolUseId,
     session_id: SESSION_ID,
   });
 
@@ -254,7 +255,7 @@ async function runTurn(text: string): Promise<void> {
         index: textIndex,
         delta: { type: 'text_delta', text: chunk },
       },
-      parent_tool_use_id: null,
+      parent_tool_use_id: parentToolUseId,
       session_id: SESSION_ID,
     });
     if (args.has('--slow')) await sleep(5);
@@ -263,7 +264,7 @@ async function runTurn(text: string): Promise<void> {
   emit({
     type: 'stream_event',
     event: { type: 'content_block_stop', index: textIndex },
-    parent_tool_use_id: null,
+    parent_tool_use_id: parentToolUseId,
     session_id: SESSION_ID,
   });
 
@@ -281,7 +282,7 @@ async function runTurn(text: string): Promise<void> {
           ]
         : [{ type: 'text', text: finalText }],
     },
-    parent_tool_use_id: null,
+    parent_tool_use_id: parentToolUseId,
     session_id: SESSION_ID,
   });
 
@@ -296,7 +297,7 @@ async function runTurn(text: string): Promise<void> {
           { type: 'tool_use', id: toolUseId, name: 'Bash', input: { command: 'echo hello' } },
         ],
       },
-      parent_tool_use_id: null,
+      parent_tool_use_id: parentToolUseId,
       session_id: SESSION_ID,
     });
 
@@ -348,7 +349,7 @@ async function runToolBurst(messageId: string): Promise<void> {
         input: call.input,
       })),
     },
-    parent_tool_use_id: null,
+    parent_tool_use_id: parentToolUseId,
     session_id: SESSION_ID,
   });
 
@@ -376,7 +377,7 @@ async function runToolBurst(messageId: string): Promise<void> {
       role: 'assistant',
       content: [{ type: 'text', text: 'Tests pass; lint is not installed in this checkout.' }],
     },
-    parent_tool_use_id: null,
+    parent_tool_use_id: parentToolUseId,
     session_id: SESSION_ID,
   });
 }
