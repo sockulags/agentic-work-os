@@ -181,6 +181,32 @@ describe('Claude adapter end to end', () => {
     assert.equal(final?.kind === 'message.completed' ? final.text : null, assembled);
   });
 
+  test('treats absent parent attribution as main-agent output', async () => {
+    const { orch, events } = await boot(makeConfig());
+    const thread = orch.createThread({ cwd: workDir });
+
+    await orch.send(thread.id, 'claude', 'hello without attribution');
+
+    assert.ok(events.some((event) => event.kind === 'message.delta'), 'streamed delta emitted');
+    assert.ok(
+      events.some((event) => event.kind === 'message.completed'),
+      'completed assistant message emitted',
+    );
+  });
+
+  test('suppresses output with non-empty parent attribution', async () => {
+    const { orch, events } = await boot(
+      makeConfig({ claudeBinArgs: [FAKE_CLAUDE, '--subagent'] }),
+    );
+    const thread = orch.createThread({ cwd: workDir });
+
+    await orch.send(thread.id, 'claude', 'subagent output');
+
+    assert.equal(events.filter((event) => event.kind === 'message.delta').length, 0);
+    assert.equal(events.filter((event) => event.kind === 'message.completed').length, 0);
+    assert.ok(events.some((event) => event.kind === 'turn.completed'), 'turn still completed');
+  });
+
   test('captures the native session id so a later run can resume', async () => {
     const { orch } = await boot(makeConfig());
     const thread = orch.createThread({ cwd: workDir });
