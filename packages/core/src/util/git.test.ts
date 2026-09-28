@@ -91,6 +91,21 @@ describe('git working-tree snapshots', () => {
     assert.doesNotMatch(patch, /ignored\.txt/, 'gitignored files are excluded');
   });
 
+  test('names a binary change for display and carries its bytes only when asked', async () => {
+    const base = await snapshotWorkingTree(repo);
+    writeFileSync(join(repo, 'image.bin'), Buffer.from([0x00, 0xff, 0x0d, 0x0a, 0x89, 0x50]));
+    const next = await snapshotWorkingTree(repo);
+
+    // The per-turn display diff keeps the form the UI already parses.
+    const display = (await diffTrees(repo, base!, next!)) ?? '';
+    assert.match(display, /Binary files .*image\.bin differ/);
+    assert.doesNotMatch(display, /GIT binary patch/);
+
+    const applicable = (await diffTrees(repo, base!, next!, { binary: true })) ?? '';
+    assert.match(applicable, /image\.bin/);
+    assert.match(applicable, /GIT binary patch/);
+  });
+
   test('returns null when the two snapshots are identical', async () => {
     const snap = await snapshotWorkingTree(repo);
     assert.equal(await diffTrees(repo, snap!, snap!), null);

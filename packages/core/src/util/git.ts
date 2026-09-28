@@ -129,6 +129,17 @@ export async function snapshotWorkingTree(cwd: string): Promise<string | null> {
   }
 }
 
+export interface DiffTreesOptions {
+  /**
+   * Emit binary changes as `GIT binary patch` sections that `git apply` can replay.
+   *
+   * Without it a changed binary file is only named ("Binary files a/x and b/x differ"),
+   * which reads fine but carries nothing to apply. Lanes need the applicable form; the
+   * per-turn display diff keeps the named form the UI already parses.
+   */
+  binary?: boolean;
+}
+
 /**
  * Unified diff between two tree snapshots, or null when they're identical or unavailable.
  *
@@ -139,6 +150,7 @@ export async function diffTrees(
   cwd: string,
   before: string,
   after: string,
+  options: DiffTreesOptions = {},
 ): Promise<string | null> {
   if (before === after) return null;
 
@@ -147,6 +159,7 @@ export async function diffTrees(
     '--no-color',
     // Detect renames so a moved file reads as a rename, not a delete + add.
     '--find-renames',
+    ...(options.binary ? ['--binary'] : []),
     before,
     after,
   ]);
