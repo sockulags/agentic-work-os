@@ -185,6 +185,13 @@ export class ClaudeAdapter implements WorkerAdapter {
     const child = spawnCli(config.claudeBin, args, { cwd });
     this.#child = child;
 
+    const onStdinError = (err: Error): void => {
+      const failure = workerStdinError('Claude Code', err);
+      log.error('stdin failed', { message: failure.message });
+      this.#failTurn(failure);
+    };
+    child.stdin.on('error', onStdinError);
+
     readJsonLines<ClaudeWire.ClaudeOutputEvent>(child.stdout, {
       onMessage: (msg) => this.#onEvent(msg),
       onUnparseable: (line) => log.debug('non-json stdout', { line: line.slice(0, 200) }),
@@ -293,9 +300,13 @@ export class ClaudeAdapter implements WorkerAdapter {
         },
       };
       this.#turnStartedAt = startedAt;
-      child.stdin.write(encodeJsonLine(payload), (err) => {
-        if (err) this.#failTurn(err);
-      });
+      try {
+        child.stdin.write(encodeJsonLine(payload), (err) => {
+          if (err) this.#failTurn(workerStdinError('Claude Code', err));
+        });
+      } catch (err) {
+        this.#failTurn(workerStdinError('Claude Code', err));
+      }
     });
   }
 
@@ -323,7 +334,11 @@ export class ClaudeAdapter implements WorkerAdapter {
         resolve(ok);
       });
 
-      child.stdin.write(encodeJsonLine(control));
+      try {
+        child.stdin.write(encodeJsonLine(control));
+      } catch (err) {
+        this.#failTurn(workerStdinError('Claude Code', err));
+      }
     });
 
     if (acknowledged) return;
@@ -687,6 +702,11 @@ export class ClaudeAdapter implements WorkerAdapter {
     this.#turnId = null;
     this.#turnSettle?.reject(err);
   }
+}
+
+function workerStdinError(worker: string, err: unknown): Error {
+  const message = err instanceof Error ? err.message : String(err);
+  return new Error(`${worker} worker stdin error: ${message}`);
 }
 
 // ---------------------------------------------------------------------------

@@ -11,8 +11,30 @@
  */
 
 import { LineDecoder } from '../util/jsonl.js';
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 
 const args = new Set(process.argv.slice(2));
+const exitMarkerIndex = process.argv.indexOf('--exit-marker');
+const exitMarker = exitMarkerIndex >= 0 ? process.argv[exitMarkerIndex + 1] : undefined;
+let exitScheduled = false;
+
+if (exitMarker) {
+  process.on('exit', () => writeFileSync(exitMarker, 'exited\n', 'utf8'));
+}
+
+/** Exit after the handshake while a helper holds stdout/stderr open so the parent observes
+ * exit before its child `close` event on every supported platform. */
+function exitAfterReady(): void {
+  if (!args.has('--exit-after-ready') || exitScheduled) return;
+  exitScheduled = true;
+  const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 500)'], {
+    stdio: ['ignore', 'inherit', 'inherit'],
+    windowsHide: true,
+  });
+  holder.unref();
+  setImmediate(() => process.exit(0));
+}
 
 /**
  * How much of the prompt the fake echoes back.
@@ -232,6 +254,7 @@ function main(): void {
         case 'thread/start':
           emit({ id: msg.id, result: { thread: { id: THREAD_ID } } });
           emit({ method: 'thread/started', params: { thread: { id: THREAD_ID } } });
+          exitAfterReady();
           break;
 
         case 'thread/resume': {

@@ -17,8 +17,29 @@
 
 import { LineDecoder } from '../util/jsonl.js';
 import { writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 
 const args = new Set(process.argv.slice(2));
+const exitMarkerIndex = process.argv.indexOf('--exit-marker');
+const exitMarker = exitMarkerIndex >= 0 ? process.argv[exitMarkerIndex + 1] : undefined;
+let exitScheduled = false;
+
+if (exitMarker) {
+  process.on('exit', () => writeFileSync(exitMarker, 'exited\n', 'utf8'));
+}
+
+/** Exit after readiness while a helper holds stdout/stderr open so the parent observes exit
+ * before its child `close` event on every supported platform. */
+function exitAfterReady(): void {
+  if (!args.has('--exit-after-ready') || exitScheduled) return;
+  exitScheduled = true;
+  const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 500)'], {
+    stdio: ['ignore', 'inherit', 'inherit'],
+    windowsHide: true,
+  });
+  holder.unref();
+  setImmediate(() => process.exit(0));
+}
 
 if (args.has('--version')) {
   process.stdout.write('fake-claude 1.0\n');
@@ -357,6 +378,18 @@ function main(): void {
   const decoder = new LineDecoder();
   const queue: string[] = [];
   let running = false;
+
+  if (args.has('--exit-after-ready')) {
+    emit({
+      type: 'system',
+      subtype: 'init',
+      session_id: SESSION_ID,
+      model: 'claude-fake-1',
+      tools: ['Bash', 'Read'],
+      cwd: process.cwd(),
+    });
+    exitAfterReady();
+  }
 
   const drain = async (): Promise<void> => {
     if (running) return;
