@@ -1,7 +1,16 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { provisionLane, laneDiff, integrateLane, leftoverLaneWork, removeLane } from './worktree.js';
@@ -91,6 +100,75 @@ describe('lanes', () => {
     assert.equal(readFileSync(join(base, 'a.txt'), 'utf8'), 'changed in the lane\n');
     assert.equal(readFileSync(join(base, 'added.txt'), 'utf8'), 'new from the lane\n');
     assert.equal(readFileSync(join(lane.path, 'a.txt'), 'utf8'), 'changed in the lane\n');
+  });
+
+  test('keeps the evaluated baseline when apply changes the lane after recheck', async () => {
+    const base = makeRepo();
+    mkdirSync(join(base, 'dir'));
+    mkdirSync(join(base, 'other'));
+    writeFileSync(join(base, 'dir', 'a.txt'), 'one\n');
+    writeFileSync(join(base, 'other', 'a.txt'), 'one\n');
+    execFileSync('git', ['add', '-A'], { cwd: base });
+    execFileSync('git', ['commit', '-qm', 'directories'], { cwd: base });
+
+    const result = await provisionLane(base, lanePath());
+    assert.ok(result.ok);
+    const lane = result.lane;
+
+    writeFileSync(join(lane.path, 'dir', 'a.txt'), 'changed in the lane\n');
+    const evaluatedTree = await snapshotWorkingTree(lane.path);
+    assert.ok(evaluatedTree);
+
+    let integrated;
+    if (process.platform === 'win32') {
+      // Windows junctions let git apply write through the base path into the lane.
+      rmSync(join(base, 'dir'), { recursive: true, force: true });
+      symlinkSync(join(lane.path, 'other'), join(base, 'dir'), 'junction');
+      integrated = await integrateLane(lane, base, { expectedTree: evaluatedTree });
+    } else {
+      // POSIX git rejects directory symlinks during apply. A git shim instead writes the
+      // second lane file when the real `git apply -` starts, after the final recheck and
+      // before baseline assignment.
+      const shim = mkdtempSync(join(tmpdir(), 'awos-git-shim-'));
+      const target = join(lane.path, 'other', 'a.txt');
+      const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
+      const shimPath = join(shim, 'git');
+      writeFileSync(
+        shimPath,
+        '#!/bin/sh\n'
+          + 'if [ "$1" = "apply" ] && [ "$2" = "-" ]; then\n'
+          + '  printf "%s\\n" "changed in the lane" > "$AWOS_LANE_TARGET"\n'
+          + 'fi\n'
+          + 'exec "$AWOS_REAL_GIT" "$@"\n',
+      );
+      chmodSync(shimPath, 0o755);
+
+      const oldPath = process.env.PATH;
+      const oldTarget = process.env.AWOS_LANE_TARGET;
+      const oldRealGit = process.env.AWOS_REAL_GIT;
+      process.env.PATH = [shim, oldPath].filter(Boolean).join(':');
+      process.env.AWOS_LANE_TARGET = target;
+      process.env.AWOS_REAL_GIT = realGit;
+      try {
+        integrated = await integrateLane(lane, base, { expectedTree: evaluatedTree });
+      } finally {
+        if (oldPath === undefined) delete process.env.PATH;
+        else process.env.PATH = oldPath;
+        if (oldTarget === undefined) delete process.env.AWOS_LANE_TARGET;
+        else process.env.AWOS_LANE_TARGET = oldTarget;
+        if (oldRealGit === undefined) delete process.env.AWOS_REAL_GIT;
+        else process.env.AWOS_REAL_GIT = oldRealGit;
+        rmSync(shim, { recursive: true, force: true });
+      }
+    }
+
+    assert.equal(integrated.ok, true, integrated.ok ? '' : integrated.reason);
+    assert.equal(readFileSync(join(lane.path, 'other', 'a.txt'), 'utf8'), 'changed in the lane\n');
+    assert.equal(lane.baseTree, evaluatedTree);
+
+    const remaining = await laneDiff(lane);
+    assert.ok(remaining.ok, remaining.ok ? '' : remaining.reason);
+    assert.match(remaining.ok ? remaining.patch ?? '' : '', /other\/a\.txt/);
   });
 
   test('refuses a lane that changed after its evaluated tree was captured', async () => {

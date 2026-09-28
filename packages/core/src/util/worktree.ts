@@ -184,8 +184,7 @@ export async function integrateLane(
   const applied = await applyPatch(baseCwd, patch);
   if (!applied.applied) return { ok: false, reason: applied.reason };
 
-  const after = await snapshotWorkingTree(lane.path);
-  if (after !== null) lane.baseTree = after;
+  lane.baseTree = now;
 
   log.info('lane integrated', { lane: lane.path, chars: patch.length });
   return { ok: true, patch };
