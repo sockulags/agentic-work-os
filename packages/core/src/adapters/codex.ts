@@ -161,6 +161,11 @@ export class CodexAdapter implements WorkerAdapter {
     const child = spawnCli(config.codexBin, [...config.codexBinArgs, 'app-server'], { cwd });
     this.#child = child;
 
+    const onStdinError = (err: Error): void => {
+      this.#handleStdinError(err);
+    };
+    child.stdin.on('error', onStdinError);
+
     const detachStdout = readJsonLines<CodexWire.JsonRpcMessage>(child.stdout, {
       onMessage: (msg) => this.#onMessage(msg),
       onUnparseable: (line) => log.debug('non-json stdout', { line: line.slice(0, 200) }),
@@ -223,6 +228,7 @@ export class CodexAdapter implements WorkerAdapter {
       detachStdout();
       child.stderr.off('data', onStderr);
       child.off('error', onSpawnError);
+      child.stdin.off('error', onStdinError);
       child.off('close', onClose);
       // Nobody reads either pipe now, and an unread pipe never reaches EOF — so its
       // stream never closes, and neither does the child. Drain both into nothing.
@@ -507,7 +513,20 @@ export class CodexAdapter implements WorkerAdapter {
   #write(payload: unknown): void {
     const child = this.#child;
     if (!child) throw new Error('Codex is not running.');
-    child.stdin.write(encodeJsonLine(payload));
+    try {
+      child.stdin.write(encodeJsonLine(payload), (err) => {
+        if (err) this.#handleStdinError(err);
+      });
+    } catch (err) {
+      throw workerStdinError('Codex', err);
+    }
+  }
+
+  #handleStdinError(err: Error): void {
+    const failure = workerStdinError('Codex', err);
+    log.error('stdin failed', { message: failure.message });
+    this.#rejectAllPending(failure);
+    this.#failTurn(failure);
   }
 
   /**
@@ -936,6 +955,11 @@ export class CodexAdapter implements WorkerAdapter {
     this.#serverTurnId = null;
     this.#turnSettle?.reject(err);
   }
+}
+
+function workerStdinError(worker: string, err: unknown): Error {
+  const message = err instanceof Error ? err.message : String(err);
+  return new Error(`${worker} worker stdin error: ${message}`);
 }
 
 /**
