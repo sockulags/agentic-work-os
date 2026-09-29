@@ -637,17 +637,33 @@ function Gate({ agent }: { agent: WorkerProfileId }): React.JSX.Element | null {
 function StartWork(): React.JSX.Element {
   const { startRun, activeThread, runtime } = useHarnessContext();
   const [text, setText] = useState('');
+  // The instruction stays in the form until the daemon has taken it; a refused start keeps
+  // the text so nothing typed is lost to a connection that happened to be down.
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const agent: WorkerProfileId = activeThread?.activeAgent ?? 'claude';
   const busy = runtime?.busy.includes(agent) ?? false;
+
+  async function start(instruction: string): Promise<void> {
+    setStarting(true);
+    setError(null);
+    try {
+      await startRun(instruction, agent);
+      setText('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not start the run.');
+    } finally {
+      setStarting(false);
+    }
+  }
 
   return (
     <form
       className="space-y-2 border-t border-border pt-2"
       onSubmit={(event) => {
         event.preventDefault();
-        if (text.trim() === '' || busy) return;
-        void startRun(text.trim(), agent);
-        setText('');
+        if (text.trim() === '' || busy || starting) return;
+        void start(text.trim());
       }}
     >
       <input
@@ -655,11 +671,17 @@ function StartWork(): React.JSX.Element {
         onChange={(e) => setText(e.target.value)}
         placeholder="What should the agent do about this issue?"
         aria-label="Run instruction"
+        disabled={starting}
         className="awos-input w-full py-1.5 text-xs"
       />
-      <Button type="submit" size="sm" variant="outline" disabled={busy} className="h-auto px-2 py-1 text-xs">
+      {error !== null && (
+        <p role="alert" className="break-words text-[10px] text-destructive">
+          {error}
+        </p>
+      )}
+      <Button type="submit" size="sm" variant="outline" disabled={busy || starting} className="h-auto px-2 py-1 text-xs">
         <Play className="mr-1 h-3 w-3" />
-        {busy ? `${agent} is working` : `Start work with ${agent}`}
+        {busy ? `${agent} is working` : starting ? `Starting ${agent}…` : `Start work with ${agent}`}
       </Button>
     </form>
   );

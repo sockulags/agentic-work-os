@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'vitest';
-import { fireEvent, screen } from '@testing-library/react';
+import { act, fireEvent, screen } from '@testing-library/react';
 import type { EvidenceItem, RetainedItem, WorkItem, WorkSourceError } from '@awos/protocol';
 import { renderWithHarness, idleRuntime } from '@/test-harness';
 import type { RunView } from '@/lib/runs';
@@ -218,6 +218,40 @@ describe('WorkPanel', () => {
       fireEvent.click(screen.getByRole('button', { name: /Start work with codex/ }));
 
       expect(startRun).toHaveBeenCalledWith('do the first slice', 'codex');
+    });
+
+    test('keeps the instruction and holds the form until the start is accepted', async () => {
+      let accept!: () => void;
+      const startRun = vi.fn(() => new Promise<void>((resolve) => { accept = resolve; }));
+      render({ startRun, activeThread: { activeAgent: 'codex' }, runtime: idleRuntime() });
+
+      const input = screen.getByLabelText<HTMLInputElement>('Run instruction');
+      fireEvent.change(input, { target: { value: 'do the first slice' } });
+      fireEvent.click(screen.getByRole('button', { name: /Start work with codex/ }));
+
+      expect(input.value).toBe('do the first slice');
+      expect(input.disabled).toBe(true);
+      expect(screen.getByRole<HTMLButtonElement>('button', { name: /Starting codex/ }).disabled).toBe(true);
+
+      await act(async () => accept());
+
+      expect(input.value).toBe('');
+      expect(input.disabled).toBe(false);
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
+
+    test('a refused start keeps the instruction and says why', async () => {
+      const startRun = vi.fn().mockRejectedValue(new Error('Not connected to the harness.'));
+      render({ startRun, activeThread: { activeAgent: 'codex' }, runtime: idleRuntime() });
+
+      const input = screen.getByLabelText<HTMLInputElement>('Run instruction');
+      fireEvent.change(input, { target: { value: 'do the first slice' } });
+      fireEvent.click(screen.getByRole('button', { name: /Start work with codex/ }));
+
+      expect((await screen.findByRole('alert')).textContent).toBe('Not connected to the harness.');
+      expect(input.value).toBe('do the first slice');
+      expect(input.disabled).toBe(false);
+      expect(screen.getByRole<HTMLButtonElement>('button', { name: /Start work with codex/ }).disabled).toBe(false);
     });
 
     test('will not start a second run while that agent is working', () => {
