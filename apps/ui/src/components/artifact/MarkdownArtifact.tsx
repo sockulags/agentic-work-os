@@ -1,5 +1,6 @@
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { markdownUrlTransform, SafeMarkdownImage } from '../markdown-images';
 
 /**
  * Markdown artifacts: headings, lists, tables, code, links.
@@ -43,6 +44,13 @@ const COMPONENTS: Components = {
       {children}
     </a>
   ),
+  img: ({ src, alt }) => (
+    <SafeMarkdownImage
+      src={src}
+      alt={alt}
+      linkClassName="text-foreground underline underline-offset-2 hover:text-foreground/80"
+    />
+  ),
   code: ({ className, children }) => {
     // `react-markdown` uses the same component for inline spans and fenced blocks; the
     // language class is what tells them apart.
@@ -79,7 +87,11 @@ const COMPONENTS: Components = {
 export function MarkdownArtifact({ content }: { content: string }): React.JSX.Element {
   return (
     <div className="px-4 py-3 text-xs text-foreground">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={COMPONENTS}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={COMPONENTS}
+        urlTransform={markdownUrlTransform}
+      >
         {content}
       </ReactMarkdown>
     </div>
