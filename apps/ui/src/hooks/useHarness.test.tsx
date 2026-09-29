@@ -159,6 +159,41 @@ function opened(state: ThreadRuntimeState): ServerResponseBody {
   return { type: 'thread.opened', thread, events: [startedEvent], state };
 }
 
+function openedFor(openedThread: ThreadSummary, state: ThreadRuntimeState): ServerResponseBody {
+  return { type: 'thread.opened', thread: openedThread, events: [], state };
+}
+
+function gateResponse(
+  agent: string = 'claude',
+  threadId: string = 't1',
+  allowed = true,
+  tree = 'tree-1',
+): ServerResponseBody {
+  return {
+    type: 'gate',
+    threadId,
+    agent,
+    allowed,
+    requirements: [],
+    candidate: { commit: 'commit-1', tree, dirty: false },
+  };
+}
+
+function gateTriggerEvent(kind: 'turn.completed' | 'lane.updated', seq: number): HarnessEvent {
+  return {
+    id: `event-${seq}`,
+    seq,
+    threadId: 't1',
+    agent: 'claude',
+    profileId: 'claude',
+    turnId: 'turn-1',
+    ts: seq,
+    ...(kind === 'turn.completed'
+      ? { kind, reason: 'completed', error: null, durationMs: 1 }
+      : { kind, status: 'provisioned', path: 'C:/lane/claude', detail: null }),
+  } as unknown as HarnessEvent;
+}
+
 describe('useHarness run runtime boundaries', () => {
   beforeEach(() => fakeClient.reset());
 
@@ -248,5 +283,105 @@ describe('useHarness run runtime boundaries', () => {
 
     expect(result.current.threads).toHaveLength(1);
     expect(result.current.threads[0]?.id).toBe(thread.id);
+  });
+});
+
+describe('useHarness gate freshness', () => {
+  beforeEach(() => fakeClient.reset());
+
+  test('re-reads after a turn completes, a verify request settles, and a lane update', async () => {
+    fakeClient.setThreadOpenResponse(opened(runtime(runState('completed', false, false))));
+    const { result } = renderHook(() => useHarness());
+
+    await act(async () => { await result.current.openThread('t1'); });
+
+    let gateReads = 0;
+    fakeClient.setRequestHandler(async (request) => {
+      if (request.type === 'gate.get') {
+        gateReads += 1;
+        return gateResponse();
+      }
+      return { type: 'ok' };
+    });
+
+    await act(async () => { await result.current.readGate('claude'); });
+    expect(gateReads).toBe(1);
+
+    act(() => { fakeClient.emitPush({ type: 'event', event: gateTriggerEvent('turn.completed', 2) }); });
+    await waitFor(() => expect(gateReads).toBe(2));
+
+    await act(async () => { await result.current.runCheck('claude', 'npm test'); });
+    expect(gateReads).toBe(3);
+
+    act(() => { fakeClient.emitPush({ type: 'event', event: gateTriggerEvent('lane.updated', 3) }); });
+    await waitFor(() => expect(gateReads).toBe(4));
+  });
+
+  test('marks a cached verdict stale when the re-read fails', async () => {
+    fakeClient.setThreadOpenResponse(opened(runtime(runState('completed', false, false))));
+    const { result } = renderHook(() => useHarness());
+
+    await act(async () => { await result.current.openThread('t1'); });
+    fakeClient.setRequestHandler(async (request) => {
+      if (request.type === 'gate.get') return gateResponse();
+      return { type: 'ok' };
+    });
+    await act(async () => { await result.current.readGate('claude'); });
+    expect(result.current.gates.claude?.stale).toBe(false);
+
+    fakeClient.setRequestHandler(async (request) => {
+      if (request.type === 'gate.get') throw new Error('gate unavailable');
+      return { type: 'ok' };
+    });
+    await act(async () => { await result.current.readGate('claude'); });
+
+    expect(result.current.gates.claude?.stale).toBe(true);
+  });
+
+  test('drops a deferred gate response across an A to B to A thread reopen', async () => {
+    const threadB: ThreadSummary = { ...thread, id: 't2', title: 'Thread B' };
+    const stateA = { ...runtime(runState('completed', false, false)), lanes: { claude: 'C:/lane/a' } };
+    const stateB = { ...runtime(runState('completed', false, false)), threadId: 't2', lanes: { claude: 'C:/lane/b' } };
+
+    fakeClient.setThreadOpenResponse(openedFor(thread, stateA));
+    const { result } = renderHook(() => useHarness());
+    await act(async () => { await result.current.openThread('t1'); });
+
+    let releaseOldGate!: (response: ServerResponseBody) => void;
+    const oldGate = new Promise<ServerResponseBody>((resolve) => { releaseOldGate = resolve; });
+    let gateReads = 0;
+    fakeClient.setRequestHandler(async (request) => {
+      if (request.type === 'thread.open') return fakeClientResponseForCurrentThread();
+      if (request.type === 'gate.get') {
+        gateReads += 1;
+        if (gateReads === 1) return oldGate;
+        if (gateReads === 2) return gateResponse('claude', 't2', false, 'tree-b');
+        return gateResponse('claude', 't1', false, 'tree-a-current');
+      }
+      return { type: 'ok' };
+    });
+
+    function fakeClientResponseForCurrentThread(): ServerResponseBody {
+      return currentThreadResponse;
+    }
+
+    let currentThreadResponse = openedFor(threadB, stateB);
+    const oldRead = result.current.readGate('claude');
+    await waitFor(() => expect(gateReads).toBe(1));
+
+    await act(async () => { await result.current.openThread('t2'); });
+    currentThreadResponse = openedFor(thread, stateA);
+    await act(async () => { await result.current.openThread('t1'); });
+    await waitFor(() => {
+      expect(result.current.gates.claude?.candidate.tree).toBe('tree-a-current');
+    });
+
+    await act(async () => {
+      releaseOldGate(gateResponse('claude', 't1', true, 'tree-old'));
+      await oldRead;
+    });
+
+    expect(result.current.gates.claude?.candidate.tree).toBe('tree-a-current');
+    expect(result.current.gates.claude?.allowed).toBe(false);
   });
 });

@@ -338,6 +338,7 @@ describe('WorkPanel evidence', () => {
           allowed: false,
           requirements: [],
           candidate: { commit: 'new-commit', tree: 'new-tree', dirty: false },
+          stale: false,
         },
       },
       runs: [run({ evidence: [evidence({ state: { commit: 'old-commit', tree: 'old-tree', dirty: false } })] })],
@@ -492,6 +493,7 @@ describe('WorkPanel integration gate', () => {
           },
         ],
         candidate: { commit: 'abc1234def', tree: 'tree1234567', dirty: false },
+        stale: false,
         ...overrides,
       },
     };
@@ -563,6 +565,48 @@ describe('WorkPanel integration gate', () => {
     fireEvent.click(screen.getByRole('button', { name: /Integrate claude/ }));
 
     expect(integrateLane).toHaveBeenCalledWith('claude');
+  });
+
+  test('hides integration while the cached verdict is stale', () => {
+    render({
+      runtime: lane,
+      gates: gate({
+        allowed: true,
+        stale: true,
+        requirements: [
+          {
+            name: 'test',
+            command: 'npm test',
+            state: 'satisfied',
+            evidenceId: 'ev1',
+            evidenceTree: 'tree1234567',
+          },
+        ],
+      }),
+      workspace: {
+        cwd: '/repo',
+        resolution: {
+          status: 'ok',
+          problems: [],
+          workspace: { integration: { allowOverride: true } },
+        },
+      },
+    });
+
+    expect(screen.queryByRole('button', { name: /Integrate claude/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Integrate anyway' })).toBeNull();
+    expect(screen.getByText(/verdict is stale/)).toBeTruthy();
+  });
+
+  test('reports a stale zero-check verdict instead of saying nothing is required', () => {
+    render({
+      runtime: lane,
+      gates: gate({ allowed: true, stale: true, requirements: [] }),
+    });
+
+    expect(screen.getByText(/verdict is stale/)).toBeTruthy();
+    expect(screen.queryByText(/nothing required before integrating/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Integrate/ })).toBeNull();
   });
 
   test('an override has to carry a reason', () => {

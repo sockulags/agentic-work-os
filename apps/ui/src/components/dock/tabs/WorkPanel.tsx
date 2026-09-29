@@ -531,6 +531,13 @@ function Gate({ agent }: { agent: WorkerProfileId }): React.JSX.Element | null {
 
   if (gate === undefined) return null;
   if (gate.requirements.length === 0) {
+    if (gate.stale) {
+      return (
+        <p className="text-[10px] text-state-stale">
+          The gate verdict is stale; integration is unavailable until it refreshes.
+        </p>
+      );
+    }
     return (
       <p className="text-[10px] text-muted-foreground">
         {agent}&rsquo;s lane: nothing required before integrating.
@@ -542,7 +549,7 @@ function Gate({ agent }: { agent: WorkerProfileId }): React.JSX.Element | null {
     <div className="space-y-1">
       <p className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
         Before integrating {agent}
-        {gate.allowed && <span className="text-state-passed">satisfied</span>}
+        {gate.allowed && !gate.stale && <span className="text-state-passed">satisfied</span>}
       </p>
 
       <ul className="space-y-1">
@@ -558,7 +565,11 @@ function Gate({ agent }: { agent: WorkerProfileId }): React.JSX.Element | null {
 
       <CandidateSummary candidate={gate.candidate} />
 
-      {gate.allowed ? (
+      {gate.stale ? (
+        <p className="text-[10px] text-state-stale">
+          The gate verdict is stale; integration is unavailable until it refreshes.
+        </p>
+      ) : gate.allowed ? (
         <Button
           size="sm"
           variant="outline"

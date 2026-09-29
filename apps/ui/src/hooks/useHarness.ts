@@ -23,6 +23,7 @@ import type {
   WorkerProfileId,
 } from '@awos/protocol';
 import type { ClientRequest, ServerResponseBody } from '@awos/protocol';
+import { eventWorkerProfileId } from '@awos/protocol';
 import { HarnessClient, resolveClientOptions, type ConnectionStatus } from '@/lib/client';
 import { TranscriptFolder } from '@/lib/transcript';
 import { foldArtifacts } from '@/lib/artifacts';
@@ -115,6 +116,8 @@ export interface GateView {
   allowed: boolean;
   requirements: RequirementResult[];
   candidate: WorkingState;
+  /** True until the latest requested read has completed successfully. */
+  stale: boolean;
 }
 
 /**
@@ -162,6 +165,9 @@ export function useHarness() {
   const projectOverviewExplicitRefreshRef = useRef(false);
   const projectOverviewPushPendingRef = useRef(false);
   const refreshProjectOverviewRef = useRef<((cwd: string, refreshSource?: boolean) => Promise<void>) | null>(null);
+  const refreshGateRef = useRef<((agent: WorkerProfileId) => Promise<void>) | null>(null);
+  const gateReadVersionRef = useRef(new Map<WorkerProfileId, number>());
+  const nextGateReadVersionRef = useRef(0);
 
   /**
    * Write out whatever the notes editor is holding that the core does not have yet.
@@ -224,6 +230,10 @@ export function useHarness() {
         case 'event':
           if (push.event.threadId !== activeThreadRef.current) return;
           setEvents((prev) => [...prev, push.event]);
+          if (push.event.kind === 'turn.completed' || push.event.kind === 'lane.updated') {
+            const profileId = eventWorkerProfileId(push.event);
+            if (profileId !== null) void refreshGateRef.current?.(profileId);
+          }
           return;
         case 'state':
           if (push.state.threadId === activeThreadRef.current) setRuntime(push.state);
@@ -640,37 +650,65 @@ export function useHarness() {
   /**
    * Ask what the gate would decide about a lane right now.
    *
-   * Explicit, because the answer moves whenever the lane does and nothing pushes that.
-   * The panel asks when it opens and after a check reports back, which are the two moments
-   * it can change without the user doing anything visible.
+   * Explicit, because the answer moves whenever the lane does and nothing pushes the
+   * verdict itself. A refresh marks the cached answer stale first, so an answer from before
+   * the lane changed can never keep the integration action enabled while the re-read is in
+   * flight or after it fails.
    */
   const readGate = useCallback(
     async (agent: WorkerProfileId) => {
       const threadId = activeThreadRef.current;
       if (threadId === null) return;
+
+      const readVersion = ++nextGateReadVersionRef.current;
+      gateReadVersionRef.current.set(agent, readVersion);
+      setGates((prev) => {
+        const current = prev[agent];
+        return current === undefined ? prev : { ...prev, [agent]: { ...current, stale: true } };
+      });
+
       const res = await client.request({ type: 'gate.get', threadId, agent }).catch(() => null);
-      if (res?.type !== 'gate' || res.threadId !== activeThreadRef.current) return;
-      setGates((prev) => ({
-        ...prev,
-        [agent]: {
-          agent,
-          allowed: res.allowed,
-          requirements: res.requirements,
-          candidate: res.candidate,
-        },
-      }));
+      if (gateReadVersionRef.current.get(agent) !== readVersion) return;
+      if (res?.type !== 'gate' || res.threadId !== activeThreadRef.current || res.agent !== agent) {
+        if (activeThreadRef.current === threadId) {
+          setGates((prev) => {
+            const current = prev[agent];
+            return current === undefined ? prev : { ...prev, [agent]: { ...current, stale: true } };
+          });
+        }
+        return;
+      }
+      setGates((prev) => {
+        if (activeThreadRef.current !== threadId) return prev;
+        return {
+          ...prev,
+          [agent]: {
+            agent,
+            allowed: res.allowed,
+            requirements: res.requirements,
+            candidate: res.candidate,
+            stale: false,
+          },
+        };
+      });
     },
     [client],
   );
+
+  refreshGateRef.current = readGate;
 
   /** Run a named check where the agent's work is. Its result arrives as an event. */
   const runCheck = useCallback(
     async (agent: WorkerProfileId, name: string) => {
       const threadId = activeThreadRef.current;
       if (threadId === null) return;
-      await client.request({ type: 'verify.run', threadId, agent, name });
+      try {
+        await client.request({ type: 'verify.run', threadId, agent, name });
+      } finally {
+        if (activeThreadRef.current === threadId) await readGate(agent);
+      }
     },
-    [client],
+    [client, readGate],
   );
 
   const refreshThreads = useCallback(async () => {
@@ -697,6 +735,9 @@ export function useHarness() {
 
       const res = await client.request({ type: 'thread.open', threadId });
       if (res.type !== 'thread.opened') return;
+      // A successful open is a new gate-read boundary, even when the thread id is reused.
+      // Keep the sequence monotonic so a later A -> B -> A visit cannot reuse an old token.
+      gateReadVersionRef.current.clear();
       setActiveThreadId(threadId);
       // Claimed here rather than waiting for the next render, so the pinned-context reply
       // below can tell whether it is still wanted.
@@ -713,6 +754,9 @@ export function useHarness() {
       }
       // Lanes belong to a thread, so a verdict about another thread's lane is nonsense.
       setGates({});
+      for (const agent of Object.keys(res.state.lanes) as WorkerProfileId[]) {
+        void refreshGateRef.current?.(agent);
+      }
       void refreshWorkspace(res.thread.cwd);
       // Read from the core rather than kept from the last thread: a work item belongs to
       // the thread, and showing the previous one for a moment would be showing the wrong
