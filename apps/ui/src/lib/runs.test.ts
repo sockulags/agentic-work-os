@@ -24,7 +24,7 @@ function event(body: Record<string, unknown> & { kind: string }, profileId?: str
   } as unknown as HarnessEvent;
 }
 
-function started(runId: string, overrides: Record<string, unknown> = {}): HarnessEvent {
+function started(runId: string, overrides: Record<string, unknown> = {}, profileId?: string): HarnessEvent {
   return event({
     kind: 'run.started',
     runId,
@@ -34,7 +34,7 @@ function started(runId: string, overrides: Record<string, unknown> = {}): Harnes
     context: '<work-item>…</work-item>\n\nstart on this',
     instruction: 'start on this',
     ...overrides,
-  });
+  }, profileId);
 }
 
 describe('foldRuns', () => {
@@ -280,5 +280,21 @@ describe('foldRuns · what a run can point at', () => {
     ]);
 
     expect(runs[0]?.candidates).toEqual([]);
+  });
+
+  test('keeps interleaved candidates with the run for their worker profile', () => {
+    const events = [
+      started('r-build', { turnId: 'turn-build' }, 'claude-build'),
+      started('r-review', { turnId: 'turn-review' }, 'claude-review'),
+      event({ kind: 'tool.completed', itemId: 'build-tool', status: 'ok', output: '', exitCode: 0, turnId: 'turn-build' }, 'claude-build'),
+      event({ kind: 'diff.updated', patch: 'diff --git a/review b/review\n@@\n', turnId: 'turn-review' }, 'claude-review'),
+      event({ kind: 'diff.updated', patch: 'diff --git a/build b/build\n@@\n', turnId: 'turn-build' }, 'claude-build'),
+      event({ kind: 'run.completed', runId: 'r-build', state: 'completed', detail: null, turnId: 'turn-build' }, 'claude-build'),
+      event({ kind: 'tool.completed', itemId: 'review-tool', status: 'ok', output: '', exitCode: 0, turnId: 'turn-review' }, 'claude-review'),
+    ];
+
+    const byId = new Map(foldRuns(events).map((run) => [run.runId, run]));
+    expect(byId.get('r-build')?.candidates.map((candidate) => candidate.kind)).toEqual(['command', 'diff']);
+    expect(byId.get('r-review')?.candidates.map((candidate) => candidate.kind)).toEqual(['diff', 'command']);
   });
 });

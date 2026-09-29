@@ -64,10 +64,23 @@ export function foldRuns(
   /** Titles arrive on `tool.started`; the result arrives later on `tool.completed`. */
   const toolTitles = new Map<string, string>();
   const approvalTitles = new Map<string, string>();
-  /** The run a fact belongs to: the one that was open when it happened. */
-  let openRun: string | null = null;
+  /** The run a fact belongs to: the one open for its worker profile when it happened. */
+  const openRuns = new Map<WorkerProfileId, string>();
+  /** Turn ids let legacy or harness-level envelopes find a run when profile attribution is absent. */
+  const openRunsByTurn = new Map<string, string>();
+  const runOwners = new Map<string, { profileId: WorkerProfileId | null; turnId: string | null }>();
 
-  const candidate = (runId: string | null, item: EvidenceCandidate): void => {
+  const runForEvent = (event: HarnessEvent): string | null => {
+    const profileId = eventWorkerProfileId(event);
+    if (profileId !== null) {
+      const runId = openRuns.get(profileId);
+      if (runId !== undefined) return runId;
+    }
+    return event.turnId === null ? null : openRunsByTurn.get(event.turnId) ?? null;
+  };
+
+  const candidate = (event: HarnessEvent, item: EvidenceCandidate): void => {
+    const runId = runForEvent(event);
     if (runId === null) return;
     runs.get(runId)?.candidates.push(item);
   };
@@ -106,7 +119,10 @@ export function foldRuns(
             evidence: [],
             candidates: [],
           });
-          openRun = event.runId;
+          const profileId = eventWorkerProfileId(event);
+          if (profileId !== null) openRuns.set(profileId, event.runId);
+          if (event.turnId !== null) openRunsByTurn.set(event.turnId, event.runId);
+          runOwners.set(event.runId, { profileId, turnId: event.turnId });
         }
         break;
 
@@ -120,7 +136,14 @@ export function foldRuns(
             detail: event.detail,
           });
         }
-        if (openRun === event.runId) openRun = null;
+        const owner = runOwners.get(event.runId);
+        if (owner && owner.profileId !== null && openRuns.get(owner.profileId) === event.runId) {
+          openRuns.delete(owner.profileId);
+        }
+        if (owner && owner.turnId !== null && openRunsByTurn.get(owner.turnId) === event.runId) {
+          openRunsByTurn.delete(owner.turnId);
+        }
+        runOwners.delete(event.runId);
         break;
       }
 
@@ -162,7 +185,7 @@ export function foldRuns(
         break;
 
       case 'tool.completed':
-        candidate(openRun, {
+        candidate(event, {
           eventId: event.id,
           kind: 'command',
           label: toolTitles.get(event.itemId) ?? 'a tool call',
@@ -171,7 +194,7 @@ export function foldRuns(
         break;
 
       case 'diff.updated':
-        candidate(openRun, {
+        candidate(event, {
           eventId: event.id,
           kind: 'diff',
           label: 'the diff this run produced',
@@ -183,7 +206,7 @@ export function foldRuns(
         // An empty body is the tombstone the core writes when the file is gone; there is
         // nothing left to point at.
         if (event.content !== '') {
-          candidate(openRun, {
+          candidate(event, {
             eventId: event.id,
             kind: 'artifact',
             label: event.title,
@@ -197,7 +220,7 @@ export function foldRuns(
         break;
 
       case 'approval.resolved':
-        candidate(openRun, {
+        candidate(event, {
           eventId: event.id,
           kind: 'approval',
           label: approvalTitles.get(event.approvalId) ?? 'an approval',
