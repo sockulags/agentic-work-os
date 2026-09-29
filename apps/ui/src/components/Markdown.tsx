@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm';
 import type { Element, ElementContent } from 'hast';
 import { parseFenceInfo, prepareMarkdown } from '@/lib/markdown-stream';
 import { CodeBlock } from './CodeBlock';
+import { markdownUrlTransform, SafeMarkdownImage } from './markdown-images';
 import { cn } from '@/lib/utils';
 import './markdown.css';
 
@@ -50,7 +51,11 @@ export const Markdown = memo(function Markdown({
         streaming && 'awos-markdown-streaming',
       )}
     >
-      <ReactMarkdown remarkPlugins={REMARK_PLUGINS} components={components}>
+      <ReactMarkdown
+        remarkPlugins={REMARK_PLUGINS}
+        components={components}
+        urlTransform={markdownUrlTransform}
+      >
         {source}
       </ReactMarkdown>
     </div>
@@ -175,7 +180,12 @@ const COMPONENTS: Components = {
     ) : null,
 
   img: ({ src, alt }) => (
-    <img src={src} alt={alt} className="my-3 max-w-full rounded-md border border-border" />
+    <SafeMarkdownImage
+      src={src}
+      alt={alt}
+      imageClassName="my-3 max-w-full rounded-md border border-border"
+      linkClassName="text-foreground underline decoration-border underline-offset-2 hover:decoration-foreground"
+    />
   ),
 };
 
