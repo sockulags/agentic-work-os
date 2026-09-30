@@ -57,6 +57,8 @@ import type {
   WorkerProbeObservation,
   WorkerProfileId,
   WorkspaceGuardrail,
+  WorkspaceIntegration,
+  VerifyCommand,
 } from '@awos/protocol';
 import {
   AGENT_IDS,
@@ -347,6 +349,19 @@ function appliesToTransition(
   return 'step' in guardrail.attach
     ? guardrail.attach.step === targetStepId
     : guardrail.attach.from === sourceStepId && guardrail.attach.to === targetStepId;
+}
+
+interface PreparedIntegrationEvaluation {
+  candidate: WorkingState;
+  integration: WorkspaceIntegration;
+  verify: readonly VerifyCommand[];
+  invalidOverrideReason: string | undefined;
+  invalidSourceReason: string | undefined;
+  integrationGuardrails: readonly WorkspaceGuardrail[];
+  configuredResult: { expectationSet: ExpectationSet; conflicts: readonly string[] };
+  transitionPrefix: string;
+  transitionId: string;
+  transitionOverride: TransitionOverride | null;
 }
 
 /** How many files a patch touches, for a one-line report of what an integration moved. */
@@ -984,139 +999,16 @@ class Thread {
       throw new Error(`${agent} is still working. Interrupt it before integrating its lane.`);
     }
 
-    const workspace = this.#workspace(summary.cwd);
-    // Only a directory with no declaration has an empty policy. A declaration that exists
-    // but does not resolve has one the harness could not read, which is refused below
-    // rather than reported as a project that asked for nothing.
-    const integration =
-      workspace.status === 'ok'
-        ? workspace.workspace.integration
-        : { requires: [], allowOverride: false };
-    const verify = workspace.status === 'ok' ? workspace.workspace.verify : [];
-    const invalidOverrideReason = override === null
-      ? undefined
-      : !integration.allowOverride
-        ? 'This workspace does not permit overriding the integration gate. Set integration.allowOverride if it should.'
-        : override.actor !== 'user'
-          ? 'An integration override needs an authorized user.'
-          : override.reason.trim() === ''
-            ? 'An override has to say why. It is going into the record.'
-            : undefined;
-
-    const candidate = await this.#workingState(agent);
-    let workspaceSource: ReferenceIdentity;
-    let invalidSourceReason: string | undefined;
-    if (workspace.status === 'ok') {
-      try {
-        workspaceSource = workspaceIntegrationSource(workspace.workspace, await headCommit(summary.cwd));
-      } catch {
-        workspaceSource = integrationFailureSource(summary.cwd, candidate);
-        invalidSourceReason = 'The workspace integration source could not be pinned, so the transition was refused.';
-      }
-    } else if (workspace.status === 'invalid') {
-      workspaceSource = integrationFailureSource(summary.cwd, candidate);
-      invalidSourceReason =
-        `The workspace declaration is invalid, so the integration gate it configures could not be read and the transition was refused. ${
-          workspace.problems[0]?.message ?? ''
-        }`.trim();
-    } else {
-      workspaceSource = integrationFailureSource(summary.cwd, candidate);
-      invalidSourceReason = 'The workspace has no valid canonical integration source, so the transition was refused.';
-    }
-    const integrationGuardrails = workspace.status === 'ok'
-      ? workspace.workspace.guardrails.filter((guardrail) =>
-          'step' in guardrail.attach
-            ? guardrail.attach.step === 'workspace'
-            : guardrail.attach.from === 'lane' && guardrail.attach.to === 'workspace',
-        )
-      : [];
-    const configuredResult = workspace.status === 'ok'
-      ? buildGuardrailExpectationSet(integration, verify, workspaceSource, integrationGuardrails)
-      : { expectationSet: buildIntegrationExpectationSet(integration, verify, workspaceSource), conflicts: [] as readonly string[] };
-    const transitionPrefix = `${this.id}:lane.integration:${agent}:`;
-    const transitionId = `${transitionPrefix}${configuredResult.expectationSet.expectationSetId}`;
+    const prepared = await this.#prepareIntegrationEvaluation(agent, summary.cwd, override);
+    const { candidate, invalidOverrideReason, transitionId } = prepared;
     const initialHistory = foldTransitionEvaluationHistory(evaluationInitialEvents);
     const expectedAttempt = initialHistory.get(transitionId)?.at(-1)?.attempt ?? 0;
-    const transitionOverride: TransitionOverride | null = invalidOverrideReason === undefined && override !== null
-      ? {
-          enforcement: 'required',
-          permission: 'explicit',
-          permissionGranted: true,
-          actor: 'user',
-          authorizedUserId: 'user',
-          reason: override.reason,
-        }
-      : null;
     const persisted = this.#store.compareAndAppendBatch<TransitionDecision>(this.id, evaluationExpectedHead, {
       transitionId,
       expectedAttempt,
       build: (canonical) => {
-        const currentEvents = canonical.events;
-        const expectationSets = foldExpectationSets(currentEvents);
-        const expectationConflicts = foldExpectationSetConflicts(currentEvents);
-        const expectationHistory = foldExpectationSetHistory(currentEvents);
-        const configuredSet = configuredResult.expectationSet;
-        const expectationConflict = expectationConflicts.get(configuredSet.expectationSetId);
-        const priorSet = [...expectationHistory]
-          .filter((set) => set.scope?.sourceStepId === 'lane')
-          .at(-1);
-        const expectationSet: ExpectationSet = expectationSets.get(configuredSet.expectationSetId) ?? {
-          ...configuredSet,
-          ...(priorSet === undefined || priorSet.expectationSetId === configuredSet.expectationSetId
-            ? {}
-            : { supersedes: priorSet.expectationSetId }),
-        };
-        const history = foldTransitionEvaluationHistory(currentEvents);
-        const previousAttempt = history.get(transitionId)?.at(-1);
-        const latestTransition = [...history.values()]
-          .flat()
-          .filter((evaluation) => evaluation.transitionId.startsWith(transitionPrefix))
-          .sort((left, right) => left.timestamp - right.timestamp)
-          .at(-1);
-        const evidence = foldEvidence(currentEvents);
-        const gateDecision = evaluateGate({
-          integration,
-          verify,
-          evidence,
-          candidateTree: candidate.tree,
-        });
-        const attempt: TransitionAttempt = {
-          transitionId,
-          attempt: (previousAttempt?.attempt ?? 0) + 1,
-          runId: this.#latestRun(agent)?.runId ?? null,
-          actor: 'user',
-          sourceStepId: 'lane',
-          targetStepId: 'workspace',
-          expectationSetId: expectationSet.expectationSetId,
-          candidate: candidateIdentity(candidate.tree, candidate.commit),
-          evidenceIds: gateDecision.requirements
-            .map((requirement) => requirement.evidenceId)
-            .filter((evidenceId): evidenceId is string => evidenceId !== null),
-          supersedesTransitionId:
-            latestTransition !== undefined && latestTransition.transitionId !== transitionId
-              ? latestTransition.transitionId
-              : null,
-        };
-        const invalidAttemptReason = expectationConflict !== undefined
-          ? 'The pinned expectation set has conflicting immutable definitions and cannot be evaluated.'
-          : configuredResult.conflicts.length > 0
-            ? `The attached guardrails have conflicting definitions for: ${configuredResult.conflicts.join(', ')}.`
-            : invalidSourceReason;
-        const decision = this.#store.withTrustedThreadContext(this.id, () => evaluateOwnedIntegrationTransition({
-          integration,
-          verify,
-          evidence,
-          candidateTree: candidate.tree,
-          attempt,
-          expectationSet,
-          timestamp: Date.now(),
-          override: transitionOverride,
-          ...(invalidOverrideReason === undefined ? {} : { invalidOverrideReason }),
-          ...(invalidAttemptReason === undefined ? {} : { invalidAttemptReason }),
-          guardrails: integrationGuardrails,
-          events: currentEvents,
-          producingWorkerProfileId: agent,
-        }));
+        const evaluated = this.#evaluatePreparedIntegration(agent, prepared, canonical.events);
+        const { decision, expectationSets, expectationSet, priorSet, latestTransition } = evaluated;
         const entries: CompareAndAppendEntry[] = [];
         if (!expectationSets.has(expectationSet.expectationSetId)) {
           entries.push({ agent: null, body: { kind: 'expectation.set.created', expectationSet } });
@@ -1171,7 +1063,8 @@ class Thread {
 
     if (!decision.allowed) {
       const detail = `integration is gated: ${
-        decision.requirements.length === 0 && decision.refusal !== null
+        decision.refusal !== null &&
+        (decision.requirements.length === 0 || decision.requirements.every((requirement) => requirement.state === 'satisfied'))
           ? decision.refusal.reason
           : explainGate(decision)
       }`;
@@ -1206,6 +1099,155 @@ class Thread {
         : `${countChangedFiles(result.patch)} file(s) applied to ${summary.cwd}`;
     this.#record(agent, { kind: 'lane.updated', status: 'integrated', path: lane.path, detail });
     return { ok: true, detail };
+  }
+
+  async #prepareIntegrationEvaluation(
+    agent: WorkerProfileId,
+    cwd: string,
+    override: GateOverride | null,
+  ): Promise<PreparedIntegrationEvaluation> {
+    const workspace = this.#workspace(cwd);
+    // Only a directory with no declaration has an empty policy. A declaration that exists
+    // but does not resolve has one the harness could not read, which is refused below
+    // rather than reported as a project that asked for nothing.
+    const integration =
+      workspace.status === 'ok'
+        ? workspace.workspace.integration
+        : { requires: [], allowOverride: false };
+    const verify = workspace.status === 'ok' ? workspace.workspace.verify : [];
+    const invalidOverrideReason = override === null
+      ? undefined
+      : !integration.allowOverride
+        ? 'This workspace does not permit overriding the integration gate. Set integration.allowOverride if it should.'
+        : override.actor !== 'user'
+          ? 'An integration override needs an authorized user.'
+          : override.reason.trim() === ''
+            ? 'An override has to say why. It is going into the record.'
+            : undefined;
+
+    const candidate = await this.#workingState(agent);
+    let workspaceSource: ReferenceIdentity;
+    let invalidSourceReason: string | undefined;
+    if (workspace.status === 'ok') {
+      try {
+        workspaceSource = workspaceIntegrationSource(workspace.workspace, await headCommit(cwd));
+      } catch {
+        workspaceSource = integrationFailureSource(cwd, candidate);
+        invalidSourceReason = 'The workspace integration source could not be pinned, so the transition was refused.';
+      }
+    } else if (workspace.status === 'invalid') {
+      workspaceSource = integrationFailureSource(cwd, candidate);
+      invalidSourceReason =
+        `The workspace declaration is invalid, so the integration gate it configures could not be read and the transition was refused. ${
+          workspace.problems[0]?.message ?? ''
+        }`.trim();
+    } else {
+      workspaceSource = integrationFailureSource(cwd, candidate);
+      invalidSourceReason = 'The workspace has no valid canonical integration source, so the transition was refused.';
+    }
+    const integrationGuardrails = workspace.status === 'ok'
+      ? workspace.workspace.guardrails.filter((guardrail) => appliesToTransition(guardrail, 'lane', 'workspace'))
+      : [];
+    const configuredResult = workspace.status === 'ok'
+      ? buildGuardrailExpectationSet(integration, verify, workspaceSource, integrationGuardrails)
+      : { expectationSet: buildIntegrationExpectationSet(integration, verify, workspaceSource), conflicts: [] as readonly string[] };
+    const transitionPrefix = `${this.id}:lane.integration:${agent}:`;
+    const transitionId = `${transitionPrefix}${configuredResult.expectationSet.expectationSetId}`;
+    const transitionOverride: TransitionOverride | null = invalidOverrideReason === undefined && override !== null
+      ? {
+          enforcement: 'required',
+          permission: 'explicit',
+          permissionGranted: true,
+          actor: 'user',
+          authorizedUserId: 'user',
+          reason: override.reason,
+        }
+      : null;
+    return {
+      candidate,
+      integration,
+      verify,
+      invalidOverrideReason,
+      invalidSourceReason,
+      integrationGuardrails,
+      configuredResult,
+      transitionPrefix,
+      transitionId,
+      transitionOverride,
+    };
+  }
+
+  #evaluatePreparedIntegration(
+    agent: WorkerProfileId,
+    prepared: PreparedIntegrationEvaluation,
+    currentEvents: readonly HarnessEvent[],
+  ) {
+    const expectationSets = foldExpectationSets(currentEvents);
+    const expectationConflicts = foldExpectationSetConflicts(currentEvents);
+    const expectationHistory = foldExpectationSetHistory(currentEvents);
+    const configuredSet = prepared.configuredResult.expectationSet;
+    const expectationConflict = expectationConflicts.get(configuredSet.expectationSetId);
+    const priorSet = [...expectationHistory]
+      .filter((set) => set.scope?.sourceStepId === 'lane')
+      .at(-1);
+    const expectationSet: ExpectationSet = expectationSets.get(configuredSet.expectationSetId) ?? {
+      ...configuredSet,
+      ...(priorSet === undefined || priorSet.expectationSetId === configuredSet.expectationSetId
+        ? {}
+        : { supersedes: priorSet.expectationSetId }),
+    };
+    const history = foldTransitionEvaluationHistory(currentEvents);
+    const previousAttempt = history.get(prepared.transitionId)?.at(-1);
+    const latestTransition = [...history.values()]
+      .flat()
+      .filter((evaluation) => evaluation.transitionId.startsWith(prepared.transitionPrefix))
+      .sort((left, right) => left.timestamp - right.timestamp)
+      .at(-1);
+    const evidence = foldEvidence(currentEvents);
+    const gateDecision = evaluateGate({
+      integration: prepared.integration,
+      verify: prepared.verify,
+      evidence,
+      candidateTree: prepared.candidate.tree,
+    });
+    const attempt: TransitionAttempt = {
+      transitionId: prepared.transitionId,
+      attempt: (previousAttempt?.attempt ?? 0) + 1,
+      runId: this.#latestRun(agent)?.runId ?? null,
+      actor: 'user',
+      sourceStepId: 'lane',
+      targetStepId: 'workspace',
+      expectationSetId: expectationSet.expectationSetId,
+      candidate: candidateIdentity(prepared.candidate.tree, prepared.candidate.commit),
+      evidenceIds: gateDecision.requirements
+        .map((requirement) => requirement.evidenceId)
+        .filter((evidenceId): evidenceId is string => evidenceId !== null),
+      supersedesTransitionId:
+        latestTransition !== undefined && latestTransition.transitionId !== prepared.transitionId
+          ? latestTransition.transitionId
+          : null,
+    };
+    const invalidAttemptReason = expectationConflict !== undefined
+      ? 'The pinned expectation set has conflicting immutable definitions and cannot be evaluated.'
+      : prepared.configuredResult.conflicts.length > 0
+        ? `The attached guardrails have conflicting definitions for: ${prepared.configuredResult.conflicts.join(', ')}.`
+        : prepared.invalidSourceReason;
+    const decision = this.#store.withTrustedThreadContext(this.id, () => evaluateOwnedIntegrationTransition({
+      integration: prepared.integration,
+      verify: prepared.verify,
+      evidence,
+      candidateTree: prepared.candidate.tree,
+      attempt,
+      expectationSet,
+      timestamp: Date.now(),
+      override: prepared.transitionOverride,
+      ...(prepared.invalidOverrideReason === undefined ? {} : { invalidOverrideReason: prepared.invalidOverrideReason }),
+      ...(invalidAttemptReason === undefined ? {} : { invalidAttemptReason }),
+      guardrails: prepared.integrationGuardrails,
+      events: currentEvents,
+      producingWorkerProfileId: agent,
+    }));
+    return { decision, expectationSets, expectationSet, priorSet, latestTransition };
   }
 
   resolveApproval(approvalId: string, optionId: string): void {
@@ -1638,36 +1680,18 @@ class Thread {
         candidate: { commit: null, tree: null, dirty: false },
       };
     }
-    const workspace = this.#workspace(summary.cwd);
-    const integration =
-      workspace.status === 'ok'
-        ? workspace.workspace.integration
-        : { requires: [], allowOverride: false };
-    const verify = workspace.status === 'ok' ? workspace.workspace.verify : [];
-    // The wording integrate() refuses with, so the preview and the refusal that follows it
-    // say the same thing. An unreadable declaration names its first problem; a missing one
-    // has no canonical source to pin.
-    const refusalReason =
-      workspace.status === 'invalid'
-        ? `The workspace declaration is invalid, so the integration gate it configures could not be read and the transition was refused. ${
-            workspace.problems[0]?.message ?? ''
-          }`.trim()
-        : workspace.status === 'none'
-          ? 'The workspace has no valid canonical integration source, so the transition was refused.'
-          : null;
-
-    const candidate = await this.#workingState(agent);
-    const decision = evaluateGate({
-      integration,
-      verify,
-      evidence: this.evidence(),
-      candidateTree: candidate.tree,
-    });
+    const prepared = await this.#prepareIntegrationEvaluation(agent, summary.cwd, null);
+    const evaluated = this.#evaluatePreparedIntegration(
+      agent,
+      prepared,
+      this.#store.events(this.id),
+    );
+    const { decision } = evaluated;
     return {
-      ...decision,
-      allowed: refusalReason === null && decision.allowed,
-      refusalReason,
-      candidate,
+      allowed: decision.allowed,
+      requirements: decision.requirements,
+      refusalReason: decision.verdict === 'passed' ? null : decision.refusal?.reason ?? null,
+      candidate: prepared.candidate,
     };
   }
 
