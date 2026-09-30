@@ -1928,6 +1928,21 @@ describe('the integration gate', () => {
     return orch.store.events(threadId).filter((e) => e.kind === 'gate.evaluated');
   }
 
+  test('the gate refuses before an agent has a lane', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    const thread = orch.createThread({ cwd });
+
+    const preview = await orch.gate(thread.id, 'claude');
+
+    assert.equal(preview.allowed, false);
+    assert.equal(preview.refusalReason, 'claude has no lane to integrate.');
+    assert.deepEqual(preview.requirements, []);
+    assert.deepEqual(preview.candidate, { commit: null, tree: null, dirty: false });
+    assert.equal(orch.state(thread.id).lanes.claude, undefined);
+  });
+
   test('evaluates attached schema-v3 guardrails together with reserved verification during integration', async () => {
     const { orch } = await boot(makeConfig());
     const cwd = makeRepo();

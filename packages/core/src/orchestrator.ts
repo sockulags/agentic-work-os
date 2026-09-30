@@ -1630,6 +1630,14 @@ class Thread {
   ): Promise<GateDecision & { candidate: WorkingState; refusalReason: string | null }> {
     const summary = this.#store.get(this.id);
     if (!summary) throw new Error(`Unknown thread ${this.id}`);
+    if (!this.#lanes.has(agent)) {
+      return {
+        allowed: false,
+        requirements: [],
+        refusalReason: `${agent} has no lane to integrate.`,
+        candidate: { commit: null, tree: null, dirty: false },
+      };
+    }
     const workspace = this.#workspace(summary.cwd);
     const integration =
       workspace.status === 'ok'
