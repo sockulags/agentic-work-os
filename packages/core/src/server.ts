@@ -33,6 +33,24 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isAllowedWebSocketOrigin(origin: string | undefined): boolean {
+  if (origin === undefined) return true;
+  if (origin === 'tauri://localhost' || origin === 'http://tauri.localhost' || origin === 'https://tauri.localhost') {
+    return true;
+  }
+  if (!/^(?:https?):\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(origin)) return false;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return false;
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+  return ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname) && parsed.username === '' && parsed.password === '';
+}
+
 /**
  * Narrow a parsed frame to a message whose envelope is safe to read.
  *
@@ -82,7 +100,15 @@ export class HarnessServer {
   }
 
   async listen(): Promise<number> {
-    const wss = new WebSocketServer({ host: this.#config.host, port: this.#config.port });
+    const wss = new WebSocketServer({
+      host: this.#config.host,
+      port: this.#config.port,
+      verifyClient: ({ req }, done) => {
+        const header = req.headers.origin;
+        const origin = typeof header === 'string' ? header : header === undefined ? undefined : '';
+        done(isAllowedWebSocketOrigin(origin), 403, 'Forbidden');
+      },
+    });
     this.#wss = wss;
 
     await new Promise<void>((resolve, reject) => {
