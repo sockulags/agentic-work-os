@@ -113,6 +113,21 @@ function opened(socket: WebSocket): Promise<void> {
   });
 }
 
+function refusedAtUpgrade(socket: WebSocket): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timed out waiting for the upgrade to be refused')), 5_000);
+    socket.once('unexpected-response', (_request, response) => {
+      clearTimeout(timer);
+      if (response.statusCode === undefined) {
+        reject(new Error('upgrade refusal did not include an HTTP status'));
+        return;
+      }
+      resolve(response.statusCode);
+    });
+    socket.once('error', () => {});
+  });
+}
+
 /** Deadlined, so a daemon that died instead of answering fails the test rather than hanging it. */
 function closed(socket: WebSocket): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -146,6 +161,67 @@ function response(
     socket.send(JSON.stringify({ type, requestId, ...payload }));
   });
 }
+
+test('refuses a disallowed WebSocket origin during upgrade', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'awos-ws-origin-refused-'));
+  dataDirs.push(dataDir);
+  const cfg = config(dataDir);
+  const orchestrator = new Orchestrator(cfg);
+  orchestrators.push(orchestrator);
+  const server = new HarnessServer(cfg, orchestrator);
+  servers.push(server);
+  const port = await server.listen();
+
+  const refused = new WebSocket(`ws://127.0.0.1:${port}`, { origin: 'https://evil.example' });
+  sockets.push(refused);
+  assert.equal(await refusedAtUpgrade(refused), 403);
+});
+
+test('accepts the browser origins used by local development and Tauri', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'awos-ws-origin-localhost-'));
+  dataDirs.push(dataDir);
+  const cfg = config(dataDir);
+  const orchestrator = new Orchestrator(cfg);
+  orchestrators.push(orchestrator);
+  const server = new HarnessServer(cfg, orchestrator);
+  servers.push(server);
+  const port = await server.listen();
+
+  const origins = [
+    'http://localhost:5180',
+    'https://localhost:5180',
+    'http://127.0.0.1:5180',
+    'https://127.0.0.1:5180',
+    'http://[::1]:5180',
+    'https://[::1]:5180',
+    'http://tauri.localhost',
+    'https://tauri.localhost',
+    'tauri://localhost',
+  ];
+
+  for (const origin of origins) {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`, { origin });
+    sockets.push(socket);
+    await opened(socket);
+    assert.equal((await response(socket, 'hello', { token: server.token }))['type'], 'ok', origin);
+  }
+});
+
+test('accepts a WebSocket upgrade without an Origin header', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'awos-ws-origin-none-'));
+  dataDirs.push(dataDir);
+  const cfg = config(dataDir);
+  const orchestrator = new Orchestrator(cfg);
+  orchestrators.push(orchestrator);
+  const server = new HarnessServer(cfg, orchestrator);
+  servers.push(server);
+  const port = await server.listen();
+
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  sockets.push(socket);
+  await opened(socket);
+  assert.equal((await response(socket, 'hello', { token: server.token }))['type'], 'ok');
+});
 
 /**
  * A frame nobody validated must cost its own socket and nothing else.
