@@ -1988,6 +1988,57 @@ describe('the integration gate', () => {
     assert.ok(set.expectationSet.items.every((item) => item.reference.locator.includes(resolvePath(cwd, WORKSPACE_FILE))));
   });
 
+  test('the preview and integration both refuse a missing required human attestation', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    mkdirSync(join(cwd, '.awos'), { recursive: true });
+    writeFileSync(join(cwd, WORKSPACE_FILE), JSON.stringify({
+      version: WORKSPACE_SCHEMA_VERSION,
+      name: 'v3-attestation',
+      verify: [{ name: 'test', command: TEST_COMMAND }],
+      integration: { requires: ['test'], allowOverride: false },
+      roles: [
+        { id: 'lane-owner', label: 'Lane owner' },
+        { id: 'workspace-owner', label: 'Workspace owner' },
+      ],
+      steps: [
+        { id: 'lane', action: 'Lane', role: 'lane-owner', workers: ['codex'] },
+        { id: 'workspace', action: 'Workspace', role: 'workspace-owner', workers: ['codex'] },
+      ],
+      guardrails: [{
+        id: 'attestation',
+        kind: 'human-attestation',
+        attach: { from: 'lane', to: 'workspace' },
+        enforcement: 'required',
+        parameters: { expectationItem: 'review.semantic', authority: 'user' },
+      }],
+    }), 'utf8');
+    execFileSync('git', ['add', WORKSPACE_FILE], { cwd });
+    execFileSync('git', ['commit', '-qm', 'workspace attestation'], { cwd });
+
+    const { thread } = await laneWithWork(orch, cwd);
+    await orch.runCheck(thread.id, 'claude', 'test');
+    const eventCountBeforePreview = orch.store.events(thread.id).length;
+
+    const preview = await orch.gate(thread.id, 'claude');
+
+    assert.equal(preview.allowed, false);
+    assert.equal(preview.requirements[0]?.name, 'test');
+    assert.equal(preview.requirements[0]?.state, 'satisfied');
+    assert.match(preview.refusalReason ?? '', /required planning answer/);
+    assert.equal(orch.store.events(thread.id).length, eventCountBeforePreview, 'preview is read-only');
+
+    const result = await orch.integrateLane(thread.id, 'claude');
+
+    assert.equal(result.ok, false);
+    const evaluated = gateEvents(orch, thread.id).at(-1);
+    assert.ok(evaluated?.kind === 'gate.evaluated');
+    assert.equal(evaluated.allowed, false);
+    assert.equal(evaluated.evaluation?.verdict, 'waiting-for-human');
+    assert.equal(evaluated.evaluation?.refusal?.reason, preview.refusalReason);
+    assert.equal(existsSync(join(cwd, 'from-the-lane.txt')), false, 'nothing was applied');
+  });
+
   test('a schema-v3 guardrail can deny an override allowed by legacy integration policy', async () => {
     const { orch } = await boot(makeConfig());
     const cwd = makeRepo();
@@ -2379,6 +2430,46 @@ describe('the integration gate', () => {
     assert.equal(existsSync(join(cwd, 'from-the-lane.txt')), false, 'the thread directory is untouched');
   });
 
+  test('the preview refuses when the valid workspace source cannot be pinned', async () => {
+    const { orch } = await boot(makeConfig());
+    const cwd = makeRepo();
+    declare(cwd, { requires: ['test'] });
+    const { thread } = await laneWithWork(orch, cwd);
+    await orch.runCheck(thread.id, 'claude', 'test');
+
+    async function withSourceUnavailable<T>(operation: () => Promise<T>): Promise<T> {
+      const path = join(cwd, WORKSPACE_FILE);
+      const contents = readFileSync(path, 'utf8');
+      let deleted!: () => void;
+      const deletion = new Promise<void>((resolve) => { deleted = resolve; });
+      setTimeout(() => {
+        rmSync(path);
+        deleted();
+      }, 0);
+      const result = operation();
+      await deletion;
+      try {
+        return await result;
+      } finally {
+        writeFileSync(path, contents, 'utf8');
+      }
+    }
+
+    const preview = await withSourceUnavailable(() => orch.gate(thread.id, 'claude'));
+
+    assert.equal(preview.allowed, false);
+    assert.equal(
+      preview.refusalReason,
+      'The workspace integration source could not be pinned, so the transition was refused.',
+    );
+
+    const result = await withSourceUnavailable(() => orch.integrateLane(thread.id, 'claude'));
+
+    assert.equal(result.ok, false);
+    assert.equal(result.detail, `integration is gated: ${preview.refusalReason}`);
+    assert.equal(existsSync(join(cwd, 'from-the-lane.txt')), false, 'nothing was applied');
+  });
+
   describe('override', () => {
     test('is refused outright where the project has not permitted one', async () => {
       const { orch } = await boot(makeConfig());
@@ -2452,7 +2543,7 @@ describe('the integration gate', () => {
     const before = await orch.gate(thread.id, 'claude');
     assert.equal(before.allowed, false);
     assert.equal(before.requirements[0]?.state, 'missing');
-    assert.equal(before.refusalReason, null, 'a readable declaration is refused on its checks alone');
+    assert.match(before.refusalReason ?? '', /Required expectations need current evidence/);
 
     await orch.runCheck(thread.id, 'claude', 'test');
     const after = await orch.gate(thread.id, 'claude');
