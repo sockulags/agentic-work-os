@@ -34,6 +34,7 @@ jobs:
           workspaces: apps/desktop/src-tauri -> target
 
       - run: npm ci
+      - run: node scripts/check-version.mjs "${{ github.ref_name }}"
 
       # A release that fails the same gate as main is not a release worth publishing.
       - run: npm run typecheck
