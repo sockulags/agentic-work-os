@@ -54,6 +54,13 @@ describe('checkVersion', () => {
     assert.match(result.reason, /v<major\.minor\.patch/);
   });
 
+  test('rejects a matching version from a branch ref', () => {
+    const result = checkVersion(fixture(), 'v1.2.3', 'branch');
+
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /must be a tag/);
+  });
+
   test('rejects one source left behind at an older version', () => {
     const root = fixture('1.2.4');
     writeFileSync(
@@ -76,7 +83,7 @@ describe('checkVersion', () => {
     assert.ok(versions.every((source) => source.version === version));
 
     const matching = spawnSync(process.execPath, [script, `v${version}`], { encoding: 'utf8' });
-    const branch = spawnSync(process.execPath, [script, 'main'], { encoding: 'utf8' });
+    const branch = spawnSync(process.execPath, [script, 'v0.1.0', 'branch'], { encoding: 'utf8' });
 
     assert.equal(matching.status, 0, matching.stderr);
     assert.notEqual(branch.status, 0, branch.stderr);

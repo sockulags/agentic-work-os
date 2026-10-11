@@ -4,7 +4,14 @@ import { isReleaseVersion, readVersionSources } from './set-version.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-export function checkVersion(sourceRoot, tag) {
+export function checkVersion(sourceRoot, tag, refType = 'tag') {
+  if (refType !== 'tag') {
+    return {
+      ok: false,
+      reason: 'release ref must be a tag',
+    };
+  }
+
   const version = typeof tag === 'string' && tag.startsWith('v') ? tag.slice(1) : null;
   if (version === null || !isReleaseVersion(version) || tag !== `v${version}`) {
     return {
@@ -37,7 +44,7 @@ export function checkVersion(sourceRoot, tag) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const result = checkVersion(root, process.argv[2]);
+  const result = checkVersion(root, process.argv[2], process.argv[3]);
   if (!result.ok) {
     console.error(`version check failed: ${result.reason}`);
     process.exitCode = 1;

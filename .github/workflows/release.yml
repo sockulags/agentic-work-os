@@ -34,7 +34,11 @@ jobs:
           workspaces: apps/desktop/src-tauri -> target
 
       - run: npm ci
-      - run: node scripts/check-version.mjs "${{ github.ref_name }}"
+      - name: Check release ref against source versions
+        env:
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+        run: node scripts/check-version.mjs "$env:RELEASE_REF_NAME" "$env:RELEASE_REF_TYPE"
 
       # A release that fails the same gate as main is not a release worth publishing.
       - run: npm run typecheck
