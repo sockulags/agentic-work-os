@@ -13,14 +13,25 @@
 // is pinned here rather than taken from `process.version`: the runtime that ships must be
 // reproducible from the repository, not a property of whoever ran the build.
 
-import { createWriteStream, existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
 /** Pinned so the shipped runtime is a property of the repository, not of the build host. */
 export const NODE_VERSION = '22.22.2';
+
+// Update these digests from https://nodejs.org/dist/v22.22.2/SHASUMS256.txt at the same time as NODE_VERSION.
+export const NODE_ARTIFACT_DIGESTS = Object.freeze({
+  'win-arm64/node.exe': '1a338f2467a566197ed8b309240a3a372f5d72458f9c7e5c9613ad6ccae1e0c0',
+  'win-x64/node.exe': 'ae1a50511be58e987483fdbc12125407443926d2d394669ade2352776e920dd3',
+  'node-v22.22.2-darwin-arm64.tar.gz': 'db4b275b83736df67533529a18cc55de2549a8329ace6c7bcc68f8d22d3c9000',
+  'node-v22.22.2-darwin-x64.tar.gz': '12a6abb9c2902cf48a21120da13f87fde1ed1b71a13330712949e8db818708ba',
+  'node-v22.22.2-linux-arm64.tar.gz': 'b2f3a96f31486bfc365192ad65ced14833ad2a3c2e1bcefec4846902f264fa28',
+  'node-v22.22.2-linux-x64.tar.gz': '978978a635eef872fa68beae09f0aad0bbbae6757e444da80b570964a97e62a3',
+});
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const cacheRoot = join(root, '.cache', 'node-runtime');
@@ -41,6 +52,23 @@ async function download(url, destination) {
   await pipeline(response.body, createWriteStream(destination));
 }
 
+async function sha256File(filePath) {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk);
+  return hash.digest('hex');
+}
+
+export async function verifyFileDigest(filePath, expectedDigest) {
+  const actualDigest = await sha256File(filePath);
+  if (actualDigest !== expectedDigest) {
+    rmSync(filePath, { force: true });
+    throw new Error(
+      `vendor-node: digest mismatch for ${filePath}; expected ${expectedDigest}, actual ${actualDigest}`,
+    );
+  }
+  return actualDigest;
+}
+
 /**
  * Resolve a Node binary for this platform, downloading it once into the cache.
  *
@@ -49,28 +77,43 @@ async function download(url, destination) {
 export async function vendorNode() {
   const { os, arch, exe } = platformTriple();
   const cached = join(cacheRoot, `${NODE_VERSION}-${os}-${arch}`, exe);
-  // A zero-length file means a download died halfway; treating it as a hit would ship a
-  // broken runtime, so only a non-empty file counts.
-  if (existsSync(cached) && statSync(cached).size > 0) return cached;
-
-  rmSync(dirname(cached), { recursive: true, force: true });
+  const artifact = os === 'win' ? `win-${arch}/node.exe` : `node-v${NODE_VERSION}-${os}-${arch}.tar.gz`;
+  const expectedDigest = NODE_ARTIFACT_DIGESTS[artifact];
+  if (!expectedDigest) throw new Error(`vendor-node: no pinned digest for ${artifact}`);
 
   if (os === 'win') {
     const url = `https://nodejs.org/dist/v${NODE_VERSION}/win-${arch}/node.exe`;
+    // A zero-length file means a download died halfway; treating it as a hit would ship a
+    // broken runtime, so only a non-empty file counts.
+    if (existsSync(cached) && statSync(cached).size > 0) {
+      await verifyFileDigest(cached, expectedDigest);
+      return cached;
+    }
+
+    rmSync(dirname(cached), { recursive: true, force: true });
     console.log(`vendor-node: downloading ${url}`);
     await download(url, cached);
+    await verifyFileDigest(cached, expectedDigest);
     return cached;
   }
 
   const name = `node-v${NODE_VERSION}-${os}-${arch}`;
   const url = `https://nodejs.org/dist/v${NODE_VERSION}/${name}.tar.gz`;
-  console.log(`vendor-node: downloading ${url}`);
   const archive = join(cacheRoot, `${name}.tar.gz`);
-  await download(url, archive);
+  if (existsSync(archive) && statSync(archive).size > 0) {
+    await verifyFileDigest(archive, expectedDigest);
+  } else {
+    rmSync(dirname(cached), { recursive: true, force: true });
+    console.log(`vendor-node: downloading ${url}`);
+    await download(url, archive);
+    await verifyFileDigest(archive, expectedDigest);
+  }
+
+  // Always derive the returned binary from the verified archive, including on cache hits.
+  rmSync(dirname(cached), { recursive: true, force: true });
   mkdirSync(dirname(cached), { recursive: true });
   // `--strip-components=2` drops `node-v.../bin/`, leaving the binary at the cache root.
   execFileSync('tar', ['-xzf', archive, '-C', dirname(cached), '--strip-components=2', `${name}/bin/node`]);
-  rmSync(archive, { force: true });
   return cached;
 }
 
