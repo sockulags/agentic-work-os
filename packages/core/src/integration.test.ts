@@ -10,7 +10,7 @@ import { RETAINED_FILE, WORKSPACE_FILE, WORKSPACE_LOCAL_FILE, WORKSPACE_SCHEMA_V
 import { foldEvidence, foldOutcomes, foldRetained, foldTransitionEvaluations } from './work/ledger.js';
 import { Orchestrator } from './orchestrator.js';
 import type { HarnessConfig } from './config.js';
-import type { WorkerAdapter } from './adapters/agent.js';
+import type { AdapterContext, WorkerAdapter } from './adapters/agent.js';
 import type { AdapterFactory, WorkerProfileDefinition, WorkerRegistries } from './adapters/registry.js';
 
 /**
@@ -214,6 +214,123 @@ describe('Claude adapter end to end', () => {
 
     const saved = orch.store.get(thread.id);
     assert.equal(saved?.nativeSessions.claude, '11111111-2222-3333-4444-555555555555');
+  });
+
+  test('rebuilds an adapter with the new permission mode while preserving its native session', async () => {
+    const contexts: AdapterContext[] = [];
+    let blockClaudeStop = false;
+    let releaseClaudeStop!: () => void;
+    let resolveClaudeStopStarted!: () => void;
+    const claudeStopReleased = new Promise<void>((resolve) => { releaseClaudeStop = resolve; });
+    const claudeStopStarted = new Promise<void>((resolve) => { resolveClaudeStopStarted = resolve; });
+    const capabilities: AgentCapabilities = {
+      streamingToolOutput: false,
+      streamingText: false,
+      reasoning: false,
+      plans: false,
+      turnDiff: false,
+      approvals: false,
+      resumableSessions: true,
+    };
+    const target: ModelTarget = {
+      id: 'permission-mode-target',
+      provider: 'claude',
+      model: 'test',
+      endpoint: null,
+      authProfile: null,
+    };
+    const qwenTarget: ModelTarget = {
+      id: 'permission-mode-qwen-target',
+      provider: 'openai-compatible',
+      model: 'test-qwen',
+      endpoint: 'http://127.0.0.1:1234/v1',
+      authProfile: 'test',
+    };
+    const adapterFactory: AdapterFactory = {
+      id: 'permission-mode-adapter',
+      capabilities,
+      supports: (candidate) => candidate.id === target.id || candidate.id === qwenTarget.id,
+      create: (context) => {
+        contexts.push(context);
+        let sessionId = context.resumeSessionId;
+        let busy = false;
+        return {
+          id: adapterFactory.id,
+          capabilities,
+          get nativeSessionId() { return sessionId; },
+          get busy() { return busy; },
+          async start() {},
+          async sendTurn() {
+            busy = true;
+            const turnId = `permission-mode-turn-${contexts.length}`;
+            sessionId ??= `permission-mode-native-${context.workerProfileId}`;
+            context.onSessionId(sessionId);
+            context.emit({ kind: 'turn.started', turnId, nativeSessionId: sessionId });
+            context.emit({ kind: 'turn.completed', reason: 'completed', error: null, durationMs: 0 });
+            busy = false;
+          },
+          async interrupt() {},
+          resolveApproval() {},
+          async stop() {
+            if (context.workerProfileId !== 'claude' || !blockClaudeStop) return;
+            resolveClaudeStopStarted();
+            await claudeStopReleased;
+          },
+        } satisfies WorkerAdapter;
+      },
+    };
+    const registries: WorkerRegistries = {
+      profiles: [
+        {
+          id: 'claude',
+          agent: 'claude',
+          label: 'Claude',
+          adapterId: adapterFactory.id,
+          targetId: target.id,
+          policy: { permissionModes: ['default', 'bypassPermissions'], nativeTurnDiff: false },
+          probe: async () => ({ available: true, detail: 'test' }),
+        },
+        {
+          id: 'qwen-local',
+          agent: 'qwen-local',
+          label: 'Qwen',
+          adapterId: adapterFactory.id,
+          targetId: qwenTarget.id,
+          policy: { permissionModes: ['default', 'bypassPermissions'], nativeTurnDiff: false },
+          probe: async () => ({ available: true, detail: 'test' }),
+        },
+      ],
+      targets: [
+        { target, resolve: () => target },
+        { target: qwenTarget, resolve: () => qwenTarget },
+      ],
+      factories: [adapterFactory],
+    };
+    const { orch } = await boot(makeConfig(), registries);
+    const thread = orch.createThread({ cwd: workDir });
+
+    await orch.setPermissionMode(thread.id, 'bypassPermissions');
+    await orch.send(thread.id, 'claude', 'first');
+    await orch.send(thread.id, 'qwen-local', 'first');
+
+    blockClaudeStop = true;
+    const change = orch.setPermissionMode(thread.id, 'default');
+    await claudeStopStarted;
+    const secondClaude = orch.send(thread.id, 'claude', 'second');
+    releaseClaudeStop();
+    await Promise.all([change, secondClaude]);
+    blockClaudeStop = false;
+    await orch.send(thread.id, 'qwen-local', 'second');
+
+    assert.deepEqual(
+      contexts.map((context) => [context.workerProfileId, context.permissionMode, context.resumeSessionId]),
+      [
+        ['claude', 'bypassPermissions', null],
+        ['qwen-local', 'bypassPermissions', null],
+        ['claude', 'default', 'permission-mode-native-claude'],
+        ['qwen-local', 'default', 'permission-mode-native-qwen-local'],
+      ],
+    );
   });
 
   test('reports tool calls with their output', async () => {
