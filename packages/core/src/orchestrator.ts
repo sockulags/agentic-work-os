@@ -484,6 +484,13 @@ class Thread {
   readonly #registries: WorkerRegistries;
 
   readonly #adapters = new Map<WorkerProfileId, WorkerAdapter>();
+  /** Adapters pending replacement for a construction-time permission mode change. */
+  readonly #permissionModeResets = new Map<WorkerProfileId, number>();
+  #permissionModeGeneration = 0;
+  /** Serializes idle adapter shutdowns while allowing in-flight turns to finish. */
+  #permissionModeChanges: Promise<void> = Promise.resolve();
+  #permissionModeChangesPending = 0;
+  #permissionModeChangeFailure: unknown | null = null;
   #permissionMode: PermissionMode = 'default';
   /**
    * Agents with a turn in flight, each mapped to the turn it is running.
@@ -619,11 +626,44 @@ class Thread {
     return turns[turns.length - 1] ?? null;
   }
 
-  setPermissionMode(mode: PermissionMode): void {
-    this.#permissionMode = mode;
-    // Existing processes were launched with the old mode baked into their argv, so the
-    // change lands on the next spawn. Restarting mid-thread would drop native context.
-    log.info('permission mode set', { threadId: this.id, mode, appliesOnNextSpawn: true });
+  async setPermissionMode(mode: PermissionMode): Promise<void> {
+    this.#permissionModeChangesPending += 1;
+    const change = this.#permissionModeChanges
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          await this.#applyPermissionMode(mode);
+          this.#permissionModeChangeFailure = null;
+        } catch (error) {
+          this.#permissionModeChangeFailure = error;
+          throw error;
+        } finally {
+          this.#permissionModeChangesPending -= 1;
+        }
+      });
+    this.#permissionModeChanges = change;
+    return change;
+  }
+
+  async #applyPermissionMode(mode: PermissionMode): Promise<void> {
+    if (mode === this.#permissionMode && this.#permissionModeResets.size === 0) return;
+    const modeChanged = mode !== this.#permissionMode;
+    if (modeChanged) this.#permissionMode = mode;
+    const generation = modeChanged ? ++this.#permissionModeGeneration : this.#permissionModeGeneration;
+
+    // Permission mode is part of AdapterContext and is therefore fixed for the lifetime
+    // of an adapter. An in-flight turn keeps its old mode; its adapter is replaced after
+    // the turn so the next one is built with the new mode. Idle adapters can be replaced
+    // immediately, while retaining the native session id persisted by the store.
+    const idle = [...this.#adapters.entries()].filter(([agent]) => {
+      this.#permissionModeResets.set(agent, generation);
+      if (this.#turns.has(agent)) {
+        return false;
+      }
+      return true;
+    });
+    await Promise.all(idle.map(([agent, adapter]) => this.#dropAdapterForPermissionMode(agent, adapter, generation)));
+    log.info('permission mode set', { threadId: this.id, mode, adaptersRebuilt: idle.length });
   }
 
   state(): ThreadRuntimeState {
@@ -670,6 +710,12 @@ class Thread {
     asRun = false,
     options: { runId?: string; recoveryContext?: RecoveryWorkerContext; keepRunActive?: boolean } = {},
   ): Promise<void> {
+    if (this.#stopping) throw new Error(`Thread ${this.id} is shutting down.`);
+    // A permission-mode change may be stopping an idle adapter. Wait before claiming the
+    // turn so the next adapter is built with the requested mode rather than racing the drop.
+    if (this.#permissionModeChangesPending > 0 || this.#permissionModeChangeFailure !== null) {
+      await this.#permissionModeChanges;
+    }
     if (this.#stopping) throw new Error(`Thread ${this.id} is shutting down.`);
     const reservedRun = this.#activeRuns.get(agent);
     if (reservedRun !== undefined && reservedRun !== options.runId) {
@@ -725,6 +771,7 @@ class Thread {
     // guess parsed from tool output. Codex reports its own, so we don't shadow it.
     let diffBaseline: Awaited<ReturnType<typeof snapshotWorkingTree>> = null;
     let failure: string | null = null;
+    let adapter: WorkerAdapter | null = null;
     try {
       this.#onState();
       // Provisioning is lazy for the same reason adapters are: a thread that only ever
@@ -786,7 +833,7 @@ class Thread {
         ),
       );
       let payload = buildPayload(replay);
-      let adapter = this.#adapter(agent, cwd);
+      adapter = this.#adapter(agent, cwd);
 
       // Recorded before dispatch, and before the run can fail, so a run that dies on the
       // first token still leaves behind what it was asked to do and what it was given.
@@ -862,6 +909,17 @@ class Thread {
           const patch = after ? await diffTrees(cwd, diffBaseline, after) : null;
           if (patch) this.#record(agent, { kind: 'diff.updated', turnId, patch });
         }
+        const resetGeneration = this.#permissionModeResets.get(agent);
+        const hadFailureBeforePermissionModeDrop = failure !== null;
+        let permissionModeDropFailure: Error | null = null;
+        if (resetGeneration !== undefined && adapter !== null) {
+          try {
+            await this.#dropAdapterForPermissionMode(agent, adapter, resetGeneration);
+          } catch (error) {
+            permissionModeDropFailure = error instanceof Error ? error : new Error(String(error));
+            failure ??= permissionModeDropFailure.message;
+          }
+        }
         this.#turns.delete(agent);
         if (runId && options.keepRunActive !== true) this.#activeRuns.delete(agent);
         // Read after the turn rather than watched during it: nothing needs these the moment
@@ -875,6 +933,9 @@ class Thread {
         // the mark where it was rather than skipping history nobody replayed.
         if (recorded) this.#store.setWatermark(this.id, agent, this.#store.head(this.id));
         this.#onState();
+        if (permissionModeDropFailure !== null && !hadFailureBeforePermissionModeDrop) {
+          throw permissionModeDropFailure;
+        }
       } finally {
         // The normal path clears the lock above, but keep shutdown from waiting forever if
         // final turn accounting itself fails before reaching that point.
@@ -2926,7 +2987,13 @@ class Thread {
 
   #adapter(agent: WorkerProfileId, cwd: string): WorkerAdapter {
     const existing = this.#adapters.get(agent);
-    if (existing) return existing;
+    if (existing) {
+      if (this.#permissionModeResets.has(agent)) {
+        throw new Error(`Permission mode change for ${agent} is still being applied.`);
+      }
+      return existing;
+    }
+    this.#permissionModeResets.delete(agent);
 
     const summary = this.#store.get(this.id);
     if (!summary) throw new Error(`Unknown thread ${this.id}`);
@@ -2955,6 +3022,27 @@ class Thread {
     await this.#adapters.get(agent)?.stop();
     this.#adapters.delete(agent);
     this.#store.clearNativeSession(this.id, agent);
+  }
+
+  async #dropAdapterForPermissionMode(agent: WorkerProfileId, adapter: WorkerAdapter, generation: number): Promise<void> {
+    const before = this.#store.get(this.id)?.nativeSessions[agent] ?? null;
+    try {
+      await adapter.stop();
+    } catch (error) {
+      throw new Error(
+        `Could not change permission mode for ${agent}: stopping its adapter failed before native session preservation was confirmed.`,
+        { cause: error },
+      );
+    }
+
+    const after = this.#store.get(this.id)?.nativeSessions[agent] ?? null;
+    if (after !== before) {
+      throw new Error(
+        `Could not change permission mode for ${agent}: native session ${before ?? '(none)'} was not preserved.`,
+      );
+    }
+    if (this.#adapters.get(agent) === adapter) this.#adapters.delete(agent);
+    if (this.#permissionModeResets.get(agent) === generation) this.#permissionModeResets.delete(agent);
   }
 
   /** Persist, update derived state, broadcast. The single write path for events. */
@@ -3392,8 +3480,8 @@ export class Orchestrator extends EventEmitter {
     this.#thread(threadId).resolveApproval(approvalId, optionId);
   }
 
-  setPermissionMode(threadId: string, mode: PermissionMode): void {
-    this.#thread(threadId).setPermissionMode(mode);
+  setPermissionMode(threadId: string, mode: PermissionMode): Promise<void> {
+    return this.#thread(threadId).setPermissionMode(mode);
   }
 
   /**

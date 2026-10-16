@@ -252,7 +252,7 @@ export class HarnessServer {
       }
 
       case 'thread.setPermissionMode':
-        orchestrator.setPermissionMode(msg.threadId, msg.mode);
+        await orchestrator.setPermissionMode(msg.threadId, msg.mode);
         return { type: 'ok' };
 
       case 'turn.send':
