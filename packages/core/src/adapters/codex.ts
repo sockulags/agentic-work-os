@@ -75,6 +75,8 @@ export class CodexAdapter implements WorkerAdapter {
   #ctx: AdapterContext;
   #child: StdioChild | null = null;
   #threadId: string | null = null;
+  /** The last native thread accepted by Codex, retained across app-server exits. */
+  #resumeSessionId: string | null = null;
   /** Our id for the turn in flight, stable for its whole life; what every event carries. */
   #turnId: string | null = null;
   /** Codex's own id for that turn, which is what the wire talks about. */
@@ -300,7 +302,8 @@ export class CodexAdapter implements WorkerAdapter {
    * lands in the caller's abandon path, which owns undoing the spawn.
    */
   async #handshake(): Promise<void> {
-    const { config, cwd, resumeSessionId } = this.#ctx;
+    const { config, cwd } = this.#ctx;
+    const resumeSessionId = this.#resumeSessionId ?? this.#ctx.resumeSessionId;
 
     // The server rejects everything until initialize/initialized complete.
     await this.#request(CODEX_METHODS.initialize, {
@@ -315,6 +318,7 @@ export class CodexAdapter implements WorkerAdapter {
           threadId: resumeSessionId,
         })) as CodexWire.CodexThreadStartResult | undefined;
         this.#threadId = result?.thread?.id ?? resumeSessionId;
+        this.#resumeSessionId = this.#threadId;
       } catch (err) {
         // A resumable id can go stale — Codex may have pruned it. Starting fresh and
         // letting replay rebuild context is better than failing the whole thread.
@@ -326,6 +330,7 @@ export class CodexAdapter implements WorkerAdapter {
         // replay rather than silently omitting prior context.
         this.#ctx.onSessionLost?.();
         this.#threadId = null;
+        this.#resumeSessionId = null;
         throw new NativeResumeNotFoundError(resumeSessionId);
       }
     }
@@ -338,6 +343,7 @@ export class CodexAdapter implements WorkerAdapter {
         params,
       )) as CodexWire.CodexThreadStartResult;
       this.#threadId = result.thread.id;
+      this.#resumeSessionId = this.#threadId;
     }
 
     this.#ctx.onSessionId(this.#threadId);
@@ -700,6 +706,7 @@ export class CodexAdapter implements WorkerAdapter {
         const p = params as unknown as CodexWire.CodexThreadStartedParams;
         if (p.thread?.id) {
           this.#threadId = p.thread.id;
+          this.#resumeSessionId = p.thread.id;
           this.#ctx.onSessionId(p.thread.id);
         }
         return;

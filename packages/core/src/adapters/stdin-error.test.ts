@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dirname, join } from 'node:path';
@@ -51,6 +51,26 @@ async function waitForFile(path: string): Promise<void> {
   const deadline = Date.now() + 10_000;
   while (!existsSync(path)) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${path}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+async function waitForLines(path: string, count: number): Promise<string[]> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    if (existsSync(path)) {
+      const lines = readFileSync(path, 'utf8').trim().split('\n').filter(Boolean);
+      if (lines.length >= count) return lines;
+    }
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${count} lines in ${path}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+async function waitForStatus(events: AdapterEvent[], status: 'exited'): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!events.some((event) => event.kind === 'agent.status' && event.status === status)) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for status ${status}`);
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
@@ -175,6 +195,66 @@ test('Codex survives a write after its exited CLI and closes one error turn', { 
     assert.equal(adapter.busy, false);
   } finally {
     writeFileSync(release, 'release\n', 'utf8');
+    await adapter.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Claude resumes the session learned before its CLI exits', { concurrency: false }, async () => {
+  const dir = mkdtempSync(join(process.env.TEMP ?? process.cwd(), 'awos-resume-claude-'));
+  const argsFile = join(dir, 'args.jsonl');
+  const events: AdapterEvent[] = [];
+  const adapter = new ClaudeAdapter({
+    threadId: 'thread-1', workerProfileId: 'claude', workerProfileIds: ['claude'], agentId: 'claude',
+    cwd: dir,
+    config: testConfig(dir, {
+      claudeBinArgs: [FAKE_CLAUDE, '--args-file', argsFile, '--exit-after-ready'],
+    }),
+    permissionMode: 'default', permissionBridge: permissionBridge(), resumeSessionId: null,
+    emit: (event) => events.push(event), onSessionId: () => {},
+  });
+
+  try {
+    await adapter.start();
+    await waitForStatus(events, 'exited');
+    await adapter.start();
+
+    const invocations = (await waitForLines(argsFile, 2)).map((line) => JSON.parse(line) as string[]);
+    assert.equal(invocations.length, 2);
+    assert.deepEqual(invocations[1]?.slice(invocations[1].indexOf('--resume'), invocations[1].indexOf('--resume') + 2), [
+      '--resume', '11111111-2222-3333-4444-555555555555',
+    ]);
+  } finally {
+    await adapter.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Codex resumes the session learned before its app-server exits', { concurrency: false }, async () => {
+  const dir = mkdtempSync(join(process.env.TEMP ?? process.cwd(), 'awos-resume-codex-'));
+  const rpcFile = join(dir, 'rpc.jsonl');
+  const events: AdapterEvent[] = [];
+  const adapter = new CodexAdapter({
+    threadId: 'thread-1', workerProfileId: 'codex', workerProfileIds: ['codex'], agentId: 'codex',
+    cwd: dir,
+    config: testConfig(dir, {
+      codexBinArgs: [FAKE_CODEX, '--rpc-file', rpcFile, '--exit-after-ready'],
+    }),
+    permissionMode: 'default', permissionBridge: permissionBridge(), resumeSessionId: null,
+    emit: (event) => events.push(event), onSessionId: () => {},
+  });
+
+  try {
+    await adapter.start();
+    await waitForStatus(events, 'exited');
+    await adapter.start();
+
+    const messages = (await waitForLines(rpcFile, 6)).map((line) => JSON.parse(line) as { method: string; params: { threadId?: string } | null });
+    assert.deepEqual(messages.map((message) => message.method), [
+      'initialize', 'initialized', 'thread/start', 'initialize', 'initialized', 'thread/resume',
+    ]);
+    assert.equal(messages[5]?.params?.threadId, 'thr_fake_1');
+  } finally {
     await adapter.stop();
     rmSync(dir, { recursive: true, force: true });
   }

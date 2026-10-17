@@ -66,6 +66,8 @@ export class ClaudeAdapter implements WorkerAdapter {
   #ctx: AdapterContext;
   #child: StdioChild | null = null;
   #sessionId: string | null = null;
+  /** The last native session accepted by Claude, used when the CLI respawns. */
+  #resumeSessionId: string | null = null;
   #model: string | null = null;
   #busy = false;
   #turnId: string | null = null;
@@ -119,7 +121,8 @@ export class ClaudeAdapter implements WorkerAdapter {
   }
 
   async #doStart(): Promise<void> {
-    const { config, cwd, threadId, permissionMode, resumeSessionId } = this.#ctx;
+    const { config, cwd, threadId, permissionMode } = this.#ctx;
+    const resumeSessionId = this.#resumeSessionId ?? this.#ctx.resumeSessionId;
 
     // Register before spawning: Claude can request permission on its very first tool.
     this.#ctx.permissionBridge.registerThread(
@@ -451,6 +454,7 @@ export class ClaudeAdapter implements WorkerAdapter {
     if (msg.subtype === 'init') {
       const init = msg as ClaudeWire.ClaudeSystemInitEvent;
       this.#sessionId = init.session_id;
+      this.#resumeSessionId = init.session_id;
       this.#model = init.model ?? null;
       this.#ctx.onSessionId(init.session_id);
       this.#emitStatus('busy', null);
@@ -633,6 +637,7 @@ export class ClaudeAdapter implements WorkerAdapter {
 
   #onResult(msg: ClaudeWire.ClaudeResultEvent): void {
     this.#sessionId = msg.session_id;
+    this.#resumeSessionId = msg.session_id;
     this.#ctx.onSessionId(msg.session_id);
 
     const usage = msg.usage;
