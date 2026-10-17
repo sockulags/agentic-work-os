@@ -80,6 +80,16 @@ interface QwenQueryTransport {
 }
 
 async function closeQwenQuery(queryInstance: Query, iterator: AsyncIterator<SDKMessage> | null): Promise<void> {
+  // The SDK's public close() requests child termination but does not wait for the
+  // process to release its cwd. Register the wait before any iterator or query
+  // close action can mark the child killed, otherwise waitForExit() can miss the
+  // close event through its fast path.
+  const transport = (queryInstance as unknown as { transport?: QwenQueryTransport }).transport;
+  let exit: Promise<void> | null = null;
+  if (transport?.waitForExit) {
+    try { exit = Promise.resolve(transport.waitForExit.call(transport)).catch(() => undefined); } catch { /* shutdown is already fail-closed */ }
+  }
+
   const returnMethod = iterator?.return;
   if (returnMethod && iterator) {
     try {
@@ -87,14 +97,6 @@ async function closeQwenQuery(queryInstance: Query, iterator: AsyncIterator<SDKM
     } catch {
       // Query.close below still owns the child-process shutdown path.
     }
-  }
-  // The SDK's public close() requests child termination but does not wait for the
-  // process to release its cwd. Register the wait before close() marks the child
-  // killed, otherwise the SDK's waitForExit() fast path can miss the close event.
-  const transport = (queryInstance as unknown as { transport?: QwenQueryTransport }).transport;
-  let exit: Promise<void> | null = null;
-  if (transport?.waitForExit) {
-    try { exit = Promise.resolve(transport.waitForExit.call(transport)).catch(() => undefined); } catch { /* shutdown is already fail-closed */ }
   }
   try { await queryInstance.close(); } catch { /* shutdown is already fail-closed */ }
   if (exit) await exit;
@@ -241,6 +243,7 @@ export class QwenCodeAdapter implements WorkerAdapter {
   #target: ModelTarget;
   #queryFactory: QwenQueryFactory;
   #query: Query | null = null;
+  #iterator: AsyncIterator<SDKMessage> | null = null;
   readonly #queryCleanups = new Map<Query, Promise<void>>();
   #abortController: AbortController | null = null;
   #sessionId: string | null;
@@ -289,8 +292,7 @@ export class QwenCodeAdapter implements WorkerAdapter {
     for (const [approvalId] of this.#approvals) this.#settleApproval(approvalId, { behavior: 'deny', message: 'Harness shutting down.' }, true);
     const queryInstance = this.#query;
     if (queryInstance) {
-      this.#abortController?.abort();
-      this.#ensureQueryCleanup(queryInstance, null);
+      this.#ensureQueryCleanup(queryInstance, this.#iterator);
     }
     await Promise.all([...this.#queryCleanups.values()]);
     this.#query = null;
@@ -397,6 +399,7 @@ export class QwenCodeAdapter implements WorkerAdapter {
       this.#emitStatus('ready', null);
 
       iterator = queryInstance[Symbol.asyncIterator]();
+      this.#iterator = iterator;
       const consume = (async (): Promise<void> => {
         while (true) {
           const next = await iterator!.next();
@@ -456,7 +459,10 @@ export class QwenCodeAdapter implements WorkerAdapter {
       if (timeout) clearTimeout(timeout);
       this.#clearInterruptFallback();
       if (queryInstance) this.#ensureQueryCleanup(queryInstance, iterator);
-      if (this.#query === queryInstance) this.#query = null;
+      if (this.#query === queryInstance) {
+        this.#query = null;
+        this.#iterator = null;
+      }
       this.#abortController = null;
       this.#busy = false;
       try {

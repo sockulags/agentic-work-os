@@ -395,6 +395,46 @@ describe('QwenCodeAdapter', () => {
     assert.equal(stopped, true);
   });
 
+  test('active stop registers transport exit before closing a live query', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    const order: string[] = [];
+    let releaseExit!: () => void;
+    const exit = new Promise<void>((resolve) => { releaseExit = resolve; });
+    let releaseIterator!: () => void;
+    const iterator = {
+      next: () => new Promise<IteratorResult<unknown>>((resolve) => {
+        releaseIterator = () => resolve({ done: true, value: undefined });
+      }),
+      return: async (): Promise<IteratorResult<unknown>> => {
+        releaseIterator?.();
+        return { done: true, value: undefined };
+      },
+      [Symbol.asyncIterator]() { return this; },
+    };
+    const adapter = new QwenCodeAdapter(context(events), target, {
+      query: () => ({
+        [Symbol.asyncIterator]: () => iterator,
+        getSessionId: () => 'qwen-session-1',
+        interrupt: async () => {},
+        close: async () => { order.push('close'); },
+        transport: { waitForExit: () => { order.push('wait'); return exit; } },
+      } as unknown as Query),
+    });
+
+    const turn = adapter.sendTurn('wait');
+    const turnFailure = assert.rejects(turn, /stream ended without a result/);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    let stopped = false;
+    const stopping = adapter.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    assert.deepEqual(order, ['wait', 'close']);
+    assert.equal(stopped, false);
+    releaseExit();
+    await Promise.all([stopping, turnFailure]);
+    assert.equal(stopped, true);
+  });
+
   test('ignores a late result from a timed-out turn after the next turn starts', async () => {
     resetQwenInferenceSlotForTests();
     const events: AdapterEvent[] = [];
