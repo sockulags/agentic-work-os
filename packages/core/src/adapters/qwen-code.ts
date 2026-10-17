@@ -277,6 +277,17 @@ export class QwenCodeAdapter implements WorkerAdapter {
     const release = acquireQwenInferenceSlot();
     if (!release) throw new Error('Qwen Code is already running another inference; concurrent Qwen turns are not queued.');
     let timeout: NodeJS.Timeout | null = null;
+    let iterator: AsyncIterator<SDKMessage> | null = null;
+    let resolveDeadline: (() => void) | null = null;
+    const stopConsumption = (): void => {
+      const returnMethod = iterator?.return;
+      if (!returnMethod || !iterator) return;
+      try {
+        void Promise.resolve(returnMethod.call(iterator)).catch(() => undefined);
+      } catch {
+        // The deadline must settle even when the SDK iterator cannot be closed.
+      }
+    };
     try {
       this.#busy = true;
       this.#interrupted = false;
@@ -297,11 +308,17 @@ export class QwenCodeAdapter implements WorkerAdapter {
       this.#ctx.emit({ kind: 'turn.started', turnId: this.#turnId, nativeSessionId: this.#sessionId });
       this.#emitStatus('spawning', null);
 
+      const deadline = new Promise<void>((resolve) => { resolveDeadline = resolve; });
       timeout = setTimeout(() => {
+        if (this.#terminalEmitted) return;
         this.#timedOut = true;
-        // A hard turn timeout does not wait for the SDK control channel.
+        // A hard turn timeout does not wait for the SDK control channel or a stuck
+        // iterator. The Qwen SDK owns its child process, so the abort/interrupt are
+        // best-effort termination signals while the adapter stops consuming here.
+        stopConsumption();
         void this.#query?.interrupt().catch(() => undefined);
         this.#abortController?.abort();
+        resolveDeadline?.();
       }, qwenTimeout(this.#ctx.config));
 
       const queryInstance = this.#queryFactory({
@@ -350,7 +367,19 @@ export class QwenCodeAdapter implements WorkerAdapter {
       this.#ctx.onSessionId(this.#sessionId);
       this.#emitStatus('ready', null);
 
-      for await (const message of queryInstance) this.#onMessage(message);
+      iterator = queryInstance[Symbol.asyncIterator]();
+      const consume = (async (): Promise<void> => {
+        while (true) {
+          const next = await iterator!.next();
+          if (next.done || this.#timedOut || this.#terminalEmitted) return;
+          this.#onMessage(next.value);
+          if (this.#timedOut || this.#terminalEmitted) {
+            stopConsumption();
+            return;
+          }
+        }
+      })();
+      await Promise.race([consume, deadline]);
 
       if (this.#timedOut) {
         const error = `Qwen Code turn exceeded ${qwenTimeout(this.#ctx.config)}ms.`;

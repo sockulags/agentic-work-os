@@ -73,6 +73,19 @@ function fakeQuery(messages: unknown[], delayMs = 0): Query {
   return iterator as unknown as Query;
 }
 
+function hangingQuery(messages: unknown[], onInterrupt: () => void = () => {}): Query {
+  const iterator = {
+    async *[Symbol.asyncIterator](): AsyncGenerator<unknown> {
+      yield* messages;
+      await new Promise<void>(() => {});
+    },
+    getSessionId: () => 'qwen-session-1',
+    interrupt: async () => { onInterrupt(); },
+    close: async () => {},
+  };
+  return iterator as unknown as Query;
+}
+
 describe('Qwen Code policy', () => {
   test('allows only exact verify commands and read-only git commands', () => {
     assert.equal(isAllowedQwenShellCommand('npm test', ['npm test']), true);
@@ -292,6 +305,45 @@ describe('QwenCodeAdapter', () => {
     assert.equal(terminal.length, 1);
     assert.equal(terminal[0]?.kind === 'turn.completed' ? terminal[0].reason : null, 'error');
     assert.match(terminal[0]?.kind === 'turn.completed' ? terminal[0].error ?? '' : '', /no messages arrived/);
+  });
+
+  test('rejects a never-yielding iterator at the deadline with one terminal turn error', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    const ctx = context(events);
+    ctx.config.qwenTurnTimeoutMs = 10;
+    let interrupted = 0;
+    const adapter = new QwenCodeAdapter(ctx, target, {
+      query: () => hangingQuery([], () => { interrupted += 1; }),
+    });
+
+    await assert.rejects(() => adapter.sendTurn('wait'), /Qwen Code turn exceeded 10ms/);
+
+    assert.equal(interrupted, 1);
+    assert.equal(events.filter((event) => event.kind === 'error').length, 1);
+    const terminal = events.filter((event) => event.kind === 'turn.completed');
+    assert.equal(terminal.length, 1);
+    assert.equal(terminal[0]?.kind === 'turn.completed' ? terminal[0].reason : null, 'error');
+    assert.match(terminal[0]?.kind === 'turn.completed' ? terminal[0].error ?? '' : '', /exceeded 10ms/);
+  });
+
+  test('lets a result completion win when the SDK iterator hangs afterward', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    const ctx = context(events);
+    ctx.config.qwenTurnTimeoutMs = 10;
+    let interrupted = 0;
+    const adapter = new QwenCodeAdapter(ctx, target, {
+      query: () => hangingQuery([successResult()], () => { interrupted += 1; }),
+    });
+
+    await adapter.sendTurn('complete');
+
+    assert.equal(interrupted, 0);
+    assert.equal(events.filter((event) => event.kind === 'error').length, 0);
+    const terminal = events.filter((event) => event.kind === 'turn.completed');
+    assert.equal(terminal.length, 1);
+    assert.equal(terminal[0]?.kind === 'turn.completed' ? terminal[0].reason : null, 'completed');
   });
 
   test('rejects a concurrent inference without queuing and releases the slot', async () => {
