@@ -516,7 +516,13 @@ export class QwenCodeAdapter implements WorkerAdapter {
     this.#clearInterruptFallback();
     this.#interruptFallback = setTimeout(() => {
       this.#interruptFallback = null;
-      if (this.#busy && this.#query === queryInstance) this.#abortController?.abort();
+      if (this.#busy && this.#query === queryInstance) {
+        // Register the exit observation before the fallback abort can mark the
+        // child killed; otherwise waitForExit() can take its fast path and the
+        // global slot may be released while the process is still draining.
+        this.#ensureQueryCleanup(queryInstance, this.#iterator);
+        this.#abortController?.abort();
+      }
     }, this.#ctx.config.interruptGraceMs);
   }
 

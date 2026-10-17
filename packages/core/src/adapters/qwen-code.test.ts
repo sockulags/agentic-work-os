@@ -617,6 +617,46 @@ describe('QwenCodeAdapter', () => {
     await running;
   });
 
+  test('holds the global slot until exit when interrupt fallback aborts a stuck SDK control call', async () => {
+    resetQwenInferenceSlotForTests();
+    const ctx = context([]);
+    ctx.config.interruptGraceMs = 10;
+    let releaseExit!: () => void;
+    let aborted = false;
+    let killed = false;
+    const exit = new Promise<void>((resolve) => { releaseExit = resolve; });
+    const first = new QwenCodeAdapter(ctx, target, {
+      query: (args) => ({
+        async *[Symbol.asyncIterator]() {
+          await new Promise<void>((resolve) => {
+            args.options.abortController?.signal.addEventListener('abort', () => {
+              aborted = true;
+              killed = true;
+              resolve();
+            }, { once: true });
+          });
+        },
+        getSessionId: () => 'qwen-session-1',
+        interrupt: () => new Promise<void>(() => {}),
+        close: async () => {},
+        transport: { waitForExit: () => killed ? Promise.resolve() : exit },
+      } as unknown as Query),
+    });
+    const second = new QwenCodeAdapter(context([]), target, { query: () => fakeQuery([successResult()]) });
+
+    const running = first.sendTurn('wait');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await first.interrupt();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(aborted, true);
+    await assert.rejects(() => second.sendTurn('blocked'), /not queued/);
+
+    releaseExit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await running;
+    await second.sendTurn('allowed after exit');
+  });
+
   test('releases the global slot when event emission throws before query construction', async () => {
     resetQwenInferenceSlotForTests();
     const broken = context([]);
