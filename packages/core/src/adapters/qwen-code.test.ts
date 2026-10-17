@@ -73,6 +73,61 @@ function fakeQuery(messages: unknown[], delayMs = 0): Query {
   return iterator as unknown as Query;
 }
 
+function hangingQuery(messages: unknown[], onInterrupt: () => void = () => {}): Query {
+  const iterator = {
+    async *[Symbol.asyncIterator](): AsyncGenerator<unknown> {
+      yield* messages;
+      await new Promise<void>(() => {});
+    },
+    getSessionId: () => 'qwen-session-1',
+    interrupt: async () => { onInterrupt(); },
+    close: async () => {},
+  };
+  return iterator as unknown as Query;
+}
+
+function hangingQueryWithDeferredExit(onInterrupt: () => void = () => {}): { query: Query; releaseExit: () => void } {
+  let releaseExit!: () => void;
+  let killed = false;
+  const exit = new Promise<void>((resolve) => { releaseExit = resolve; });
+  const iterator = {
+    async *[Symbol.asyncIterator](): AsyncGenerator<unknown> {
+      await new Promise<void>(() => {});
+    },
+    getSessionId: () => 'qwen-session-1',
+    interrupt: async () => { killed = true; onInterrupt(); },
+    close: async () => {},
+    transport: { waitForExit: () => killed ? Promise.resolve() : exit },
+  };
+  return { query: iterator as unknown as Query, releaseExit };
+}
+
+function controlledQuery(message: unknown, sessionId: string): { query: Query; release: () => void; reads: () => number } {
+  let resolveNext: ((result: IteratorResult<unknown>) => void) | null = null;
+  let reads = 0;
+  const iterator = {
+    next: () => {
+      reads += 1;
+      return new Promise<IteratorResult<unknown>>((resolve) => { resolveNext = resolve; });
+    },
+    return: async (): Promise<IteratorResult<unknown>> => ({ done: true, value: undefined }),
+    [Symbol.asyncIterator]() { return this; },
+  };
+  return {
+    query: {
+      [Symbol.asyncIterator]: () => iterator,
+      getSessionId: () => sessionId,
+      interrupt: async () => {},
+      close: async () => {},
+    } as unknown as Query,
+    release: () => {
+      resolveNext?.({ done: false, value: message });
+      resolveNext = null;
+    },
+    reads: () => reads,
+  };
+}
+
 describe('Qwen Code policy', () => {
   test('allows only exact verify commands and read-only git commands', () => {
     assert.equal(isAllowedQwenShellCommand('npm test', ['npm test']), true);
@@ -294,6 +349,186 @@ describe('QwenCodeAdapter', () => {
     assert.match(terminal[0]?.kind === 'turn.completed' ? terminal[0].error ?? '' : '', /no messages arrived/);
   });
 
+  test('rejects a never-yielding iterator at the deadline with one terminal turn error', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    const ctx = context(events);
+    ctx.config.qwenTurnTimeoutMs = 10;
+    let interrupted = 0;
+    const adapter = new QwenCodeAdapter(ctx, target, {
+      query: () => hangingQuery([], () => { interrupted += 1; }),
+    });
+
+    await assert.rejects(() => adapter.sendTurn('wait'), /Qwen Code turn exceeded 10ms/);
+
+    assert.equal(interrupted, 1);
+    assert.equal(events.filter((event) => event.kind === 'error').length, 1);
+    const terminal = events.filter((event) => event.kind === 'turn.completed');
+    assert.equal(terminal.length, 1);
+    assert.equal(terminal[0]?.kind === 'turn.completed' ? terminal[0].reason : null, 'error');
+    assert.match(terminal[0]?.kind === 'turn.completed' ? terminal[0].error ?? '' : '', /exceeded 10ms/);
+  });
+
+  test('holds the global slot until a timed-out Qwen process exits', async () => {
+    resetQwenInferenceSlotForTests();
+    const firstContext = context([]);
+    firstContext.config.qwenTurnTimeoutMs = 10;
+    const firstQuery = hangingQueryWithDeferredExit();
+    const first = new QwenCodeAdapter(firstContext, target, { query: () => firstQuery.query });
+    const second = new QwenCodeAdapter(context([]), target, { query: () => fakeQuery([successResult()]) });
+
+    await assert.rejects(() => first.sendTurn('wait'), /Qwen Code turn exceeded 10ms/);
+    await assert.rejects(() => second.sendTurn('blocked'), /not queued/);
+
+    firstQuery.releaseExit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await second.sendTurn('allowed after exit');
+  });
+
+  test('lets a result completion win when the SDK iterator hangs afterward', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    const ctx = context(events);
+    ctx.config.qwenTurnTimeoutMs = 10;
+    let interrupted = 0;
+    const adapter = new QwenCodeAdapter(ctx, target, {
+      query: () => hangingQuery([successResult()], () => { interrupted += 1; }),
+    });
+
+    await adapter.sendTurn('complete');
+
+    assert.equal(interrupted, 0);
+    assert.equal(events.filter((event) => event.kind === 'error').length, 0);
+    const terminal = events.filter((event) => event.kind === 'turn.completed');
+    assert.equal(terminal.length, 1);
+    assert.equal(terminal[0]?.kind === 'turn.completed' ? terminal[0].reason : null, 'completed');
+  });
+
+  test('registers transport exit before closing and joins it during stop', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    const order: string[] = [];
+    let releaseExit!: () => void;
+    const exit = new Promise<void>((resolve) => { releaseExit = resolve; });
+    const adapter = new QwenCodeAdapter(context(events), target, {
+      query: () => ({
+        async *[Symbol.asyncIterator]() { yield successResult(); },
+        getSessionId: () => 'qwen-session-1',
+        interrupt: async () => {},
+        close: async () => { order.push('close'); },
+        transport: { waitForExit: () => { order.push('wait'); return exit; } },
+      } as unknown as Query),
+    });
+
+    await adapter.sendTurn('complete');
+    assert.deepEqual(order, ['wait', 'close']);
+
+    let stopped = false;
+    const stopping = adapter.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    assert.equal(stopped, false);
+    releaseExit();
+    await stopping;
+    assert.equal(stopped, true);
+  });
+
+  test('releases the global slot on process exit even when query close hangs', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    let releaseExit!: () => void;
+    let releaseClose!: () => void;
+    const exit = new Promise<void>((resolve) => { releaseExit = resolve; });
+    const close = new Promise<void>((resolve) => { releaseClose = resolve; });
+    const first = new QwenCodeAdapter(context(events), target, {
+      query: () => ({
+        async *[Symbol.asyncIterator]() { yield successResult(); },
+        getSessionId: () => 'qwen-session-1',
+        interrupt: async () => {},
+        close: async () => close,
+        transport: { waitForExit: () => exit },
+      } as unknown as Query),
+    });
+    const second = new QwenCodeAdapter(context([]), target, { query: () => fakeQuery([successResult()]) });
+
+    await first.sendTurn('complete');
+    await assert.rejects(() => second.sendTurn('blocked'), /not queued/);
+
+    releaseExit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await second.sendTurn('allowed after exit');
+    releaseClose();
+  });
+
+  test('active stop registers transport exit before closing a live query', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    const order: string[] = [];
+    let releaseExit!: () => void;
+    const exit = new Promise<void>((resolve) => { releaseExit = resolve; });
+    let releaseIterator!: () => void;
+    const iterator = {
+      next: () => new Promise<IteratorResult<unknown>>((resolve) => {
+        releaseIterator = () => resolve({ done: true, value: undefined });
+      }),
+      return: async (): Promise<IteratorResult<unknown>> => {
+        releaseIterator?.();
+        return { done: true, value: undefined };
+      },
+      [Symbol.asyncIterator]() { return this; },
+    };
+    const adapter = new QwenCodeAdapter(context(events), target, {
+      query: () => ({
+        [Symbol.asyncIterator]: () => iterator,
+        getSessionId: () => 'qwen-session-1',
+        interrupt: async () => {},
+        close: async () => { order.push('close'); },
+        transport: { waitForExit: () => { order.push('wait'); return exit; } },
+      } as unknown as Query),
+    });
+
+    const turn = adapter.sendTurn('wait');
+    const turnFailure = assert.rejects(turn, /stream ended without a result/);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    let stopped = false;
+    const stopping = adapter.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    assert.deepEqual(order, ['wait', 'close']);
+    assert.equal(stopped, false);
+    releaseExit();
+    await Promise.all([stopping, turnFailure]);
+    assert.equal(stopped, true);
+  });
+
+  test('ignores a late result from a timed-out turn after the next turn starts', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    const sessionIds: string[] = [];
+    const ctx = context(events);
+    ctx.config.qwenTurnTimeoutMs = 10;
+    ctx.onSessionId = (sessionId) => { sessionIds.push(sessionId); };
+    const late = controlledQuery({ ...(successResult() as Record<string, unknown>), session_id: 'late-old-session' }, 'old-session');
+    const current = controlledQuery(successResult(), 'new-session');
+    let queryCount = 0;
+    const adapter = new QwenCodeAdapter(ctx, target, {
+      query: () => queryCount++ === 0 ? late.query : current.query,
+    });
+
+    await assert.rejects(() => adapter.sendTurn('old turn'), /Qwen Code turn exceeded 10ms/);
+    const nextTurn = adapter.sendTurn('new turn');
+    await Promise.resolve();
+    late.release();
+    await Promise.resolve();
+    current.release();
+    await nextTurn;
+
+    assert.equal(sessionIds.includes('late-old-session'), false);
+    assert.equal(events.filter((event) => event.kind === 'error').length, 1);
+    assert.equal(events.filter((event) => event.kind === 'usage').length, 1);
+    const terminal = events.filter((event) => event.kind === 'turn.completed');
+    assert.equal(terminal.length, 2);
+    assert.equal(terminal.at(-1)?.kind === 'turn.completed' ? terminal.at(-1)?.reason : null, 'completed');
+  });
+
   test('rejects a concurrent inference without queuing and releases the slot', async () => {
     resetQwenInferenceSlotForTests();
     const first = new QwenCodeAdapter(context([]), target, { query: () => fakeQuery([successResult()], 30) });
@@ -301,6 +536,7 @@ describe('QwenCodeAdapter', () => {
     const running = first.sendTurn('first');
     await assert.rejects(() => second.sendTurn('second'), /not queued/);
     await running;
+    await new Promise((resolve) => setTimeout(resolve, 0));
     await second.sendTurn('second');
   });
 
@@ -384,6 +620,70 @@ describe('QwenCodeAdapter', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(aborted, true);
     await running;
+  });
+
+  test('holds the global slot until exit when interrupt fallback aborts a stuck SDK control call', async () => {
+    resetQwenInferenceSlotForTests();
+    const ctx = context([]);
+    ctx.config.interruptGraceMs = 10;
+    let releaseExit!: () => void;
+    let aborted = false;
+    let killed = false;
+    const exit = new Promise<void>((resolve) => { releaseExit = resolve; });
+    const first = new QwenCodeAdapter(ctx, target, {
+      query: (args) => ({
+        async *[Symbol.asyncIterator]() {
+          await new Promise<void>((resolve) => {
+            args.options.abortController?.signal.addEventListener('abort', () => {
+              aborted = true;
+              killed = true;
+              resolve();
+            }, { once: true });
+          });
+        },
+        getSessionId: () => 'qwen-session-1',
+        interrupt: () => new Promise<void>(() => {}),
+        close: async () => {},
+        transport: { waitForExit: () => killed ? Promise.resolve() : exit },
+      } as unknown as Query),
+    });
+    const second = new QwenCodeAdapter(context([]), target, { query: () => fakeQuery([successResult()]) });
+
+    const running = first.sendTurn('wait');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await first.interrupt();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(aborted, true);
+    await assert.rejects(() => second.sendTurn('blocked'), /not queued/);
+
+    releaseExit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await running;
+    await second.sendTurn('allowed after exit');
+  });
+
+  test('settles an interrupted error result once and stops reading the iterator', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    const query = controlledQuery({
+      ...(successResult() as Record<string, unknown>),
+      is_error: true,
+      subtype: 'error',
+      error: { message: 'SDK failed after interrupt' },
+    }, 'qwen-session-1');
+    const adapter = new QwenCodeAdapter(context(events), target, { query: () => query.query });
+
+    const running = adapter.sendTurn('interrupt');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await adapter.interrupt();
+    query.release();
+    await running;
+
+    assert.equal(query.reads(), 1);
+    assert.equal(events.filter((event) => event.kind === 'error').length, 0);
+    const terminal = events.filter((event) => event.kind === 'turn.completed');
+    assert.equal(terminal.length, 1);
+    assert.equal(terminal[0]?.kind === 'turn.completed' ? terminal[0].reason : null, 'interrupted');
   });
 
   test('releases the global slot when event emission throws before query construction', async () => {

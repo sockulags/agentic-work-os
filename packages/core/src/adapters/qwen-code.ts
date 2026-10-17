@@ -75,6 +75,45 @@ interface PendingApproval {
   onAbort: () => void;
 }
 
+interface QwenQueryTransport {
+  waitForExit?: () => Promise<void>;
+}
+
+async function closeQwenQuery(queryInstance: Query, iterator: AsyncIterator<SDKMessage> | null): Promise<void> {
+  // The SDK's public close() requests child termination but does not wait for the
+  // process to release its cwd. Register the wait before any iterator or query
+  // close action can mark the child killed, otherwise waitForExit() can miss the
+  // close event through its fast path.
+  const transport = (queryInstance as unknown as { transport?: QwenQueryTransport }).transport;
+  let exit: Promise<void> | null = null;
+  if (transport?.waitForExit) {
+    try { exit = Promise.resolve(transport.waitForExit.call(transport)).catch(() => undefined); } catch { /* shutdown is already fail-closed */ }
+  }
+
+  const returnMethod = iterator?.return;
+  if (returnMethod && iterator) {
+    try {
+      void Promise.resolve(returnMethod.call(iterator)).catch(() => undefined);
+    } catch {
+      // Query.close below still owns the child-process shutdown path.
+    }
+  }
+  // Query.close() is best-effort. Keep its rejection observed, but when the SDK
+  // exposes process exit, do not let a stuck close() hold the inference slot after
+  // the child has already exited.
+  let close: Promise<void>;
+  try {
+    close = Promise.resolve(queryInstance.close()).catch(() => undefined);
+  } catch {
+    close = Promise.resolve();
+  }
+  if (exit) {
+    await exit;
+    return;
+  }
+  await close;
+}
+
 let qwenInferenceBusy = false;
 
 /** Testable global inference slot. Qwen's local runtime is intentionally single-slot. */
@@ -216,6 +255,8 @@ export class QwenCodeAdapter implements WorkerAdapter {
   #target: ModelTarget;
   #queryFactory: QwenQueryFactory;
   #query: Query | null = null;
+  #iterator: AsyncIterator<SDKMessage> | null = null;
+  readonly #queryCleanups = new Map<Query, Promise<void>>();
   #abortController: AbortController | null = null;
   #sessionId: string | null;
   #model: string | null = null;
@@ -263,9 +304,9 @@ export class QwenCodeAdapter implements WorkerAdapter {
     for (const [approvalId] of this.#approvals) this.#settleApproval(approvalId, { behavior: 'deny', message: 'Harness shutting down.' }, true);
     const queryInstance = this.#query;
     if (queryInstance) {
-      this.#abortController?.abort();
-      try { await queryInstance.close(); } catch { /* shutdown is already fail-closed */ }
+      this.#ensureQueryCleanup(queryInstance, this.#iterator);
     }
+    await Promise.all([...this.#queryCleanups.values()]);
     this.#query = null;
     this.#abortController = null;
     this.#busy = false;
@@ -277,6 +318,19 @@ export class QwenCodeAdapter implements WorkerAdapter {
     const release = acquireQwenInferenceSlot();
     if (!release) throw new Error('Qwen Code is already running another inference; concurrent Qwen turns are not queued.');
     let timeout: NodeJS.Timeout | null = null;
+    let iterator: AsyncIterator<SDKMessage> | null = null;
+    let queryInstance: Query | null = null;
+    let resolveDeadline: (() => void) | null = null;
+    const turnOwnership = { active: true };
+    const stopConsumption = (): void => {
+      const returnMethod = iterator?.return;
+      if (!returnMethod || !iterator) return;
+      try {
+        void Promise.resolve(returnMethod.call(iterator)).catch(() => undefined);
+      } catch {
+        // The deadline must settle even when the SDK iterator cannot be closed.
+      }
+    };
     try {
       this.#busy = true;
       this.#interrupted = false;
@@ -297,14 +351,23 @@ export class QwenCodeAdapter implements WorkerAdapter {
       this.#ctx.emit({ kind: 'turn.started', turnId: this.#turnId, nativeSessionId: this.#sessionId });
       this.#emitStatus('spawning', null);
 
+      const deadline = new Promise<void>((resolve) => { resolveDeadline = resolve; });
       timeout = setTimeout(() => {
+        if (this.#terminalEmitted) return;
         this.#timedOut = true;
-        // A hard turn timeout does not wait for the SDK control channel.
+        // A hard turn timeout does not wait for the SDK control channel or a stuck
+        // iterator. The Qwen SDK owns its child process, so the abort/interrupt are
+        // best-effort termination signals while the adapter stops consuming here.
+        // Register the exit observation before interrupt/abort can mark the child
+        // killed; waitForExit() otherwise takes its already-killed fast path.
+        if (queryInstance) this.#ensureQueryCleanup(queryInstance, iterator);
+        else stopConsumption();
         void this.#query?.interrupt().catch(() => undefined);
         this.#abortController?.abort();
+        resolveDeadline?.();
       }, qwenTimeout(this.#ctx.config));
 
-      const queryInstance = this.#queryFactory({
+      queryInstance = this.#queryFactory({
         prompt: text,
         options: {
           cwd: this.#ctx.cwd,
@@ -350,7 +413,20 @@ export class QwenCodeAdapter implements WorkerAdapter {
       this.#ctx.onSessionId(this.#sessionId);
       this.#emitStatus('ready', null);
 
-      for await (const message of queryInstance) this.#onMessage(message);
+      iterator = queryInstance[Symbol.asyncIterator]();
+      this.#iterator = iterator;
+      const consume = (async (): Promise<void> => {
+        while (true) {
+          const next = await iterator!.next();
+          if (next.done || !turnOwnership.active || this.#timedOut || this.#terminalEmitted) return;
+          this.#onMessage(next.value);
+          if (!turnOwnership.active || this.#timedOut || this.#terminalEmitted) {
+            stopConsumption();
+            return;
+          }
+        }
+      })();
+      await Promise.race([consume, deadline]);
 
       if (this.#timedOut) {
         const error = `Qwen Code turn exceeded ${qwenTimeout(this.#ctx.config)}ms.`;
@@ -394,18 +470,38 @@ export class QwenCodeAdapter implements WorkerAdapter {
       }
       throw err;
     } finally {
+      turnOwnership.active = false;
       if (timeout) clearTimeout(timeout);
       this.#clearInterruptFallback();
-      this.#query = null;
+      const cleanup = queryInstance ? this.#ensureQueryCleanup(queryInstance, iterator) : null;
+      if (this.#query === queryInstance) {
+        this.#query = null;
+        this.#iterator = null;
+      }
       this.#abortController = null;
       this.#busy = false;
       try {
         this.#emitStatus('idle', null);
       } finally {
         this.#turnId = null;
-        release();
+        // sendTurn must settle independently of SDK shutdown. Keep the global
+        // inference slot until the child has actually exited, though, so another
+        // adapter cannot overlap the still-live Qwen process.
+        if (cleanup) void cleanup.then(release, release);
+        else release();
       }
     }
+  }
+
+  #ensureQueryCleanup(queryInstance: Query, iterator: AsyncIterator<SDKMessage> | null): Promise<void> {
+    const existing = this.#queryCleanups.get(queryInstance);
+    if (existing) return existing;
+    const cleanup = closeQwenQuery(queryInstance, iterator);
+    this.#queryCleanups.set(queryInstance, cleanup);
+    void cleanup.finally(() => {
+      if (this.#queryCleanups.get(queryInstance) === cleanup) this.#queryCleanups.delete(queryInstance);
+    });
+    return cleanup;
   }
 
   async interrupt(): Promise<void> {
@@ -420,7 +516,13 @@ export class QwenCodeAdapter implements WorkerAdapter {
     this.#clearInterruptFallback();
     this.#interruptFallback = setTimeout(() => {
       this.#interruptFallback = null;
-      if (this.#busy && this.#query === queryInstance) this.#abortController?.abort();
+      if (this.#busy && this.#query === queryInstance) {
+        // Register the exit observation before the fallback abort can mark the
+        // child killed; otherwise waitForExit() can take its fast path and the
+        // global slot may be released while the process is still draining.
+        this.#ensureQueryCleanup(queryInstance, this.#iterator);
+        this.#abortController?.abort();
+      }
     }, this.#ctx.config.interruptGraceMs);
   }
 
@@ -545,14 +647,17 @@ export class QwenCodeAdapter implements WorkerAdapter {
       }
       if (message.is_error) {
         const detail = message.error?.message ?? `Qwen Code returned ${message.subtype}.`;
-        if (!this.#interrupted) {
+        if (this.#interrupted) {
+          this.#emitCompleted('interrupted', null);
+        } else {
           this.#turnError = message.subtype === 'error_max_turns' ? null : detail;
           this.#ctx.emit({ kind: 'error', severity: 'turn', message: detail, turnId: this.#turnId });
           this.#emitCompleted(message.subtype === 'error_max_turns' ? 'max_turns' : 'error', detail);
         }
         return;
       }
-      if (!this.#interrupted && !this.#timedOut) this.#emitCompleted('completed', null);
+      if (this.#interrupted) this.#emitCompleted('interrupted', null);
+      else if (!this.#timedOut) this.#emitCompleted('completed', null);
     }
   }
 
