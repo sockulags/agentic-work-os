@@ -88,14 +88,16 @@ async function closeQwenQuery(queryInstance: Query, iterator: AsyncIterator<SDKM
       // Query.close below still owns the child-process shutdown path.
     }
   }
-  try { await queryInstance.close(); } catch { /* shutdown is already fail-closed */ }
-
   // The SDK's public close() requests child termination but does not wait for the
-  // process to release its cwd. Join that lifecycle when the current SDK exposes it.
+  // process to release its cwd. Register the wait before close() marks the child
+  // killed, otherwise the SDK's waitForExit() fast path can miss the close event.
   const transport = (queryInstance as unknown as { transport?: QwenQueryTransport }).transport;
+  let exit: Promise<void> | null = null;
   if (transport?.waitForExit) {
-    try { await transport.waitForExit.call(transport); } catch { /* shutdown is already fail-closed */ }
+    try { exit = Promise.resolve(transport.waitForExit.call(transport)).catch(() => undefined); } catch { /* shutdown is already fail-closed */ }
   }
+  try { await queryInstance.close(); } catch { /* shutdown is already fail-closed */ }
+  if (exit) await exit;
 }
 
 let qwenInferenceBusy = false;

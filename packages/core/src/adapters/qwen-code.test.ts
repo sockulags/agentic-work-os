@@ -367,6 +367,34 @@ describe('QwenCodeAdapter', () => {
     assert.equal(terminal[0]?.kind === 'turn.completed' ? terminal[0].reason : null, 'completed');
   });
 
+  test('registers transport exit before closing and joins it during stop', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    const order: string[] = [];
+    let releaseExit!: () => void;
+    const exit = new Promise<void>((resolve) => { releaseExit = resolve; });
+    const adapter = new QwenCodeAdapter(context(events), target, {
+      query: () => ({
+        async *[Symbol.asyncIterator]() { yield successResult(); },
+        getSessionId: () => 'qwen-session-1',
+        interrupt: async () => {},
+        close: async () => { order.push('close'); },
+        transport: { waitForExit: () => { order.push('wait'); return exit; } },
+      } as unknown as Query),
+    });
+
+    await adapter.sendTurn('complete');
+    assert.deepEqual(order, ['wait', 'close']);
+
+    let stopped = false;
+    const stopping = adapter.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    assert.equal(stopped, false);
+    releaseExit();
+    await stopping;
+    assert.equal(stopped, true);
+  });
+
   test('ignores a late result from a timed-out turn after the next turn starts', async () => {
     resetQwenInferenceSlotForTests();
     const events: AdapterEvent[] = [];
