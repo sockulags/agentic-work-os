@@ -86,6 +86,27 @@ function hangingQuery(messages: unknown[], onInterrupt: () => void = () => {}): 
   return iterator as unknown as Query;
 }
 
+function controlledQuery(message: unknown, sessionId: string): { query: Query; release: () => void } {
+  let resolveNext: ((result: IteratorResult<unknown>) => void) | null = null;
+  const iterator = {
+    next: () => new Promise<IteratorResult<unknown>>((resolve) => { resolveNext = resolve; }),
+    return: async (): Promise<IteratorResult<unknown>> => ({ done: true, value: undefined }),
+    [Symbol.asyncIterator]() { return this; },
+  };
+  return {
+    query: {
+      [Symbol.asyncIterator]: () => iterator,
+      getSessionId: () => sessionId,
+      interrupt: async () => {},
+      close: async () => {},
+    } as unknown as Query,
+    release: () => {
+      resolveNext?.({ done: false, value: message });
+      resolveNext = null;
+    },
+  };
+}
+
 describe('Qwen Code policy', () => {
   test('allows only exact verify commands and read-only git commands', () => {
     assert.equal(isAllowedQwenShellCommand('npm test', ['npm test']), true);
@@ -344,6 +365,36 @@ describe('QwenCodeAdapter', () => {
     const terminal = events.filter((event) => event.kind === 'turn.completed');
     assert.equal(terminal.length, 1);
     assert.equal(terminal[0]?.kind === 'turn.completed' ? terminal[0].reason : null, 'completed');
+  });
+
+  test('ignores a late result from a timed-out turn after the next turn starts', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    const sessionIds: string[] = [];
+    const ctx = context(events);
+    ctx.config.qwenTurnTimeoutMs = 10;
+    ctx.onSessionId = (sessionId) => { sessionIds.push(sessionId); };
+    const late = controlledQuery({ ...(successResult() as Record<string, unknown>), session_id: 'late-old-session' }, 'old-session');
+    const current = controlledQuery(successResult(), 'new-session');
+    let queryCount = 0;
+    const adapter = new QwenCodeAdapter(ctx, target, {
+      query: () => queryCount++ === 0 ? late.query : current.query,
+    });
+
+    await assert.rejects(() => adapter.sendTurn('old turn'), /Qwen Code turn exceeded 10ms/);
+    const nextTurn = adapter.sendTurn('new turn');
+    await Promise.resolve();
+    late.release();
+    await Promise.resolve();
+    current.release();
+    await nextTurn;
+
+    assert.equal(sessionIds.includes('late-old-session'), false);
+    assert.equal(events.filter((event) => event.kind === 'error').length, 1);
+    assert.equal(events.filter((event) => event.kind === 'usage').length, 1);
+    const terminal = events.filter((event) => event.kind === 'turn.completed');
+    assert.equal(terminal.length, 2);
+    assert.equal(terminal.at(-1)?.kind === 'turn.completed' ? terminal.at(-1)?.reason : null, 'completed');
   });
 
   test('rejects a concurrent inference without queuing and releases the slot', async () => {

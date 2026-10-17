@@ -279,6 +279,7 @@ export class QwenCodeAdapter implements WorkerAdapter {
     let timeout: NodeJS.Timeout | null = null;
     let iterator: AsyncIterator<SDKMessage> | null = null;
     let resolveDeadline: (() => void) | null = null;
+    const turnOwnership = { active: true };
     const stopConsumption = (): void => {
       const returnMethod = iterator?.return;
       if (!returnMethod || !iterator) return;
@@ -371,9 +372,9 @@ export class QwenCodeAdapter implements WorkerAdapter {
       const consume = (async (): Promise<void> => {
         while (true) {
           const next = await iterator!.next();
-          if (next.done || this.#timedOut || this.#terminalEmitted) return;
+          if (next.done || !turnOwnership.active || this.#timedOut || this.#terminalEmitted) return;
           this.#onMessage(next.value);
-          if (this.#timedOut || this.#terminalEmitted) {
+          if (!turnOwnership.active || this.#timedOut || this.#terminalEmitted) {
             stopConsumption();
             return;
           }
@@ -423,6 +424,7 @@ export class QwenCodeAdapter implements WorkerAdapter {
       }
       throw err;
     } finally {
+      turnOwnership.active = false;
       if (timeout) clearTimeout(timeout);
       this.#clearInterruptFallback();
       this.#query = null;
