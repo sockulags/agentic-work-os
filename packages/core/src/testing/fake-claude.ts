@@ -16,7 +16,7 @@
  */
 
 import { LineDecoder } from '../util/jsonl.js';
-import { writeFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 
 const args = new Set(process.argv.slice(2));
@@ -25,7 +25,11 @@ const exitMarkerIndex = process.argv.indexOf('--exit-marker');
 const exitMarker = exitMarkerIndex >= 0 ? process.argv[exitMarkerIndex + 1] : undefined;
 const exitReleaseIndex = process.argv.indexOf('--exit-release');
 const exitRelease = exitReleaseIndex >= 0 ? process.argv[exitReleaseIndex + 1] : undefined;
+const argsFileIndex = process.argv.indexOf('--args-file');
+const argsFile = argsFileIndex >= 0 ? process.argv[argsFileIndex + 1] : undefined;
 let exitScheduled = false;
+
+if (argsFile) appendFileSync(argsFile, `${JSON.stringify(process.argv.slice(2))}\n`);
 
 /** Exit after readiness while a detached helper holds stdout/stderr until the test releases
  * it. The parent therefore sees stdin's error before its child `close` on Windows/Linux. */

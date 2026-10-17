@@ -11,6 +11,7 @@
  */
 
 import { LineDecoder } from '../util/jsonl.js';
+import { appendFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 
 const args = new Set(process.argv.slice(2));
@@ -18,7 +19,14 @@ const exitMarkerIndex = process.argv.indexOf('--exit-marker');
 const exitMarker = exitMarkerIndex >= 0 ? process.argv[exitMarkerIndex + 1] : undefined;
 const exitReleaseIndex = process.argv.indexOf('--exit-release');
 const exitRelease = exitReleaseIndex >= 0 ? process.argv[exitReleaseIndex + 1] : undefined;
+const rpcFileIndex = process.argv.indexOf('--rpc-file');
+const rpcFile = rpcFileIndex >= 0 ? process.argv[rpcFileIndex + 1] : undefined;
 let exitScheduled = false;
+
+function recordRpc(message: { method?: string; params?: unknown }): void {
+  if (!rpcFile || !message.method) return;
+  appendFileSync(rpcFile, `${JSON.stringify({ method: message.method, params: message.params ?? null })}\n`);
+}
 
 /** Exit after the handshake while a detached helper holds stdout/stderr until the test
  * releases it. The parent therefore sees stdin's error before its child `close` on Windows/Linux. */
@@ -234,6 +242,8 @@ function main(): void {
       } catch {
         continue;
       }
+
+      recordRpc(msg);
 
       // A response to our approval request carries no method.
       if (msg.method === undefined && msg.id !== undefined) {
