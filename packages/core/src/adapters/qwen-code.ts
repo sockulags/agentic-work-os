@@ -346,7 +346,10 @@ export class QwenCodeAdapter implements WorkerAdapter {
         // A hard turn timeout does not wait for the SDK control channel or a stuck
         // iterator. The Qwen SDK owns its child process, so the abort/interrupt are
         // best-effort termination signals while the adapter stops consuming here.
-        stopConsumption();
+        // Register the exit observation before interrupt/abort can mark the child
+        // killed; waitForExit() otherwise takes its already-killed fast path.
+        if (queryInstance) this.#ensureQueryCleanup(queryInstance, iterator);
+        else stopConsumption();
         void this.#query?.interrupt().catch(() => undefined);
         this.#abortController?.abort();
         resolveDeadline?.();
@@ -458,7 +461,7 @@ export class QwenCodeAdapter implements WorkerAdapter {
       turnOwnership.active = false;
       if (timeout) clearTimeout(timeout);
       this.#clearInterruptFallback();
-      if (queryInstance) this.#ensureQueryCleanup(queryInstance, iterator);
+      const cleanup = queryInstance ? this.#ensureQueryCleanup(queryInstance, iterator) : null;
       if (this.#query === queryInstance) {
         this.#query = null;
         this.#iterator = null;
@@ -469,7 +472,11 @@ export class QwenCodeAdapter implements WorkerAdapter {
         this.#emitStatus('idle', null);
       } finally {
         this.#turnId = null;
-        release();
+        // sendTurn must settle independently of SDK shutdown. Keep the global
+        // inference slot until the child has actually exited, though, so another
+        // adapter cannot overlap the still-live Qwen process.
+        if (cleanup) void cleanup.then(release, release);
+        else release();
       }
     }
   }

@@ -86,6 +86,22 @@ function hangingQuery(messages: unknown[], onInterrupt: () => void = () => {}): 
   return iterator as unknown as Query;
 }
 
+function hangingQueryWithDeferredExit(onInterrupt: () => void = () => {}): { query: Query; releaseExit: () => void } {
+  let releaseExit!: () => void;
+  let killed = false;
+  const exit = new Promise<void>((resolve) => { releaseExit = resolve; });
+  const iterator = {
+    async *[Symbol.asyncIterator](): AsyncGenerator<unknown> {
+      await new Promise<void>(() => {});
+    },
+    getSessionId: () => 'qwen-session-1',
+    interrupt: async () => { killed = true; onInterrupt(); },
+    close: async () => {},
+    transport: { waitForExit: () => killed ? Promise.resolve() : exit },
+  };
+  return { query: iterator as unknown as Query, releaseExit };
+}
+
 function controlledQuery(message: unknown, sessionId: string): { query: Query; release: () => void } {
   let resolveNext: ((result: IteratorResult<unknown>) => void) | null = null;
   const iterator = {
@@ -348,6 +364,22 @@ describe('QwenCodeAdapter', () => {
     assert.match(terminal[0]?.kind === 'turn.completed' ? terminal[0].error ?? '' : '', /exceeded 10ms/);
   });
 
+  test('holds the global slot until a timed-out Qwen process exits', async () => {
+    resetQwenInferenceSlotForTests();
+    const firstContext = context([]);
+    firstContext.config.qwenTurnTimeoutMs = 10;
+    const firstQuery = hangingQueryWithDeferredExit();
+    const first = new QwenCodeAdapter(firstContext, target, { query: () => firstQuery.query });
+    const second = new QwenCodeAdapter(context([]), target, { query: () => fakeQuery([successResult()]) });
+
+    await assert.rejects(() => first.sendTurn('wait'), /Qwen Code turn exceeded 10ms/);
+    await assert.rejects(() => second.sendTurn('blocked'), /not queued/);
+
+    firstQuery.releaseExit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await second.sendTurn('allowed after exit');
+  });
+
   test('lets a result completion win when the SDK iterator hangs afterward', async () => {
     resetQwenInferenceSlotForTests();
     const events: AdapterEvent[] = [];
@@ -472,6 +504,7 @@ describe('QwenCodeAdapter', () => {
     const running = first.sendTurn('first');
     await assert.rejects(() => second.sendTurn('second'), /not queued/);
     await running;
+    await new Promise((resolve) => setTimeout(resolve, 0));
     await second.sendTurn('second');
   });
 
