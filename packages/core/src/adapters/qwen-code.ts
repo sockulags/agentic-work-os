@@ -647,14 +647,17 @@ export class QwenCodeAdapter implements WorkerAdapter {
       }
       if (message.is_error) {
         const detail = message.error?.message ?? `Qwen Code returned ${message.subtype}.`;
-        if (!this.#interrupted) {
+        if (this.#interrupted) {
+          this.#emitCompleted('interrupted', null);
+        } else {
           this.#turnError = message.subtype === 'error_max_turns' ? null : detail;
           this.#ctx.emit({ kind: 'error', severity: 'turn', message: detail, turnId: this.#turnId });
           this.#emitCompleted(message.subtype === 'error_max_turns' ? 'max_turns' : 'error', detail);
         }
         return;
       }
-      if (!this.#interrupted && !this.#timedOut) this.#emitCompleted('completed', null);
+      if (this.#interrupted) this.#emitCompleted('interrupted', null);
+      else if (!this.#timedOut) this.#emitCompleted('completed', null);
     }
   }
 

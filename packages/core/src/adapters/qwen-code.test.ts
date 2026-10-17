@@ -102,10 +102,14 @@ function hangingQueryWithDeferredExit(onInterrupt: () => void = () => {}): { que
   return { query: iterator as unknown as Query, releaseExit };
 }
 
-function controlledQuery(message: unknown, sessionId: string): { query: Query; release: () => void } {
+function controlledQuery(message: unknown, sessionId: string): { query: Query; release: () => void; reads: () => number } {
   let resolveNext: ((result: IteratorResult<unknown>) => void) | null = null;
+  let reads = 0;
   const iterator = {
-    next: () => new Promise<IteratorResult<unknown>>((resolve) => { resolveNext = resolve; }),
+    next: () => {
+      reads += 1;
+      return new Promise<IteratorResult<unknown>>((resolve) => { resolveNext = resolve; });
+    },
     return: async (): Promise<IteratorResult<unknown>> => ({ done: true, value: undefined }),
     [Symbol.asyncIterator]() { return this; },
   };
@@ -120,6 +124,7 @@ function controlledQuery(message: unknown, sessionId: string): { query: Query; r
       resolveNext?.({ done: false, value: message });
       resolveNext = null;
     },
+    reads: () => reads,
   };
 }
 
@@ -655,6 +660,30 @@ describe('QwenCodeAdapter', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await running;
     await second.sendTurn('allowed after exit');
+  });
+
+  test('settles an interrupted error result once and stops reading the iterator', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    const query = controlledQuery({
+      ...(successResult() as Record<string, unknown>),
+      is_error: true,
+      subtype: 'error',
+      error: { message: 'SDK failed after interrupt' },
+    }, 'qwen-session-1');
+    const adapter = new QwenCodeAdapter(context(events), target, { query: () => query.query });
+
+    const running = adapter.sendTurn('interrupt');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await adapter.interrupt();
+    query.release();
+    await running;
+
+    assert.equal(query.reads(), 1);
+    assert.equal(events.filter((event) => event.kind === 'error').length, 0);
+    const terminal = events.filter((event) => event.kind === 'turn.completed');
+    assert.equal(terminal.length, 1);
+    assert.equal(terminal[0]?.kind === 'turn.completed' ? terminal[0].reason : null, 'interrupted');
   });
 
   test('releases the global slot when event emission throws before query construction', async () => {
