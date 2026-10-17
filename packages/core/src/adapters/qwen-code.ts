@@ -75,6 +75,29 @@ interface PendingApproval {
   onAbort: () => void;
 }
 
+interface QwenQueryTransport {
+  waitForExit?: () => Promise<void>;
+}
+
+async function closeQwenQuery(queryInstance: Query, iterator: AsyncIterator<SDKMessage> | null): Promise<void> {
+  const returnMethod = iterator?.return;
+  if (returnMethod && iterator) {
+    try {
+      void Promise.resolve(returnMethod.call(iterator)).catch(() => undefined);
+    } catch {
+      // Query.close below still owns the child-process shutdown path.
+    }
+  }
+  try { await queryInstance.close(); } catch { /* shutdown is already fail-closed */ }
+
+  // The SDK's public close() requests child termination but does not wait for the
+  // process to release its cwd. Join that lifecycle when the current SDK exposes it.
+  const transport = (queryInstance as unknown as { transport?: QwenQueryTransport }).transport;
+  if (transport?.waitForExit) {
+    try { await transport.waitForExit.call(transport); } catch { /* shutdown is already fail-closed */ }
+  }
+}
+
 let qwenInferenceBusy = false;
 
 /** Testable global inference slot. Qwen's local runtime is intentionally single-slot. */
@@ -216,6 +239,7 @@ export class QwenCodeAdapter implements WorkerAdapter {
   #target: ModelTarget;
   #queryFactory: QwenQueryFactory;
   #query: Query | null = null;
+  readonly #queryCleanups = new Map<Query, Promise<void>>();
   #abortController: AbortController | null = null;
   #sessionId: string | null;
   #model: string | null = null;
@@ -264,8 +288,9 @@ export class QwenCodeAdapter implements WorkerAdapter {
     const queryInstance = this.#query;
     if (queryInstance) {
       this.#abortController?.abort();
-      try { await queryInstance.close(); } catch { /* shutdown is already fail-closed */ }
+      this.#ensureQueryCleanup(queryInstance, null);
     }
+    await Promise.all([...this.#queryCleanups.values()]);
     this.#query = null;
     this.#abortController = null;
     this.#busy = false;
@@ -278,6 +303,7 @@ export class QwenCodeAdapter implements WorkerAdapter {
     if (!release) throw new Error('Qwen Code is already running another inference; concurrent Qwen turns are not queued.');
     let timeout: NodeJS.Timeout | null = null;
     let iterator: AsyncIterator<SDKMessage> | null = null;
+    let queryInstance: Query | null = null;
     let resolveDeadline: (() => void) | null = null;
     const turnOwnership = { active: true };
     const stopConsumption = (): void => {
@@ -322,7 +348,7 @@ export class QwenCodeAdapter implements WorkerAdapter {
         resolveDeadline?.();
       }, qwenTimeout(this.#ctx.config));
 
-      const queryInstance = this.#queryFactory({
+      queryInstance = this.#queryFactory({
         prompt: text,
         options: {
           cwd: this.#ctx.cwd,
@@ -427,7 +453,8 @@ export class QwenCodeAdapter implements WorkerAdapter {
       turnOwnership.active = false;
       if (timeout) clearTimeout(timeout);
       this.#clearInterruptFallback();
-      this.#query = null;
+      if (queryInstance) this.#ensureQueryCleanup(queryInstance, iterator);
+      if (this.#query === queryInstance) this.#query = null;
       this.#abortController = null;
       this.#busy = false;
       try {
@@ -437,6 +464,17 @@ export class QwenCodeAdapter implements WorkerAdapter {
         release();
       }
     }
+  }
+
+  #ensureQueryCleanup(queryInstance: Query, iterator: AsyncIterator<SDKMessage> | null): Promise<void> {
+    const existing = this.#queryCleanups.get(queryInstance);
+    if (existing) return existing;
+    const cleanup = closeQwenQuery(queryInstance, iterator);
+    this.#queryCleanups.set(queryInstance, cleanup);
+    void cleanup.finally(() => {
+      if (this.#queryCleanups.get(queryInstance) === cleanup) this.#queryCleanups.delete(queryInstance);
+    });
+    return cleanup;
   }
 
   async interrupt(): Promise<void> {
