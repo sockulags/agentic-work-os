@@ -98,8 +98,20 @@ async function closeQwenQuery(queryInstance: Query, iterator: AsyncIterator<SDKM
       // Query.close below still owns the child-process shutdown path.
     }
   }
-  try { await queryInstance.close(); } catch { /* shutdown is already fail-closed */ }
-  if (exit) await exit;
+  // Query.close() is best-effort. Keep its rejection observed, but when the SDK
+  // exposes process exit, do not let a stuck close() hold the inference slot after
+  // the child has already exited.
+  let close: Promise<void>;
+  try {
+    close = Promise.resolve(queryInstance.close()).catch(() => undefined);
+  } catch {
+    close = Promise.resolve();
+  }
+  if (exit) {
+    await exit;
+    return;
+  }
+  await close;
 }
 
 let qwenInferenceBusy = false;

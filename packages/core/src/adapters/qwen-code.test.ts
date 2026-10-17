@@ -427,6 +427,33 @@ describe('QwenCodeAdapter', () => {
     assert.equal(stopped, true);
   });
 
+  test('releases the global slot on process exit even when query close hangs', async () => {
+    resetQwenInferenceSlotForTests();
+    const events: AdapterEvent[] = [];
+    let releaseExit!: () => void;
+    let releaseClose!: () => void;
+    const exit = new Promise<void>((resolve) => { releaseExit = resolve; });
+    const close = new Promise<void>((resolve) => { releaseClose = resolve; });
+    const first = new QwenCodeAdapter(context(events), target, {
+      query: () => ({
+        async *[Symbol.asyncIterator]() { yield successResult(); },
+        getSessionId: () => 'qwen-session-1',
+        interrupt: async () => {},
+        close: async () => close,
+        transport: { waitForExit: () => exit },
+      } as unknown as Query),
+    });
+    const second = new QwenCodeAdapter(context([]), target, { query: () => fakeQuery([successResult()]) });
+
+    await first.sendTurn('complete');
+    await assert.rejects(() => second.sendTurn('blocked'), /not queued/);
+
+    releaseExit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await second.sendTurn('allowed after exit');
+    releaseClose();
+  });
+
   test('active stop registers transport exit before closing a live query', async () => {
     resetQwenInferenceSlotForTests();
     const events: AdapterEvent[] = [];
