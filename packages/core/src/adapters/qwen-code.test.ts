@@ -195,6 +195,65 @@ describe('Qwen Code policy', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test('refreshes workspace verification policy between turns on one adapter', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'awos-qwen-policy-refresh-'));
+    const workspaceDir = join(root, '.awos');
+    const workspaceFile = join(workspaceDir, 'workspace.json');
+    const decisions: string[][] = [];
+    let turn = 0;
+    try {
+      mkdirSync(workspaceDir, { recursive: true });
+      writeFileSync(workspaceFile, JSON.stringify({
+        version: 3,
+        name: 'Refreshing Qwen workspace',
+        agents: ['qwen-local'],
+        verify: [{ name: 'old-verify', command: 'npm run old-verify' }],
+      }), 'utf8');
+
+      const adapter = new QwenCodeAdapter(
+        context([], 'bypassPermissions', null, root),
+        target,
+        {
+          query: (args) => {
+            const canUseTool = args.options.canUseTool;
+            if (!canUseTool) throw new Error('canUseTool missing');
+            turn += 1;
+            return {
+              async *[Symbol.asyncIterator]() {
+                const oldDecision = await canUseTool('run_shell_command', { command: 'npm run old-verify' }, {
+                  signal: new AbortController().signal,
+                });
+                const newDecision = await canUseTool('run_shell_command', { command: 'npm run new-verify' }, {
+                  signal: new AbortController().signal,
+                });
+                decisions.push([oldDecision.behavior, newDecision.behavior]);
+                yield successResult();
+              },
+              getSessionId: () => `qwen-session-${turn}`,
+              interrupt: async () => {},
+              close: async () => {},
+            } as unknown as Query;
+          },
+        },
+      );
+
+      await adapter.sendTurn('first turn');
+      // sendTurn settles before the SDK cleanup releases the process-global Qwen slot.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      writeFileSync(workspaceFile, JSON.stringify({
+        version: 3,
+        name: 'Refreshing Qwen workspace',
+        agents: ['qwen-local'],
+        verify: [{ name: 'new-verify', command: 'npm run new-verify' }],
+      }), 'utf8');
+      await adapter.sendTurn('second turn');
+
+      assert.deepEqual(decisions, [['allow', 'deny'], ['deny', 'allow']]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('QwenCodeAdapter', () => {
