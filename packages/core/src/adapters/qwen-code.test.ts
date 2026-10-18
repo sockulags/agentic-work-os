@@ -14,6 +14,7 @@ import {
   isQwenResumeNotFoundError,
   isAllowedQwenShellCommand,
   qwenPermissionPolicy,
+  probeQwenEndpoint,
   resetQwenInferenceSlotForTests,
 } from './qwen-code.js';
 
@@ -252,6 +253,69 @@ describe('Qwen Code policy', () => {
       assert.deepEqual(decisions, [['allow', 'deny'], ['deny', 'allow']]);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Qwen endpoint probe', () => {
+  test('sends a configured API key as a bearer token without exposing it in the detail', async () => {
+    const apiKey = 'probe-secret-192';
+    let request: RequestInit | undefined;
+    const result = await probeQwenEndpoint(
+      'http://127.0.0.1:1234/v1',
+      apiKey,
+      async (_input, init) => {
+        request = init;
+        return new Response(null, { status: 200 });
+      },
+    );
+
+    assert.equal(result.available, true);
+    assert.equal(new Headers(request?.headers).get('authorization'), `Bearer ${apiKey}`);
+    assert.doesNotMatch(result.detail, new RegExp(apiKey));
+  });
+
+  test('does not send the local placeholder as a bearer token', async () => {
+    let request: RequestInit | undefined;
+    await probeQwenEndpoint(
+      'http://127.0.0.1:1234/v1',
+      'local-placeholder',
+      async (_input, init) => {
+        request = init;
+        return new Response(null, { status: 200 });
+      },
+    );
+
+    assert.equal(new Headers(request?.headers).has('authorization'), false);
+  });
+
+  test('redacts a configured API key if the fetch error echoes it', async () => {
+    const apiKey = 'probe-secret-192';
+    const result = await probeQwenEndpoint(
+      'http://127.0.0.1:1234/v1',
+      apiKey,
+      async () => { throw new Error(`request failed for ${apiKey}`); },
+    );
+
+    assert.equal(result.available, false);
+    assert.equal(result.detail, 'request failed for ***');
+    assert.doesNotMatch(result.detail, new RegExp(apiKey));
+  });
+
+  test('diagnoses authentication failures separately from an unreachable endpoint', async () => {
+    const apiKey = 'probe-secret-192';
+    for (const status of [401, 403]) {
+      const result = await probeQwenEndpoint(
+        'http://127.0.0.1:1234/v1',
+        apiKey,
+        async () => new Response(null, { status }),
+      );
+
+      assert.equal(result.available, false);
+      assert.match(result.detail, /authentication/i);
+      assert.match(result.detail, new RegExp(String(status)));
+      assert.doesNotMatch(result.detail, new RegExp(apiKey));
+      assert.doesNotMatch(result.detail, /not reachable/i);
     }
   });
 });

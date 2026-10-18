@@ -739,16 +739,40 @@ export class QwenCodeAdapter implements WorkerAdapter {
   }
 }
 
-export async function probeQwenEndpoint(baseUrl: string, fetchImpl: typeof fetch = fetch): Promise<{ available: boolean; detail: string }> {
+const QWEN_API_KEY_PLACEHOLDER = 'local-placeholder';
+
+export function probeQwenEndpoint(baseUrl: string, fetchImpl?: typeof fetch): Promise<{ available: boolean; detail: string }>;
+export function probeQwenEndpoint(baseUrl: string, apiKey: string | undefined, fetchImpl?: typeof fetch): Promise<{ available: boolean; detail: string }>;
+export async function probeQwenEndpoint(
+  baseUrl: string,
+  apiKeyOrFetchImpl?: string | typeof fetch,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ available: boolean; detail: string }> {
+  const apiKey = typeof apiKeyOrFetchImpl === 'string' ? apiKeyOrFetchImpl : undefined;
+  const requestFetch = typeof apiKeyOrFetchImpl === 'function' ? apiKeyOrFetchImpl : fetchImpl;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 1_500);
   try {
-    const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/models`, { signal: controller.signal });
+    const headers: Record<string, string> = {};
+    if (apiKey && apiKey !== QWEN_API_KEY_PLACEHOLDER) headers.Authorization = `Bearer ${apiKey}`;
+    const response = await requestFetch(`${baseUrl.replace(/\/$/, '')}/models`, {
+      signal: controller.signal,
+      ...(Object.keys(headers).length === 0 ? {} : { headers }),
+    });
+    if (response.status === 401 || response.status === 403) {
+      return { available: false, detail: `Qwen endpoint authentication failed (HTTP ${response.status}).` };
+    }
     if (!response.ok) return { available: false, detail: `Qwen endpoint returned HTTP ${response.status}.` };
-    return { available: true, detail: `${baseUrl} is reachable.` };
+    return { available: true, detail: redactQwenProbeDetail(`${baseUrl} is reachable.`, apiKey) };
   } catch (error) {
-    return { available: false, detail: error instanceof Error ? error.message : 'Qwen endpoint is not reachable.' };
+    const detail = error instanceof Error ? error.message : 'Qwen endpoint is not reachable.';
+    return { available: false, detail: redactQwenProbeDetail(detail, apiKey) };
   } finally {
     clearTimeout(timer);
   }
+}
+
+function redactQwenProbeDetail(detail: string, apiKey: string | undefined): string {
+  if (!apiKey || apiKey === QWEN_API_KEY_PLACEHOLDER) return detail;
+  return detail.split(apiKey).join('***');
 }
