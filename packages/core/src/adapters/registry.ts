@@ -103,7 +103,7 @@ export const WORKER_PROFILE_REGISTRY: readonly WorkerProfileDefinition[] = [
   {
     id: 'qwen-local', agent: 'qwen-local', label: 'Qwen Code · Qwen3.8 local', adapterId: 'qwen-code-sdk', targetId: 'qwen38-local',
     policy: { permissionModes: PERMISSION_MODES, nativeTurnDiff: false },
-    probe: async (_config, target) => probeQwenEndpoint(target.endpoint ?? 'http://127.0.0.1:1234/v1'),
+    probe: async (config, target) => probeQwenEndpoint(target.endpoint ?? 'http://127.0.0.1:1234/v1', config.qwenApiKey),
   },
 ] as const;
 
