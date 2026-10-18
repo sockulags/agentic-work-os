@@ -272,7 +272,6 @@ export class QwenCodeAdapter implements WorkerAdapter {
   #lastMessageKind: string | null = null;
   #resumeNotFound: QwenResumeNotFoundError | null = null;
   #sawModelOrToolContent = false;
-  #verifyCommands: string[];
   #interruptFallback: NodeJS.Timeout | null = null;
   readonly #partialItemIds = new Map<number, string>();
   readonly #startedToolIds = new Set<string>();
@@ -283,13 +282,6 @@ export class QwenCodeAdapter implements WorkerAdapter {
     this.#target = target;
     this.#sessionId = ctx.resumeSessionId;
     this.#queryFactory = deps.query ?? ((args) => query(args));
-    const workspace = resolveWorkspace(ctx.cwd, {
-      laneSetup: ctx.config.laneSetup,
-      expectationItemIds: CORE_EXPECTATION_ITEM_IDS,
-      evaluatorProfileIds: CORE_EVALUATOR_PROFILE_IDS,
-      workerProfileIds: ctx.workerProfileIds,
-    });
-    this.#verifyCommands = workspace.status === 'ok' ? workspace.workspace.verify.map((entry) => entry.command) : [];
   }
 
   get nativeSessionId(): string | null { return this.#sessionId; }
@@ -534,7 +526,14 @@ export class QwenCodeAdapter implements WorkerAdapter {
   }
 
   #canUseTool: CanUseTool = async (toolName, input, { signal }) => {
-    const policy = qwenPermissionPolicy(toolName, input, this.#ctx.permissionMode, this.#verifyCommands);
+    const workspace = resolveWorkspace(this.#ctx.cwd, {
+      laneSetup: this.#ctx.config.laneSetup,
+      expectationItemIds: CORE_EXPECTATION_ITEM_IDS,
+      evaluatorProfileIds: CORE_EVALUATOR_PROFILE_IDS,
+      workerProfileIds: this.#ctx.workerProfileIds,
+    });
+    const verifyCommands = workspace.status === 'ok' ? workspace.workspace.verify.map((entry) => entry.command) : [];
+    const policy = qwenPermissionPolicy(toolName, input, this.#ctx.permissionMode, verifyCommands);
     if (policy === 'allow') return { behavior: 'allow', updatedInput: input };
     if (policy === 'deny') return { behavior: 'deny', message: 'Tool denied by the Agentic Work OS policy.' };
     if (signal.aborted || this.#interrupted || this.#timedOut) {
